@@ -107,6 +107,7 @@ export interface Repo {
   remote_url: string;
   default_setup_script: string | null;
   setup_timeout_secs: number | null;
+  copy_files: string[];
 }
 
 export type RegistryStatus =

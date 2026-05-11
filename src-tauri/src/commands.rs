@@ -202,7 +202,14 @@ async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLink> 
     )
     .await?;
 
-    copy_env_from_clone(&clone_path, ctx.worktree_path, ctx.tx, &ctx.repo.key).await?;
+    copy_configured_files(
+        &clone_path,
+        ctx.worktree_path,
+        &ctx.repo.copy_files,
+        ctx.tx,
+        &ctx.repo.key,
+    )
+    .await?;
 
     let mut link = RepoLink {
         repo_key: ctx.repo.key.clone(),
@@ -243,31 +250,50 @@ async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLink> 
     Ok(link)
 }
 
-/// Copy `<clone_path>/.env` into the new worktree if it exists. `.env` is
-/// gitignored in most repos, so `git worktree add` won't carry it over —
-/// but setup scripts and dev servers usually need it. Missing source is a
-/// silent no-op; an existing `.env` in the worktree is left alone.
-async fn copy_env_from_clone(
+/// Copy each entry in `copy_files` from the base clone into the new worktree.
+/// These are typically gitignored files (`.env`, etc.) that `git worktree add`
+/// won't carry over but setup scripts and dev servers need. Missing sources
+/// are silently skipped; an existing file at the destination is left alone.
+/// Paths must be relative and free of `..` segments — anything else is
+/// rejected to keep the copy contained inside `clone_path` / `worktree_path`.
+async fn copy_configured_files(
     clone_path: &Path,
     worktree_path: &Path,
+    copy_files: &[String],
     tx: &JobTx,
     repo_key: &str,
 ) -> AppResult<()> {
-    let src = clone_path.join(".env");
-    match tokio::fs::symlink_metadata(&src).await {
-        Ok(meta) if meta.is_file() => {}
-        Ok(_) => return Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(AppError::Io(e)),
-    }
+    for rel in copy_files {
+        let rel_path = Path::new(rel);
+        if rel_path.is_absolute()
+            || rel_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(AppError::Other(format!(
+                "copy_files entry '{rel}' must be a relative path without '..' segments",
+            )));
+        }
 
-    let dst = worktree_path.join(".env");
-    if tokio::fs::try_exists(&dst).await? {
-        return Ok(());
-    }
+        let src = clone_path.join(rel_path);
+        match tokio::fs::symlink_metadata(&src).await {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(AppError::Io(e)),
+        }
 
-    tokio::fs::copy(&src, &dst).await?;
-    tx.status("copied .env from clone", Some(repo_key));
+        let dst = worktree_path.join(rel_path);
+        if tokio::fs::try_exists(&dst).await? {
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        tokio::fs::copy(&src, &dst).await?;
+        tx.status(format!("copied {rel} from clone"), Some(repo_key));
+    }
     Ok(())
 }
 

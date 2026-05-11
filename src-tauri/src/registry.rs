@@ -47,6 +47,14 @@ pub struct Repo {
     #[serde(default)]
     pub setup_timeout_secs: Option<u64>,
 
+    /// Files to copy from the base clone into each new worktree right after
+    /// `git worktree add`. Paths are relative to the clone root (e.g. `.env`,
+    /// `apps/web/.env.local`). Missing sources are silently skipped; an
+    /// existing file at the destination is left alone. Absolute paths and
+    /// `..` segments are rejected.
+    #[serde(default)]
+    pub copy_files: Vec<String>,
+
     /// Populated at registry load time by parsing `remote_url`. `None` means
     /// the remote isn't on github.com and GitHub sync should skip this repo.
     #[serde(skip, default)]
@@ -221,5 +229,6 @@ worktree_root = "CHANGE_ME_TO_AN_ABSOLUTE_PATH"
 # remote_url = "git@github.com:me/frontend.git"
 # default_setup_script = "pnpm install"
 # setup_timeout_secs = 600
+# copy_files = [".env", "apps/web/.env.local"]
 "##
 }
