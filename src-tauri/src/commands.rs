@@ -224,18 +224,6 @@ async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLink> 
         .as_ref()
         .filter(|s| !s.trim().is_empty())
     {
-        // Pre-warm node_modules from the base clone via APFS clonefile so the
-        // setup script (yarn/pnpm/npm install) only has to reconcile drift
-        // instead of installing the whole tree from scratch. The setup_warmer
-        // background task keeps the base clone's node_modules current.
-        setup::warm_node_modules_from_clone(
-            &clone_path,
-            ctx.worktree_path,
-            ctx.tx,
-            &ctx.repo.key,
-        )
-        .await;
-
         setup::run_setup_script(
             script,
             ctx.worktree_path,

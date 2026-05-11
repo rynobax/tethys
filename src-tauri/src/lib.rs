@@ -15,7 +15,6 @@ mod reconcile;
 mod registry;
 mod sessions;
 mod setup;
-mod setup_warmer;
 mod shell;
 mod state;
 mod store;
@@ -35,7 +34,6 @@ use crate::paths::Paths;
 use crate::purge::Purger;
 use crate::registry::RegistryLoad;
 use crate::sessions::SessionSupervisor;
-use crate::setup_warmer::SetupWarmer;
 use crate::store::Store;
 use crate::tmux::TmuxBin;
 
@@ -184,13 +182,6 @@ pub fn run() {
             ));
             app.manage(purger.clone());
             tauri::async_runtime::spawn(purger.clone().run());
-
-            // --- setup warmer (3-hourly: keeps base-clone node_modules
-            // warm so each new worktree only has to reconcile drift) ------
-            let registry_for_warmer: Arc<RegistryLoad> =
-                app.state::<Arc<RegistryLoad>>().inner().clone();
-            let warmer = Arc::new(SetupWarmer::new(paths.clone(), registry_for_warmer));
-            tauri::async_runtime::spawn(warmer.run());
 
             app.manage(paths);
             app.manage(inprogress::InProgressWorkspaces::new());
