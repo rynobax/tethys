@@ -666,16 +666,6 @@ impl SessionSupervisor {
                 .writer
                 .clone()
         };
-        // Trace small writes so we can diagnose stray bytes (e.g. the
-        // mystery newline-on-first-resume). Normal keystrokes are also
-        // small; noisy in logs but useful while we iterate.
-        if data.len() <= 16 {
-            debug!(
-                session_id,
-                bytes = %format_bytes(data),
-                "send_input"
-            );
-        }
         writer
             .lock()
             .unwrap()
@@ -739,23 +729,6 @@ fn parent_session_from_subagent_path(transcript_path: &str) -> Option<String> {
         return None;
     }
     Some(subagents_dir.parent()?.file_name()?.to_str()?.to_string())
-}
-
-/// Hex + ASCII formatter for tracing bytes sent to the PTY. Control
-/// codes show as `\xNN`; printable bytes show as themselves.
-fn format_bytes(data: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(data.len() * 4);
-    out.push('"');
-    for &b in data {
-        if (0x20..0x7f).contains(&b) && b != b'\\' && b != b'"' {
-            out.push(b as char);
-        } else {
-            let _ = write!(out, "\\x{b:02x}");
-        }
-    }
-    out.push('"');
-    out
 }
 
 fn spawn_reader_thread(
