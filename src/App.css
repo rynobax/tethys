@@ -44,7 +44,7 @@ html,
 
 .app {
   display: grid;
-  grid-template-columns: 170px 1fr;
+  grid-template-columns: 186px 1fr;
   height: 100vh;
 }
 
@@ -820,6 +820,107 @@ button.danger.primary:hover:not(:disabled) {
   margin-left: auto;
 }
 
+/* Inline error next to the dev-server action buttons in the header. */
+.dev-error-inline {
+  color: #e07b6e;
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+/* Per-workspace RAM chip — sub-row beneath the workspace's repo list,
+   not an inline pill. Only renders when dev servers are running. */
+.workspace-mem-chip {
+  display: block;
+  margin-top: 4px;
+  padding-left: 8px;
+  font-size: 11px;
+  color: var(--text-muted, #888);
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+}
+
+/* Sidebar memory row — reuses `.system-status-button` for font + padding
+   but the dot has to stay round when the row's text wraps to two lines.
+   Default flex behavior + `align-items: center` on the parent should
+   preserve the 7×7 dot, but the inline-block dot gets stretched on some
+   wrapped-row paths. Pinning flex-shrink + align-self avoids it. */
+.system-status-button.memory-row {
+  align-items: flex-start;
+  white-space: normal;
+}
+.system-status-button.memory-row .status-dot {
+  flex: 0 0 7px;
+  align-self: center;
+  margin-top: 2px;
+}
+.memory-row-text {
+  line-height: 1.3;
+  /* Allow the text to shrink/wrap inside the constrained button width. */
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.dev-pressure-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--surface-2, #222);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.dev-pressure-fill {
+  height: 100%;
+  background: var(--accent-green, #5cdd8b);
+  transition: width 250ms ease, background 250ms ease;
+}
+.dev-pressure--warning .dev-pressure-fill {
+  background: #d6a64a;
+}
+.dev-pressure--critical .dev-pressure-fill {
+  background: #d65a4a;
+}
+.dev-pressure-label {
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  color: var(--text-muted, #888);
+}
+.dev-error {
+  color: #e07b6e;
+  padding: 4px 8px;
+  background: #2a1818;
+  border-radius: 3px;
+}
+.dev-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.dev-modal {
+  background: var(--surface-1, #1a1a1a);
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  padding: 18px 22px;
+  max-width: 420px;
+}
+.dev-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+.dev-modal-actions button {
+  padding: 6px 14px;
+}
+
+/* Distinguish dev-server chips from Claude session chips visually. */
+.session-chip.dev-server {
+  border-left: 2px solid var(--accent-blue, #3a6ea5);
+}
+.session-chip.dev-server code {
+  font-weight: 600;
+  font-family: inherit;
+}
+
 .session-pane {
   display: flex;
   flex-direction: column;
@@ -955,6 +1056,34 @@ button.danger.primary:hover:not(:disabled) {
 .session-chip .chip-x:hover {
   opacity: 1;
   background: var(--danger-bg, rgba(255, 80, 80, 0.18));
+}
+
+/* Drag state: the dnd-kit overlay uses transform; we also drop the
+   opacity so the original position visually steps back. */
+.session-chip.is-dragging {
+  cursor: grabbing;
+}
+
+/* Slight visual tag when a chip has a user-set display name so it's
+   discoverable that the override exists (tooltip shows the default
+   id). */
+.session-chip.renamed code {
+  font-style: italic;
+}
+
+/* Right-click rename: replaces the <code> label with an <input>. Keep
+   the geometry close to the default label so the chip doesn't jump. */
+.chip-rename-input {
+  font: inherit;
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  background: var(--surface-2, #1d1d1d);
+  color: inherit;
+  border: 1px solid var(--accent-blue, #3a6ea5);
+  border-radius: 3px;
+  padding: 0 4px;
+  min-width: 60px;
+  max-width: 140px;
+  outline: none;
 }
 
 .session-chip.hidden {
@@ -1372,6 +1501,12 @@ li.is-dragging {
   border-radius: 0;
   padding: 8px 14px;
   text-align: left;
+  /* Pin to the footer column width so the hover background can't
+     overflow past the sidebar's right edge when the row's content
+     is wider than the column (e.g., the multi-line RAM row). */
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
   font-size: 11px;
   color: var(--muted);
   cursor: pointer;

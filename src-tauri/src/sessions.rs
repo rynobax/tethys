@@ -408,6 +408,62 @@ impl SessionSupervisor {
         Ok((info, token))
     }
 
+    /// Spawn a non-Claude dev-server inside a fresh tmux session.
+    /// Mirrors `spawn_claude` but runs `/bin/zsh -ilc <shell_command>`
+    /// as the tmux child process (login + interactive shell so direnv /
+    /// yarn / docker resolve), and lets the caller inject per-session
+    /// env vars (e.g. `NL_PROXY_TARGET=http://localhost:8001`).
+    ///
+    /// `session_id` is caller-provided + deterministic
+    /// (`tethys-fe-<workspace_id>` / `tethys-be-<workspace_id>`), so the
+    /// session can be looked up / killed / reattached without an
+    /// external id table.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_dev_server(
+        &self,
+        session_id: SessionId,
+        workspace_id: String,
+        repo_key: Option<String>,
+        cwd: &Path,
+        tmux_bin: &Path,
+        shell_command: &str,
+        env: &[(String, String)],
+    ) -> AppResult<SessionInfo> {
+        let mut args: Vec<String> = vec!["-L".into(), tmux::SOCKET_LABEL.into()];
+        args.extend(tmux::server_init_args());
+        args.extend([
+            "new-session".into(),
+            "-A".into(), // attach if a session with this name somehow exists
+            "-D".into(), // ...and detach any other clients on that session
+            "-s".into(),
+            session_id.clone(),
+            "-x".into(),
+            "200".into(),
+            "-y".into(),
+            "50".into(),
+        ]);
+        for (k, v) in env {
+            args.push("-e".into());
+            args.push(format!("{k}={v}"));
+        }
+        args.extend([
+            "--".into(),
+            "/bin/zsh".into(),
+            "-ilc".into(),
+            shell_command.to_string(),
+        ]);
+        self.spawn_with_id(SpawnRequest {
+            id: session_id,
+            workspace_id,
+            repo_key,
+            cwd,
+            program: tmux_bin,
+            args: &args,
+            tmux_bin: tmux_bin.to_path_buf(),
+            seed_bytes: &[],
+        })
+    }
+
     /// Attach a fresh tmux client to an existing session. Used when the
     /// app restarts and finds the tmux session still alive — claude keeps
     /// running in the tmux server, we just reconnect a new PTY to it.

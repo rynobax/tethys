@@ -46,8 +46,13 @@ export interface RepoLink {
   github: GithubPrStatus | null;
 }
 
+export type SessionKind = "claude" | "frontend_build" | "backend_build";
+
 export interface ClaudeSessionMeta {
   id: SessionId;
+  /** What process this session was spawned for. Defaults to "claude" on
+   *  pre-existing state entries from before the field was added. */
+  kind?: SessionKind;
   /** `null` => session is rooted at the workspace dir (parent of all repo worktrees). */
   repo_key: string | null;
   cwd: string;
@@ -56,7 +61,26 @@ export interface ClaudeSessionMeta {
   /** Cosmetic: when true the session is filtered out of the chip bar
    *  unless the user toggles "show hidden". The tmux session keeps running. */
   hidden: boolean;
+  /** User-set chip label override. `null`/missing falls back to the
+   *  default (first 8 chars of `id`). Set via the chip's right-click
+   *  Rename menu. */
+  display_name?: string | null;
 }
+
+export interface DevServersMeta {
+  fe_port: number;
+  /** `null` when only the FE is running (FE-only mode — branch had no
+   *  backend changes, or user explicitly skipped). */
+  be_port: number | null;
+  fe_session_id: string | null;
+  be_session_id: string | null;
+  /** What `NL_PROXY_TARGET` (or equivalent) was set to when the FE
+   *  spawned. Lets the UI show "FE → master" vs "FE → this worktree". */
+  fe_proxy_target: string;
+  started_at: string;
+}
+
+export type BeMode = "auto" | "force_include" | "force_exclude";
 
 export type WorkspaceStatus =
   | { kind: "ready" }
@@ -82,6 +106,15 @@ export interface Workspace {
    *  and a JobLogPane in the detail; `creation_failed` rows render the
    *  failed log so the user can read the error before dismissing. */
   status: WorkspaceStatus;
+  /** User-pinned chip order. `null`/missing falls back to the default
+   *  newest-first display. Any session id in `sessions` but not in
+   *  this list is appended on render in its existing order, so new
+   *  sessions don't have to be retroactively inserted. */
+  session_order?: string[] | null;
+  /** Set when dev servers are running for this workspace. Persisted so the
+   *  UI strip survives Tethys restarts (memory poller reconciles against
+   *  actual container/process state on its next tick). */
+  dev_servers: DevServersMeta | null;
 }
 
 export interface SystemErrorEntry {
@@ -162,6 +195,40 @@ export interface GithubStatusChangedEvent {
   repo_key: string;
   /** null when the PR no longer exists (branch unpushed or deleted). */
   status: GithubPrStatus | null;
+}
+
+export type MemoryPressure = "normal" | "warning" | "critical" | "unknown";
+
+export interface SystemMemory {
+  level: MemoryPressure;
+  free_pct: number;
+  free_mib: number;
+  /** Total physical memory in MiB. Constant across ticks. */
+  total_mib: number;
+}
+
+export interface WorkspaceMemory {
+  workspace_id: string;
+  fe_mib: number;
+  be_mib: number;
+}
+
+export interface MemorySnapshot {
+  system: SystemMemory;
+  per_workspace: WorkspaceMemory[];
+}
+
+export interface ServiceLiveState {
+  session_id: string | null;
+  running: boolean;
+  port: number | null;
+}
+
+export interface DevStateSnapshot {
+  workspace_id: WorkspaceId;
+  fe: ServiceLiveState | null;
+  be: ServiceLiveState | null;
+  fe_proxy_target: string | null;
 }
 
 export type GithubAuthState =
