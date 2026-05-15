@@ -280,11 +280,15 @@ function App() {
     list: navigableWorkspaces,
     selectedId,
     needsTurn: workspaceNeedsTurn,
+    workspaces,
+    clearTurn: handleClearTurn,
   });
   navRef.current = {
     list: navigableWorkspaces,
     selectedId,
     needsTurn: workspaceNeedsTurn,
+    workspaces,
+    clearTurn: handleClearTurn,
   };
 
   useEffect(() => {
@@ -324,14 +328,26 @@ function App() {
     };
 
     const handler = (e: KeyboardEvent) => {
-      // Cmd+Alt(+Shift) + J/K. `e.code` ignores Option's character
-      // remapping on macOS (Alt+J → ˝), so the binding survives layout.
+      // Cmd+Alt(+Shift) + J/K to navigate; Cmd+Alt+. to clear the
+      // current workspace's "your turn" dot. `e.code` ignores Option's
+      // character remapping on macOS (Alt+J → ˝), so bindings survive layout.
       if (!e.metaKey || !e.altKey || e.ctrlKey) return;
-      if (e.code !== "KeyJ" && e.code !== "KeyK") return;
-      const direction: 1 | -1 = e.code === "KeyK" ? 1 : -1;
-      e.preventDefault();
-      e.stopPropagation();
-      step(direction, e.shiftKey);
+      if (e.code === "KeyJ" || e.code === "KeyK") {
+        const direction: 1 | -1 = e.code === "KeyK" ? 1 : -1;
+        e.preventDefault();
+        e.stopPropagation();
+        step(direction, e.shiftKey);
+        return;
+      }
+      if (e.code === "Period") {
+        const { selectedId: cur, workspaces, clearTurn } = navRef.current;
+        if (!cur) return;
+        const ws = workspaces.find((w) => w.id === cur);
+        if (!ws) return;
+        e.preventDefault();
+        e.stopPropagation();
+        clearTurn(ws);
+      }
     };
     window.addEventListener("keydown", handler, { capture: true });
     return () =>
