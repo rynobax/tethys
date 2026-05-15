@@ -93,6 +93,20 @@ export interface SystemErrorEntry {
   workspace_branch: string | null;
 }
 
+export type PermissionCategory = "allow" | "deny" | "ask";
+
+export interface PendingPermission {
+  id: string;
+  workspace_id: string;
+  workspace_branch: string;
+  workspace_repo_keys: string[];
+  captured_at: string;
+  category: PermissionCategory;
+  raw_entry: string;
+  suggested_repo_key: string | null;
+  stripped_entry: string | null;
+}
+
 export interface CreateWorkspaceArgs {
   /** Frontend-minted UUID. Used so the backend can insert the workspace
    *  draft into state immediately and the sidebar row holds its position. */

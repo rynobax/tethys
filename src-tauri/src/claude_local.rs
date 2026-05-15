@@ -4,10 +4,12 @@
 //! workspace propagate to all of them.
 //!
 //! For sessions started at the workspace *root* (parent of every repo's
-//! worktree subdir), we additionally synthesize a generated
-//! `<workspace-root>/.claude/settings.local.json` that union-merges each
-//! repo's permission lists. This file is overwritten on every workspace
-//! mutation — manual edits at the root level do not survive.
+//! worktree subdir), we seed a `<workspace-root>/.claude/settings.local.json`
+//! at workspace-create time by union-merging each repo's permission lists.
+//! After that initial seed, the file belongs to the workspace — Claude (or
+//! you) may freely edit it. Tethys touches it again only to extend it with
+//! a newly-added repo's entries, and on purge to diff its contents against
+//! the per-repo files (so workspace-local grants can be merged back).
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -21,6 +23,12 @@ use crate::job::JobTx;
 use crate::paths::Paths;
 
 const EMPTY_SETTINGS: &str = "{}\n";
+
+/// Marker we write into the workspace-root settings.local.json so it's
+/// identifiable as Tethys-seeded. Unlike before, the file is *not*
+/// regenerated after seed — manual edits (and Claude's permission grants)
+/// are preserved.
+const SEEDED_MARKER: &str = "tethys (seeded on workspace create; safe to edit)";
 
 /// Ensure `<worktree>/.claude/settings.local.json` is a symlink to
 /// `shared_path`, creating the shared file (with `{}`) if it's the first
@@ -71,13 +79,15 @@ pub async fn install_symlink(
     Ok(())
 }
 
-/// Generate `<workspace_root>/.claude/settings.local.json` by union-merging
+/// Seed `<workspace_root>/.claude/settings.local.json` by union-merging
 /// `permissions.allow` / `deny` / `ask` from each repo's shared
 /// `settings.local.json`. File-glob entries that start with `./` are
 /// rewritten to be relative to the workspace root (prefixed with the repo
 /// key, which is also the worktree subdir name).
 ///
-/// Always overwrites — the workspace root file is generated, not authored.
+/// Called once at workspace create. After that, the file is owned by the
+/// workspace (Claude may write to it, the user may edit it) and Tethys only
+/// extends it via [`append_repo_to_workspace_root_settings`].
 /// Missing or unparseable per-repo files are skipped with a warning.
 pub async fn write_workspace_root_settings(
     workspace_root: &Path,
@@ -162,10 +172,7 @@ pub async fn write_workspace_root_settings(
     }
 
     let mut root = Map::new();
-    root.insert(
-        "_generatedBy".into(),
-        Value::String("tethys (regenerated on every workspace change)".into()),
-    );
+    root.insert("_seededBy".into(), Value::String(SEEDED_MARKER.into()));
     if !permissions.is_empty() {
         root.insert("permissions".into(), Value::Object(permissions));
     }
@@ -180,12 +187,129 @@ pub async fn write_workspace_root_settings(
     Ok(())
 }
 
+/// Extend an already-seeded `<workspace_root>/.claude/settings.local.json`
+/// with the permission entries of a newly-added repo. Reads the existing
+/// file, unions in the new repo's `allow` / `deny` / `ask` entries
+/// (deduplicated against what's already there), and writes it back.
+/// Any other keys / fields the user added to the file are preserved.
+pub async fn append_repo_to_workspace_root_settings(
+    workspace_root: &Path,
+    repo_key: &str,
+    paths: &Paths,
+) -> AppResult<()> {
+    if !fs::try_exists(workspace_root).await? {
+        return Ok(());
+    }
+    let claude_dir = workspace_root.join(".claude");
+    fs::create_dir_all(&claude_dir).await?;
+    let file_path = claude_dir.join("settings.local.json");
+
+    let mut root = read_root_object(&file_path).await?;
+
+    let repo_settings_path = paths.repo_shared_claude_local(repo_key);
+    let repo_perms = match fs::read_to_string(&repo_settings_path).await {
+        Ok(s) => match serde_json::from_str::<Value>(&s) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    path = %repo_settings_path.display(),
+                    "repo shared settings.local.json is not valid JSON"
+                );
+                Value::Null
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
+        Err(e) => return Err(AppError::Io(e)),
+    };
+
+    if let Some(perms_obj) = repo_perms.get("permissions").and_then(|v| v.as_object()) {
+        for field in ["allow", "deny", "ask"] {
+            let Some(arr) = perms_obj.get(field).and_then(|v| v.as_array()) else {
+                continue;
+            };
+            let items: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            if items.is_empty() {
+                continue;
+            }
+            merge_permission_field(&mut root, field, &items, repo_key);
+        }
+    }
+
+    root.insert("_seededBy".into(), Value::String(SEEDED_MARKER.into()));
+    root.remove("_generatedBy");
+
+    let mut content = serde_json::to_string_pretty(&Value::Object(root))
+        .map_err(|e| AppError::Other(format!("serializing settings.local.json: {e}")))?;
+    content.push('\n');
+    fs::write(&file_path, content).await?;
+    Ok(())
+}
+
+async fn read_root_object(path: &Path) -> AppResult<Map<String, Value>> {
+    match fs::read_to_string(path).await {
+        Ok(s) => match serde_json::from_str::<Value>(&s) {
+            Ok(Value::Object(m)) => Ok(m),
+            Ok(_) | Err(_) => {
+                warn!(
+                    path = %path.display(),
+                    "existing settings.local.json was unparseable or not an object — replacing"
+                );
+                Ok(Map::new())
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Map::new()),
+        Err(e) => Err(AppError::Io(e)),
+    }
+}
+
+fn merge_permission_field(
+    root: &mut Map<String, Value>,
+    field: &str,
+    items: &[String],
+    repo_key: &str,
+) {
+    let permissions_entry = root
+        .entry("permissions".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !permissions_entry.is_object() {
+        *permissions_entry = Value::Object(Map::new());
+    }
+    let Value::Object(permissions_map) = permissions_entry else {
+        return;
+    };
+
+    let field_entry = permissions_map
+        .entry(field.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !field_entry.is_array() {
+        *field_entry = Value::Array(Vec::new());
+    }
+    let Value::Array(arr) = field_entry else {
+        return;
+    };
+
+    let mut seen: BTreeSet<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    for item in items {
+        let rewritten = rewrite_relative_path(item, repo_key);
+        if seen.insert(rewritten.clone()) {
+            arr.push(Value::String(rewritten));
+        }
+    }
+}
+
 /// Rewrite a permission entry's path to be relative to the workspace root
 /// instead of the repo worktree. Only touches entries whose argument starts
 /// with `./` (e.g. `Read(./src/**)` → `Read(./<repo_key>/src/**)`); leaves
 /// `Bash(...)`, `WebFetch(domain:...)`, absolute paths, `~/...`, and
 /// argument-less entries (`mcp__...`, `Skill(...)`) untouched.
-fn rewrite_relative_path(entry: &str, repo_key: &str) -> String {
+pub(crate) fn rewrite_relative_path(entry: &str, repo_key: &str) -> String {
     let Some(open) = entry.find('(') else {
         return entry.to_string();
     };
@@ -302,7 +426,7 @@ mod tests {
         let deny = parsed["permissions"]["deny"].as_array().unwrap();
         assert_eq!(deny.len(), 1);
         assert_eq!(deny[0].as_str(), Some("Bash(rm:*)"));
-        assert!(!parsed["_generatedBy"].as_str().unwrap_or("").is_empty());
+        assert!(!parsed["_seededBy"].as_str().unwrap_or("").is_empty());
     }
 
     #[tokio::test]

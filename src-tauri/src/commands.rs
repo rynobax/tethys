@@ -599,7 +599,13 @@ pub async fn add_repo_to_workspace(
                 })
                 .await?;
 
-            regen_workspace_root_settings(&updated, &paths, &tx).await;
+            append_repo_to_workspace_root_settings(
+                &updated,
+                &args.repo_key,
+                &paths,
+                &tx,
+            )
+            .await;
 
             info!(
                 id = %args.workspace_id,
@@ -806,6 +812,47 @@ pub async fn dismiss_system_error(
         })
         .await?;
     let _ = app.emit("system_status:changed", &());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn list_pending_permissions(
+    paths: State<'_, Paths>,
+) -> AppResult<Vec<crate::pending_permissions::PendingPermission>> {
+    let file = crate::pending_permissions::load_file(&paths.pending_permissions_file()).await?;
+    Ok(file.entries)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApplyPendingArgs {
+    pub id: String,
+    pub target_repo_keys: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn apply_pending_permission(
+    app: AppHandle,
+    paths: State<'_, Paths>,
+    args: ApplyPendingArgs,
+) -> AppResult<()> {
+    if args.target_repo_keys.is_empty() {
+        return Err(AppError::Other(
+            "apply_pending_permission: target_repo_keys is empty".into(),
+        ));
+    }
+    crate::pending_permissions::apply_pending(&paths, &args.id, &args.target_repo_keys).await?;
+    let _ = app.emit("pending_permissions:changed", &());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn dismiss_pending_permission(
+    app: AppHandle,
+    paths: State<'_, Paths>,
+    id: String,
+) -> AppResult<()> {
+    crate::pending_permissions::dismiss_pending(&paths, &id).await?;
+    let _ = app.emit("pending_permissions:changed", &());
     Ok(())
 }
 
@@ -1235,8 +1282,9 @@ JSON.stringify(paths);"#;
     Ok(serde_json::from_str(stdout.trim())?)
 }
 
-/// Regenerate `<workspace_root>/.claude/settings.local.json` from the
-/// current set of repo links. Best-effort: failures are surfaced as a
+/// Seed `<workspace_root>/.claude/settings.local.json` from the workspace's
+/// current set of repo links. Called once at workspace create; the file is
+/// not regenerated thereafter. Best-effort: failures are surfaced as a
 /// status event but never fail the parent command.
 async fn regen_workspace_root_settings(workspace: &Workspace, paths: &Paths, tx: &JobTx) {
     let Some(workspace_root) = workspace
@@ -1257,10 +1305,45 @@ async fn regen_workspace_root_settings(workspace: &Workspace, paths: &Paths, tx:
         warn!(
             workspace = %workspace.id,
             error = %e,
-            "failed to regenerate workspace-root settings.local.json"
+            "failed to seed workspace-root settings.local.json"
         );
         tx.status(
-            format!("workspace-root settings regen failed: {e}"),
+            format!("workspace-root settings seed failed: {e}"),
+            None,
+        );
+    }
+}
+
+/// Extend an existing workspace-root settings.local.json with the entries
+/// of a newly-added repo. Best-effort.
+async fn append_repo_to_workspace_root_settings(
+    workspace: &Workspace,
+    repo_key: &str,
+    paths: &Paths,
+    tx: &JobTx,
+) {
+    let Some(workspace_root) = workspace
+        .repo_links
+        .first()
+        .and_then(|r| r.worktree_path.parent().map(|p| p.to_path_buf()))
+    else {
+        return;
+    };
+    if let Err(e) = claude_local::append_repo_to_workspace_root_settings(
+        &workspace_root,
+        repo_key,
+        paths,
+    )
+    .await
+    {
+        warn!(
+            workspace = %workspace.id,
+            repo = %repo_key,
+            error = %e,
+            "failed to extend workspace-root settings.local.json"
+        );
+        tx.status(
+            format!("workspace-root settings extend failed: {e}"),
             None,
         );
     }

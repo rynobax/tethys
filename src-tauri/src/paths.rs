@@ -68,6 +68,13 @@ impl Paths {
     pub fn theme_file(&self) -> PathBuf {
         self.data_dir.join("theme.json")
     }
+
+    /// JSON file of permission entries captured on workspace purge, waiting
+    /// for the user to review and either fold into per-repo shared
+    /// `settings.local.json` files or discard.
+    pub fn pending_permissions_file(&self) -> PathBuf {
+        self.data_dir.join("pending_permissions.json")
+    }
 }
 
 /// `~/.claude/settings.json` — user-level Claude Code settings.

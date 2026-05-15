@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::git;
 use crate::paths::Paths;
+use crate::pending_permissions;
 use crate::reconcile;
 use crate::registry::RegistryLoad;
 use crate::state::{SystemErrorEntry, Workspace};
@@ -34,6 +35,19 @@ pub async fn purge_workspace(
     registry: &Arc<RegistryLoad>,
     workspace: &Workspace,
 ) -> AppResult<()> {
+    // Capture any permission entries that exist in the combined file but
+    // aren't accounted for by per-repo settings — these are grants the user
+    // approved in a workspace-root Claude session. Best-effort: a failure
+    // here is logged but doesn't block the purge itself, since blocking
+    // would leave the user with a workspace they can't tear down.
+    if let Err(e) = pending_permissions::capture_for_purge(workspace, paths).await {
+        warn!(
+            workspace = %workspace.id,
+            error = %e,
+            "failed to capture pending permissions before purge"
+        );
+    }
+
     for link in &workspace.repo_links {
         let clone_path = paths.repo_clone_path(&link.repo_key);
 
@@ -178,6 +192,10 @@ impl Purger {
 
         if any_change {
             let _ = self.app.emit("system_status:changed", &());
+            // Purge captures workspace-root permission grants into
+            // pending_permissions.json. The capture may have appended new
+            // entries, so nudge any open modal to refresh.
+            let _ = self.app.emit("pending_permissions:changed", &());
         }
     }
 }
