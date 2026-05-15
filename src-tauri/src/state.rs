@@ -7,6 +7,7 @@ use crate::github::GithubPrStatus;
 
 pub type WorkspaceId = String;
 pub type SessionId = String;
+pub type ScriptRunId = String;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppState {
@@ -48,6 +49,28 @@ pub struct Workspace {
     /// every pre-existing workspace via the field default.
     #[serde(default)]
     pub status: WorkspaceStatus,
+    /// Running script processes (started via the per-repo `scripts` registry
+    /// entries). Persisted so they can be reattached after a Tethys restart.
+    /// Removed when a script exits or the user stops it.
+    #[serde(default)]
+    pub script_runs: Vec<ScriptRunMeta>,
+}
+
+/// A live script process attached to a workspace+repo. The Tethys `id` is
+/// also the tmux session name on the Tethys server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScriptRunMeta {
+    pub id: ScriptRunId,
+    /// Repo this script was configured under. Used to look up the command
+    /// in the registry on reattach and to label the chip.
+    pub repo_key: String,
+    /// Key from `Repo.scripts` — the user-facing name (e.g. `dev`).
+    pub script_name: String,
+    /// Command string at start time. Cached so the chip still labels itself
+    /// correctly if the user edits the registry after starting the script.
+    pub command: String,
+    pub cwd: PathBuf,
+    pub started_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -245,6 +268,23 @@ mod tests {
         }"#;
         let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
         assert!(matches!(parsed.workspaces[0].status, WorkspaceStatus::Ready));
+    }
+
+    #[test]
+    fn pre_script_runs_state_defaults_to_empty() {
+        // Workspaces persisted before script_runs was added must load with
+        // an empty Vec.
+        let raw = r#"{
+            "workspaces": [
+                {
+                    "id": "abc-123",
+                    "branch": "feat/foo",
+                    "created_at": "2026-04-01T12:00:00Z"
+                }
+            ]
+        }"#;
+        let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
+        assert!(parsed.workspaces[0].script_runs.is_empty());
     }
 
     #[test]

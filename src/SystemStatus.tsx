@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   PendingPermission,
+  RegistryStatus,
   SystemErrorEntry,
   Workspace,
   WorkspaceId,
@@ -12,12 +13,15 @@ import { useTauriEvent } from "./useTauriEvent";
 type Props = {
   /** All workspaces, including soft-deleted. The modal lists pending deletions. */
   allWorkspaces: Workspace[];
+  /** Result of the last `registry_status` invoke — drives the config-path
+   *  row in the Status tab. */
+  registry: RegistryStatus | null;
 };
 
 const HOUR_MS = 60 * 60 * 1000;
 type TabId = "status" | "pending_permissions";
 
-export function SystemStatus({ allWorkspaces }: Props) {
+export function SystemStatus({ allWorkspaces, registry }: Props) {
   const [errors, setErrors] = useState<SystemErrorEntry[]>([]);
   const [pending, setPending] = useState<PendingPermission[]>([]);
   const [open, setOpen] = useState(false);
@@ -76,6 +80,7 @@ export function SystemStatus({ allWorkspaces }: Props) {
           errors={errors}
           pendingDeletes={pendingDeletes}
           pendingPermissions={pending}
+          registry={registry}
           onClose={() => setOpen(false)}
           onRefreshErrors={refreshErrors}
           onRefreshPending={refreshPending}
@@ -91,6 +96,7 @@ function SystemStatusModal({
   errors,
   pendingDeletes,
   pendingPermissions,
+  registry,
   onClose,
   onRefreshErrors,
   onRefreshPending,
@@ -100,6 +106,7 @@ function SystemStatusModal({
   errors: SystemErrorEntry[];
   pendingDeletes: Workspace[];
   pendingPermissions: PendingPermission[];
+  registry: RegistryStatus | null;
   onClose: () => void;
   onRefreshErrors: () => void;
   onRefreshPending: () => void;
@@ -136,6 +143,7 @@ function SystemStatusModal({
           <StatusTab
             errors={errors}
             pendingDeletes={pendingDeletes}
+            registry={registry}
             onRefresh={onRefreshErrors}
           />
         ) : (
@@ -158,10 +166,12 @@ function SystemStatusModal({
 function StatusTab({
   errors,
   pendingDeletes,
+  registry,
   onRefresh,
 }: {
   errors: SystemErrorEntry[];
   pendingDeletes: Workspace[];
+  registry: RegistryStatus | null;
   onRefresh: () => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
@@ -200,8 +210,45 @@ function StatusTab({
     }
   };
 
+  const openConfig = async () => {
+    try {
+      await invoke("open_repos_config");
+    } catch (e) {
+      alert(String(e));
+    }
+  };
+
   return (
     <>
+      <section>
+        <div className="section-header">
+          <h4>Configuration</h4>
+          <button type="button" onClick={openConfig}>
+            Open repos.toml
+          </button>
+        </div>
+        {registry ? (
+          <ul className="status-list">
+            <li>
+              <div className="status-row">
+                <span className="muted">repos.toml</span>
+                <code>{registry.path}</code>
+              </div>
+            </li>
+            {registry.kind === "ok" && (
+              <li>
+                <div className="status-row">
+                  <span className="muted">worktree_root</span>
+                  <code>{registry.registry.worktree_root}</code>
+                </div>
+              </li>
+            )}
+          </ul>
+        ) : (
+          <p className="muted">Registry status not loaded yet.</p>
+        )}
+      </section>
+
       <section>
         <div className="section-header">
           <h4>Pending deletions</h4>

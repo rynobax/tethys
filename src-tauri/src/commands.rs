@@ -20,10 +20,12 @@ use crate::paths::Paths;
 use crate::purge::Purger;
 use crate::reconcile::{self, Discrepancies};
 use crate::registry::{self, starter_template, RegistryLoad, Repo};
+use crate::scripts::{ScriptInfo, ScriptSupervisor};
 use crate::sessions::{SessionInfo, SessionSupervisor};
 use crate::setup;
 use crate::state::{
-    ClaudeSessionMeta, RepoLink, SystemErrorEntry, Workspace, WorkspaceId, WorkspaceStatus,
+    ClaudeSessionMeta, RepoLink, ScriptRunMeta, SystemErrorEntry, Workspace, WorkspaceId,
+    WorkspaceStatus,
 };
 use crate::store::Store;
 use crate::theme::Theme;
@@ -393,6 +395,7 @@ pub async fn create_workspace(
         deleted_at: None,
         archived_at: None,
         status: WorkspaceStatus::Creating,
+        script_runs: Vec::new(),
     };
     store
         .mutate(|s| {
@@ -645,6 +648,7 @@ pub async fn delete_workspace(
     app: AppHandle,
     store: State<'_, Arc<Store>>,
     tmux_bin: State<'_, TmuxBin>,
+    script_supervisor: State<'_, Arc<ScriptSupervisor>>,
     id: WorkspaceId,
 ) -> AppResult<()> {
     let session_ids: Vec<String> = store
@@ -654,6 +658,13 @@ pub async fn delete_workspace(
         })
         .await
         .ok_or_else(|| AppError::WorkspaceNotFound(id.clone()))?;
+
+    // Kill running scripts (dev servers etc.) before anything else — these
+    // would otherwise keep writing to the worktree we're about to tear down,
+    // and a long-lived `yarn dev` blocks the purger's `rm -rf`.
+    if !tmux_bin.0.as_os_str().is_empty() {
+        script_supervisor.kill_for_workspace(&id, &tmux_bin.0);
+    }
 
     // Kill tmux sessions so claude processes stop writing to the worktree
     // before the purger removes it. The supervisor reacts to the resulting
@@ -898,6 +909,7 @@ pub async fn forget_workspace(
     app: AppHandle,
     store: State<'_, Arc<Store>>,
     tmux_bin: State<'_, TmuxBin>,
+    script_supervisor: State<'_, Arc<ScriptSupervisor>>,
     id: WorkspaceId,
 ) -> AppResult<()> {
     let session_ids: Vec<String> = store
@@ -907,6 +919,10 @@ pub async fn forget_workspace(
                 .unwrap_or_default()
         })
         .await;
+
+    if !tmux_bin.0.as_os_str().is_empty() {
+        script_supervisor.kill_for_workspace(&id, &tmux_bin.0);
+    }
 
     let removed = store
         .mutate(|s| {
@@ -1208,6 +1224,191 @@ pub async fn set_claude_session_hidden(
 
 /// Newtype so `claude_bin` can be managed in Tauri state.
 pub struct ClaudeBin(pub std::path::PathBuf);
+
+#[tauri::command]
+pub fn list_scripts(
+    supervisor: State<'_, Arc<ScriptSupervisor>>,
+    workspace_id: WorkspaceId,
+) -> Vec<ScriptInfo> {
+    supervisor.list_for_workspace(&workspace_id)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StartScriptArgs {
+    pub workspace_id: WorkspaceId,
+    pub repo_key: String,
+    pub script_name: String,
+}
+
+/// Start a configured script in the given workspace+repo's worktree. Looks
+/// up the command in the live registry, spawns it under tmux, and persists
+/// a `ScriptRunMeta` so it can be reattached after a Tethys restart.
+#[tauri::command]
+pub async fn start_script(
+    app: AppHandle,
+    supervisor: State<'_, Arc<ScriptSupervisor>>,
+    store: State<'_, Arc<Store>>,
+    registry: State<'_, Arc<RegistryLoad>>,
+    tmux_bin: State<'_, TmuxBin>,
+    args: StartScriptArgs,
+) -> AppResult<ScriptInfo> {
+    if tmux_bin.0.as_os_str().is_empty() {
+        return Err(AppError::Other(
+            "tmux not found — install with `brew install tmux` and restart Tethys".into(),
+        ));
+    }
+
+    let reg = registry.require()?;
+    let repo = reg.find_repo(&args.repo_key).ok_or_else(|| {
+        AppError::Other(format!("unknown repo key: {}", args.repo_key))
+    })?;
+    let command = repo
+        .scripts
+        .get(&args.script_name)
+        .cloned()
+        .ok_or_else(|| {
+            AppError::Other(format!(
+                "no script '{}' configured for repo '{}'",
+                args.script_name, args.repo_key
+            ))
+        })?;
+
+    let cwd = store
+        .read(|s| {
+            s.find_workspace(&args.workspace_id).and_then(|w| {
+                w.repo_links
+                    .iter()
+                    .find(|r| r.repo_key == args.repo_key)
+                    .map(|r| r.worktree_path.clone())
+            })
+        })
+        .await
+        .ok_or_else(|| {
+            AppError::Other(format!(
+                "no worktree for {}/{} in state",
+                args.workspace_id, args.repo_key
+            ))
+        })?;
+
+    // Replace any prior run for the same (repo, script_name) so the UI only
+    // ever shows one chip per configured script.
+    let existing_ids: Vec<String> = supervisor
+        .list_for_workspace(&args.workspace_id)
+        .into_iter()
+        .filter(|s| s.repo_key == args.repo_key && s.script_name == args.script_name)
+        .map(|s| s.id)
+        .collect();
+    for sid in existing_ids {
+        supervisor.dismiss(&sid, &tmux_bin.0);
+    }
+    store
+        .mutate(|s| {
+            if let Some(ws) = s.find_workspace_mut(&args.workspace_id) {
+                ws.script_runs.retain(|m| {
+                    !(m.repo_key == args.repo_key && m.script_name == args.script_name)
+                });
+            }
+            Ok(())
+        })
+        .await?;
+
+    let info = supervisor.start(
+        args.workspace_id.clone(),
+        args.repo_key.clone(),
+        args.script_name.clone(),
+        command.clone(),
+        &cwd,
+        &tmux_bin.0,
+    )?;
+
+    let meta = ScriptRunMeta {
+        id: info.id.clone(),
+        repo_key: args.repo_key,
+        script_name: args.script_name,
+        command,
+        cwd,
+        started_at: info.started_at,
+    };
+    store
+        .mutate(|s| {
+            let ws = s
+                .find_workspace_mut(&args.workspace_id)
+                .ok_or_else(|| AppError::WorkspaceNotFound(args.workspace_id.clone()))?;
+            ws.script_runs.push(meta);
+            Ok(())
+        })
+        .await?;
+
+    let _ = app.emit(
+        "script:changed",
+        serde_json::json!({ "workspace_id": args.workspace_id }),
+    );
+    Ok(info)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DismissScriptArgs {
+    pub workspace_id: WorkspaceId,
+    pub script_id: String,
+}
+
+/// Drop a script's in-memory handle (and kill any underlying tmux session
+/// just in case). After this the chip disappears from the bar.
+#[tauri::command]
+pub async fn dismiss_script(
+    app: AppHandle,
+    supervisor: State<'_, Arc<ScriptSupervisor>>,
+    store: State<'_, Arc<Store>>,
+    tmux_bin: State<'_, TmuxBin>,
+    args: DismissScriptArgs,
+) -> AppResult<()> {
+    if !tmux_bin.0.as_os_str().is_empty() {
+        supervisor.dismiss(&args.script_id, &tmux_bin.0);
+    }
+    // The watcher would also do this on exit, but for an already-exited
+    // script the watcher already ran — clean state here to be safe.
+    store
+        .mutate(|s| {
+            if let Some(ws) = s.find_workspace_mut(&args.workspace_id) {
+                ws.script_runs.retain(|m| m.id != args.script_id);
+            }
+            Ok(())
+        })
+        .await?;
+    let _ = app.emit(
+        "script:changed",
+        serde_json::json!({ "workspace_id": args.workspace_id }),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn attach_script(
+    supervisor: State<'_, Arc<ScriptSupervisor>>,
+    script_id: String,
+    on_bytes: tauri::ipc::Channel<InvokeResponseBody>,
+) -> AppResult<Vec<u8>> {
+    supervisor.attach(&script_id, on_bytes)
+}
+
+#[tauri::command]
+pub fn send_input_script(
+    supervisor: State<'_, Arc<ScriptSupervisor>>,
+    script_id: String,
+    data: Vec<u8>,
+) -> AppResult<()> {
+    supervisor.send_input(&script_id, &data)
+}
+
+#[tauri::command]
+pub fn resize_script(
+    supervisor: State<'_, Arc<ScriptSupervisor>>,
+    script_id: String,
+    cols: u16,
+    rows: u16,
+) -> AppResult<()> {
+    supervisor.resize(&script_id, cols, rows)
+}
 
 /// Subscribe to live PTY bytes and return the current scrollback. The
 /// channel carries raw bytes via `InvokeResponseBody::Raw` — no JSON

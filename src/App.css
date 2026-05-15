@@ -986,6 +986,43 @@ button.danger.primary:hover:not(:disabled) {
   border-style: dashed;
 }
 
+/* Visual divider between session chips and script chips in the chip bar. */
+.chip-bar-divider {
+  align-self: stretch;
+  width: 1px;
+  background: var(--border);
+  margin: 2px 4px;
+}
+
+.session-chip.script-chip {
+  cursor: pointer;
+  user-select: none;
+}
+
+.session-chip.script-chip .script-indicator {
+  font-size: 10px;
+  line-height: 1;
+  width: 10px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.session-chip.script-chip.running .script-indicator {
+  color: #2ecc71;
+}
+
+.session-chip.script-chip.exited .script-indicator {
+  color: var(--danger);
+}
+
+.session-chip.script-chip.idle {
+  opacity: 0.85;
+}
+
+.session-chip.script-chip.running {
+  border-color: rgba(46, 204, 113, 0.5);
+}
+
 .session-chip .caret {
   font-size: 9px;
   opacity: 0.6;

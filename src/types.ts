@@ -122,6 +122,9 @@ export interface Repo {
   default_setup_script: string | null;
   setup_timeout_secs: number | null;
   copy_files: string[];
+  /** Named shell commands runnable inside a workspace's worktree of this repo
+   *  (e.g. `{ "dev": "yarn dev" }`). */
+  scripts: { [name: string]: string };
 }
 
 export type RegistryStatus =
@@ -162,6 +165,17 @@ export interface SessionInfo {
   notification_type: string | null;
   /** User dismissed the "your turn" indicator; reset on next state transition. */
   turn_acknowledged: boolean;
+}
+
+export interface ScriptInfo {
+  id: string;
+  workspace_id: string;
+  repo_key: string;
+  script_name: string;
+  command: string;
+  cwd: string;
+  running: boolean;
+  started_at: string;
 }
 
 export interface TurnChangedEvent {

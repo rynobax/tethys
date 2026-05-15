@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use schemars::{schema_for, JsonSchema};
@@ -54,6 +55,12 @@ pub struct Repo {
     /// `..` segments are rejected.
     #[serde(default)]
     pub copy_files: Vec<String>,
+
+    /// Named shell commands runnable inside any worktree of this repo
+    /// (e.g. `dev = "yarn dev"`). Surfaced as chips next to Claude sessions
+    /// in each workspace; output is captured and viewable inline.
+    #[serde(default)]
+    pub scripts: BTreeMap<String, String>,
 
     /// Populated at registry load time by parsing `remote_url`. `None` means
     /// the remote isn't on github.com and GitHub sync should skip this repo.
@@ -230,5 +237,9 @@ worktree_root = "CHANGE_ME_TO_AN_ABSOLUTE_PATH"
 # default_setup_script = "pnpm install"
 # setup_timeout_secs = 600
 # copy_files = [".env", "apps/web/.env.local"]
+#
+# [repo.scripts]
+# dev = "pnpm dev"
+# test = "pnpm test"
 "##
 }

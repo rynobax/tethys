@@ -14,6 +14,7 @@ mod pending_permissions;
 mod purge;
 mod reconcile;
 mod registry;
+mod scripts;
 mod sessions;
 mod setup;
 mod shell;
@@ -34,6 +35,7 @@ use crate::github::GithubPoller;
 use crate::paths::Paths;
 use crate::purge::Purger;
 use crate::registry::RegistryLoad;
+use crate::scripts::ScriptSupervisor;
 use crate::sessions::SessionSupervisor;
 use crate::store::Store;
 use crate::tmux::TmuxBin;
@@ -137,12 +139,18 @@ pub fn run() {
                 Arc::new(SessionSupervisor::new(handle.clone(), store.clone()));
             app.manage(supervisor.clone());
 
-            // Pre-warm live sessions: for every persisted ClaudeSessionMeta
+            // --- script supervisor -----------------------------------------
+            let script_supervisor: Arc<ScriptSupervisor> =
+                Arc::new(ScriptSupervisor::new(handle.clone(), store.clone()));
+            app.manage(script_supervisor.clone());
+
+            // Pre-warm live sessions + scripts: for every persisted entry
             // whose tmux pane is still alive, spin up a reattach now so
             // the UI can flip straight to the terminal when the user
             // visits the workspace (no "Dormant / Resume" flash).
             if let Some(path) = tmux_bin_path.as_ref() {
                 prewarm_live_sessions(&supervisor, path, &store);
+                prewarm_live_scripts(&script_supervisor, path, &store);
             }
 
             let socket_path = paths.hook_socket();
@@ -243,6 +251,12 @@ pub fn run() {
             commands::attach_session,
             commands::send_input,
             commands::resize_session,
+            commands::list_scripts,
+            commands::start_script,
+            commands::dismiss_script,
+            commands::attach_script,
+            commands::send_input_script,
+            commands::resize_script,
             commands::get_theme,
             commands::read_clipboard_file_paths,
         ])
@@ -324,17 +338,104 @@ fn prewarm_live_sessions(
     }
 }
 
+/// For every persisted `ScriptRunMeta` whose tmux session is still alive,
+/// reattach now so the chip shows running on app start. Entries whose tmux
+/// session is gone (e.g. machine reboot wiped the server) are dropped from
+/// state — there's no surviving process to reconnect to.
+fn prewarm_live_scripts(
+    supervisor: &Arc<ScriptSupervisor>,
+    tmux_bin: &std::path::Path,
+    store: &Arc<Store>,
+) {
+    struct Candidate {
+        id: String,
+        workspace_id: String,
+        repo_key: String,
+        script_name: String,
+        command: String,
+        cwd: std::path::PathBuf,
+        started_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    let candidates: Vec<Candidate> = tauri::async_runtime::block_on(async {
+        store
+            .read(|s| {
+                let mut out = Vec::new();
+                for ws in &s.workspaces {
+                    for run in &ws.script_runs {
+                        out.push(Candidate {
+                            id: run.id.clone(),
+                            workspace_id: ws.id.clone(),
+                            repo_key: run.repo_key.clone(),
+                            script_name: run.script_name.clone(),
+                            command: run.command.clone(),
+                            cwd: run.cwd.clone(),
+                            started_at: run.started_at,
+                        });
+                    }
+                }
+                out
+            })
+            .await
+    });
+
+    let mut to_drop: Vec<(String, String)> = Vec::new();
+    for c in candidates {
+        if !tmux::has_session(tmux_bin, &c.id) {
+            to_drop.push((c.workspace_id, c.id));
+            continue;
+        }
+        match supervisor.reattach_tmux(
+            c.id.clone(),
+            c.workspace_id.clone(),
+            c.repo_key,
+            c.script_name,
+            c.command,
+            &c.cwd,
+            tmux_bin,
+            c.started_at,
+        ) {
+            Ok(_) => info!(script_id = %c.id, "pre-warmed live script"),
+            Err(e) => {
+                warn!(script_id = %c.id, error = %e, "script reattach failed");
+                to_drop.push((c.workspace_id, c.id));
+            }
+        }
+    }
+
+    if !to_drop.is_empty() {
+        let store_for_drop = store.clone();
+        tauri::async_runtime::block_on(async move {
+            let _ = store_for_drop
+                .mutate(|s| {
+                    for (ws_id, script_id) in &to_drop {
+                        if let Some(ws) = s.find_workspace_mut(ws_id) {
+                            ws.script_runs.retain(|m| &m.id != script_id);
+                        }
+                    }
+                    Ok(())
+                })
+                .await;
+        });
+    }
+}
+
 /// Kill any tmux session on our private server whose name isn't a known
-/// `ClaudeSessionMeta.id`. Catches leftovers from app crashes between
-/// spawn and state.json flush, and from workspaces that were deleted
-/// while their tmux sessions were still alive.
+/// `ClaudeSessionMeta.id` or `ScriptRunMeta.id`. Catches leftovers from app
+/// crashes between spawn and state.json flush, and from workspaces that
+/// were deleted while their tmux sessions were still alive.
 fn reap_orphan_tmux_sessions(tmux_bin: &std::path::Path, store: &Arc<Store>) {
     let known: std::collections::HashSet<String> = tauri::async_runtime::block_on(async {
         store
             .read(|s| {
                 s.workspaces
                     .iter()
-                    .flat_map(|w| w.sessions.iter().map(|sess| sess.id.clone()))
+                    .flat_map(|w| {
+                        w.sessions
+                            .iter()
+                            .map(|sess| sess.id.clone())
+                            .chain(w.script_runs.iter().map(|run| run.id.clone()))
+                    })
                     .collect::<std::collections::HashSet<_>>()
             })
             .await

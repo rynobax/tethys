@@ -6,6 +6,7 @@ import type {
   GithubStatusChangedEvent,
   RegistryStatus,
   Repo,
+  ScriptInfo,
   SessionInfo,
   SessionRuntimeState,
   Theme,
@@ -16,6 +17,7 @@ import type {
 import { GithubAuthFooter } from "./GithubAuthFooter";
 import { GithubChip } from "./GithubChip";
 import { JobLogPane } from "./JobLogPane";
+import { ScriptTerminal } from "./ScriptTerminal";
 import { SessionTerminal } from "./SessionTerminal";
 import { Sidebar } from "./Sidebar";
 import { SystemStatus } from "./SystemStatus";
@@ -67,6 +69,15 @@ function App() {
    */
   const [sessionsByWorkspace, setSessionsByWorkspace] = useState<
     Map<WorkspaceId, SessionInfo[]>
+  >(new Map());
+  /**
+   * Per-workspace cache of live + recently-exited scripts. Same pattern as
+   * sessions: populated on workspace load, kept in sync via `script:*`
+   * events. A script can appear here with `running: false` (exited, awaiting
+   * user dismissal) or `running: true`.
+   */
+  const [scriptsByWorkspace, setScriptsByWorkspace] = useState<
+    Map<WorkspaceId, ScriptInfo[]>
   >(new Map());
   const [theme, setTheme] = useState<Theme | null>(null);
 
@@ -232,6 +243,21 @@ function App() {
     }
   }, []);
 
+  const refreshScriptsFor = useCallback(async (workspaceId: WorkspaceId) => {
+    try {
+      const list = await invoke<ScriptInfo[]>("list_scripts", {
+        workspaceId,
+      });
+      setScriptsByWorkspace((prev) => {
+        const next = new Map(prev);
+        next.set(workspaceId, list);
+        return next;
+      });
+    } catch (e) {
+      console.error("list_scripts:", e);
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       const [list, reg, disc] = await Promise.all([
@@ -243,13 +269,15 @@ function App() {
       setRegistry(reg);
       setDiscrepancies(disc);
       setError(null);
-      // Pre-load sessions for every workspace so switching in doesn't
-      // render a stale/empty sessions list.
-      await Promise.all(list.map((w) => refreshSessionsFor(w.id)));
+      // Pre-load sessions + scripts for every workspace so switching in
+      // doesn't render a stale/empty list.
+      await Promise.all(
+        list.flatMap((w) => [refreshSessionsFor(w.id), refreshScriptsFor(w.id)]),
+      );
     } catch (e) {
       setError(String(e));
     }
-  }, [refreshSessionsFor]);
+  }, [refreshSessionsFor, refreshScriptsFor]);
 
   useEffect(() => {
     refresh();
@@ -261,6 +289,12 @@ function App() {
   });
   useTauriEvent<{ workspace_id: string }>("session:exit", (event) => {
     refreshSessionsFor(event.payload.workspace_id);
+  });
+  useTauriEvent<{ workspace_id: string }>("script:changed", (event) => {
+    refreshScriptsFor(event.payload.workspace_id);
+  });
+  useTauriEvent<{ workspace_id: string }>("script:exit", (event) => {
+    refreshScriptsFor(event.payload.workspace_id);
   });
 
   const visibleWorkspaces = useMemo(
@@ -489,7 +523,7 @@ function App() {
           workspaceNeedsTurn={workspaceNeedsTurn}
         />
         <div className="sidebar-footer">
-          <SystemStatus allWorkspaces={workspaces} />
+          <SystemStatus allWorkspaces={workspaces} registry={registry} />
           <GithubAuthFooter />
         </div>
       </aside>
@@ -527,6 +561,10 @@ function App() {
           <WorkspaceDetail
             workspace={selected}
             sessions={sessionsByWorkspace.get(selected.id) ?? []}
+            scripts={scriptsByWorkspace.get(selected.id) ?? []}
+            registryRepos={
+              registry?.kind === "ok" ? registry.registry.repos : []
+            }
             availableRepos={
               registry?.kind === "ok"
                 ? registry.registry.repos.filter(
@@ -801,9 +839,25 @@ function DiscrepancyNotice({
   );
 }
 
+/**
+ * Discriminated tab key for the workspace's main pane. Sessions and scripts
+ * share the chip bar — exactly one is "selected" at a time. The script
+ * variant is keyed by `(repoKey, scriptName)` rather than the run id, so the
+ * tab survives stop/start cycles (a new run gets a fresh id).
+ */
+type SelectedTab =
+  | { kind: "session"; metaId: string }
+  | { kind: "script"; repoKey: string; scriptName: string };
+
+function scriptTabKey(repoKey: string, scriptName: string): string {
+  return `script:${repoKey}:${scriptName}`;
+}
+
 function WorkspaceDetail({
   workspace,
   sessions,
+  scripts,
+  registryRepos,
   availableRepos,
   onRequestDelete,
   onRequestArchive,
@@ -811,6 +865,10 @@ function WorkspaceDetail({
 }: {
   workspace: Workspace;
   sessions: SessionInfo[];
+  scripts: ScriptInfo[];
+  /** Every repo in the registry — used to look up configured scripts for the
+   *  workspace's linked repos. */
+  registryRepos: Repo[];
   availableRepos: Repo[];
   onRequestDelete: () => void;
   onRequestArchive: () => void;
@@ -822,16 +880,24 @@ function WorkspaceDetail({
   // Per-workspace selection. Derived on render (no effect), so switching
   // back to a workspace paints the remembered pick immediately.
   const [selectedByWorkspace, setSelectedByWorkspace] = useState<
-    Map<string, string>
+    Map<string, SelectedTab>
   >(new Map());
-  const selectedSessionId = selectedByWorkspace.get(workspace.id) ?? null;
-  const selectSession = (id: string | null) => {
+  const selectedTab = selectedByWorkspace.get(workspace.id) ?? null;
+  const selectedSessionId =
+    selectedTab?.kind === "session" ? selectedTab.metaId : null;
+  const setSelectedTab = (tab: SelectedTab | null) => {
     setSelectedByWorkspace((prev) => {
       const next = new Map(prev);
-      if (id) next.set(workspace.id, id);
+      if (tab) next.set(workspace.id, tab);
       else next.delete(workspace.id);
       return next;
     });
+  };
+  const selectSession = (id: string | null) => {
+    setSelectedTab(id ? { kind: "session", metaId: id } : null);
+  };
+  const selectScript = (repoKey: string, scriptName: string) => {
+    setSelectedTab({ kind: "script", repoKey, scriptName });
   };
   const [error, setError] = useState<string | null>(null);
   // Meta ids we've already auto-resumed this app-run — guards against
@@ -847,11 +913,42 @@ function WorkspaceDetail({
   const hiddenOrdered = ordered.filter((m) => m.hidden);
   const [showHidden, setShowHidden] = useState(false);
 
-  // Effective selection: prefer the user's explicit pick when it's still
-  // visible, else fall through to first live, else newest. When hiding
-  // the selected chip, this naturally jumps to the next visible one.
+  // Build script chips: every configured (repo, script_name) becomes one
+  // chip. If there's a running/exited ScriptInfo for that pair it gets
+  // attached; otherwise the chip renders as idle.
+  const scriptChips: ScriptChipData[] = [];
+  for (const link of workspace.repo_links) {
+    const repo = registryRepos.find((r) => r.key === link.repo_key);
+    if (!repo) continue;
+    for (const [name, command] of Object.entries(repo.scripts ?? {})) {
+      const run =
+        scripts.find(
+          (s) => s.repo_key === link.repo_key && s.script_name === name,
+        ) ?? null;
+      scriptChips.push({
+        repoKey: link.repo_key,
+        scriptName: name,
+        command,
+        run,
+      });
+    }
+  }
+
+  const selectedScriptChip =
+    selectedTab?.kind === "script"
+      ? scriptChips.find(
+          (c) =>
+            c.repoKey === selectedTab.repoKey &&
+            c.scriptName === selectedTab.scriptName,
+        ) ?? null
+      : null;
+
+  // Effective session selection: only used when a session tab (or nothing)
+  // is selected. Prefer the user's explicit pick when it's still visible,
+  // else first live, else newest.
   const candidates = showHidden ? ordered : visibleOrdered;
   const effectiveSelected = (() => {
+    if (selectedTab?.kind === "script") return null;
     if (selectedSessionId && candidates.some((m) => m.id === selectedSessionId))
       return selectedSessionId;
     const firstLive = candidates.find((m) => liveById.has(m.id));
@@ -918,13 +1015,51 @@ function WorkspaceDetail({
   // claude_session_id. `autoResumedRef` prevents a retry loop if the
   // spawn fails — the user can still click Resume manually below.
   useEffect(() => {
+    if (selectedTab?.kind === "script") return;
     if (!selected || selectedLive) return;
     if (!selected.claude_session_id) return;
     if (autoResumedRef.current.has(selected.id)) return;
     autoResumedRef.current.add(selected.id);
     void resumeMeta(selected.id, selected.repo_key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.id, selectedLive?.id, selected?.claude_session_id]);
+  }, [selected?.id, selectedLive?.id, selected?.claude_session_id, selectedTab?.kind]);
+
+  const startScript = async (repoKey: string, scriptName: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke<ScriptInfo>("start_script", {
+        args: {
+          workspace_id: workspace.id,
+          repo_key: repoKey,
+          script_name: scriptName,
+        },
+      });
+      selectScript(repoKey, scriptName);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const dismissScript = async (scriptId: string) => {
+    try {
+      await invoke("dismiss_script", {
+        args: { workspace_id: workspace.id, script_id: scriptId },
+      });
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleScriptChipClick = (chip: ScriptChipData) => {
+    if (!chip.run) {
+      void startScript(chip.repoKey, chip.scriptName);
+      return;
+    }
+    selectScript(chip.repoKey, chip.scriptName);
+  };
 
   return (
     <div className="workspace-detail">
@@ -1024,10 +1159,74 @@ function WorkspaceDetail({
           onSelect={selectSession}
           onStartInRepo={startInRepo}
           onSetHidden={setSessionHidden}
+          scriptChips={scriptChips}
+          selectedScriptKey={
+            selectedTab?.kind === "script"
+              ? scriptTabKey(selectedTab.repoKey, selectedTab.scriptName)
+              : null
+          }
+          showRepoOnScript={workspace.repo_links.length > 1}
+          onScriptChipClick={handleScriptChipClick}
+          onScriptChipDismiss={dismissScript}
           busy={busy}
         />
         {error && <div className="error-banner">{error}</div>}
-        {selected ? (
+        {selectedScriptChip ? (
+          selectedScriptChip.run ? (
+            <>
+              {!selectedScriptChip.run.running && (
+                <div className="session-exit-banner">
+                  <span>
+                    Script <code>{selectedScriptChip.scriptName}</code> exited.
+                  </span>
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={() =>
+                      startScript(
+                        selectedScriptChip.repoKey,
+                        selectedScriptChip.scriptName,
+                      )
+                    }
+                    disabled={busy}
+                  >
+                    Restart
+                  </button>
+                </div>
+              )}
+              <ScriptTerminal scriptId={selectedScriptChip.run.id} />
+            </>
+          ) : (
+            <div className="session-dormant">
+              <p>
+                Script <code>{selectedScriptChip.scriptName}</code> is not
+                running.
+              </p>
+              <p className="muted">
+                <code>{selectedScriptChip.command}</code>
+              </p>
+              <button
+                type="button"
+                className="primary"
+                onClick={() =>
+                  startScript(
+                    selectedScriptChip.repoKey,
+                    selectedScriptChip.scriptName,
+                  )
+                }
+                disabled={busy}
+              >
+                {busy ? (
+                  <>
+                    <Spinner /> Starting…
+                  </>
+                ) : (
+                  "Start"
+                )}
+              </button>
+            </div>
+          )
+        ) : selected ? (
           selectedLive ? (
             <>
               {!selectedLive.running && (
@@ -1108,6 +1307,14 @@ type ChipMeta = {
   claude_session_id: string | null;
 };
 
+type ScriptChipData = {
+  repoKey: string;
+  scriptName: string;
+  command: string;
+  /** `null` => not running and no stale handle to attach to. */
+  run: ScriptInfo | null;
+};
+
 function SessionChip({
   meta,
   hidden,
@@ -1170,6 +1377,61 @@ function SessionChip({
   );
 }
 
+function ScriptChip({
+  chip,
+  showRepo,
+  selected,
+  onClick,
+  onDismiss,
+}: {
+  chip: ScriptChipData;
+  showRepo: boolean;
+  selected: boolean;
+  onClick: (chip: ScriptChipData) => void;
+  onDismiss: (scriptId: string) => void;
+}) {
+  const running = chip.run?.running ?? false;
+  const exited = chip.run !== null && !chip.run.running;
+  const idle = chip.run === null;
+  const indicator = running ? "▶" : exited ? "■" : "○";
+  const stateClass = running ? "running" : exited ? "exited" : "idle";
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      className={`session-chip script-chip ${stateClass}${selected ? " active" : ""}`}
+      onClick={() => onClick(chip)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick(chip);
+        }
+      }}
+      title={chip.command}
+    >
+      <span className="script-indicator" aria-hidden="true">
+        {indicator}
+      </span>
+      {showRepo && <span className="chip-repo">{chip.repoKey}</span>}
+      <code>{chip.scriptName}</code>
+      {!idle && chip.run && (
+        <button
+          type="button"
+          className="chip-x"
+          title={running ? "Cancel this script" : "Dismiss exited logs"}
+          aria-label={running ? "Cancel this script" : "Dismiss exited logs"}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDismiss(chip.run!.id);
+          }}
+        >
+          ×
+        </button>
+      )}
+    </div>
+  );
+}
+
 function SessionBar({
   visibleSessions,
   hiddenSessions,
@@ -1181,6 +1443,11 @@ function SessionBar({
   onSelect,
   onStartInRepo,
   onSetHidden,
+  scriptChips,
+  selectedScriptKey,
+  showRepoOnScript,
+  onScriptChipClick,
+  onScriptChipDismiss,
   busy,
 }: {
   visibleSessions: ChipMeta[];
@@ -1194,6 +1461,13 @@ function SessionBar({
   /** `null` => start at the workspace root. */
   onStartInRepo: (repoKey: string | null) => void;
   onSetHidden: (id: string, hidden: boolean) => void;
+  scriptChips: ScriptChipData[];
+  selectedScriptKey: string | null;
+  /** Show the repo prefix on the script chip — only useful when the
+   *  workspace has 2+ repos, otherwise the prefix is noise. */
+  showRepoOnScript: boolean;
+  onScriptChipClick: (chip: ScriptChipData) => void;
+  onScriptChipDismiss: (scriptId: string) => void;
   busy: boolean;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -1245,6 +1519,20 @@ function SessionBar({
             onSetHidden={onSetHidden}
           />
         ))}
+      {scriptChips.length > 0 && <span className="chip-bar-divider" />}
+      {scriptChips.map((chip) => {
+        const key = scriptTabKey(chip.repoKey, chip.scriptName);
+        return (
+          <ScriptChip
+            key={key}
+            chip={chip}
+            showRepo={showRepoOnScript}
+            selected={selectedScriptKey === key}
+            onClick={onScriptChipClick}
+            onDismiss={onScriptChipDismiss}
+          />
+        );
+      })}
       <div className="new-session-wrap" ref={wrapRef}>
         <button
           type="button"
