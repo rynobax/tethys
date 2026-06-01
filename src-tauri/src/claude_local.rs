@@ -22,31 +22,38 @@ use crate::error::{AppError, AppResult};
 use crate::job::JobTx;
 use crate::paths::Paths;
 
-const EMPTY_SETTINGS: &str = "{}\n";
-
 /// Marker we write into the workspace-root settings.local.json so it's
 /// identifiable as Tethys-seeded. Unlike before, the file is *not*
 /// regenerated after seed — manual edits (and Claude's permission grants)
 /// are preserved.
 const SEEDED_MARKER: &str = "tethys (seeded on workspace create; safe to edit)";
 
-/// Ensure `<worktree>/.claude/settings.local.json` is a symlink to
-/// `shared_path`, creating the shared file (with `{}`) if it's the first
-/// worktree to touch it. If the worktree already has a real file there
-/// (e.g. the repo tracks one), leave it alone and warn — replacing it
-/// would show up as a git modification and discard committed content.
+/// Ensure `<worktree>/.claude/settings.local.json` is a symlink to the
+/// repo's shared settings file, creating that file if it's the first
+/// worktree to touch it. The shared file is (re-)seeded on every worktree
+/// creation with a `sandbox.filesystem.allowWrite` grant for Tethys's repos
+/// directory: every worktree's git metadata lives under there (in the app
+/// data dir) rather than beside the worktree, so without this grant Claude
+/// Code's sandbox denies routine git writes (index refresh, `add`,
+/// `commit`). Claude Code unions these arrays across settings scopes, so the
+/// grant coexists with whatever Claude later writes to the same file.
+///
+/// If the worktree already has a real file there (e.g. the repo tracks one),
+/// leave it alone and warn — replacing it would show up as a git
+/// modification and discard committed content.
 pub async fn install_symlink(
     worktree_path: &Path,
-    shared_path: &Path,
+    paths: &Paths,
     tx: &JobTx,
     repo_key: &str,
 ) -> AppResult<()> {
+    let shared_path = paths.repo_shared_claude_local(repo_key);
     if let Some(parent) = shared_path.parent() {
         fs::create_dir_all(parent).await?;
     }
-    if !fs::try_exists(shared_path).await? {
-        fs::write(shared_path, EMPTY_SETTINGS).await?;
-    }
+    let mut shared = read_root_object(&shared_path).await?;
+    ensure_sandbox_allow_write(&mut shared, &paths.repos_clone_dir());
+    write_json_object(&shared_path, &shared).await?;
 
     let claude_dir = worktree_path.join(".claude");
     fs::create_dir_all(&claude_dir).await?;
@@ -68,7 +75,7 @@ pub async fn install_symlink(
         Err(e) => return Err(AppError::Io(e)),
     }
 
-    fs::symlink(shared_path, &link_path).await?;
+    fs::symlink(&shared_path, &link_path).await?;
     tx.status(
         format!(
             "linked .claude/settings.local.json -> {}",
@@ -177,13 +184,16 @@ pub async fn write_workspace_root_settings(
         root.insert("permissions".into(), Value::Object(permissions));
     }
 
+    // Sessions started at the workspace root run git against every repo's
+    // worktree, whose git dirs live under the app data dir — outside the
+    // sandbox's default writable set. Grant Tethys's repos dir (see
+    // `install_symlink`).
+    ensure_sandbox_allow_write(&mut root, &paths.repos_clone_dir());
+
     let claude_dir = workspace_root.join(".claude");
     fs::create_dir_all(&claude_dir).await?;
     let file_path = claude_dir.join("settings.local.json");
-    let mut content = serde_json::to_string_pretty(&Value::Object(root))
-        .map_err(|e| AppError::Other(format!("serializing settings.local.json: {e}")))?;
-    content.push('\n');
-    fs::write(&file_path, content).await?;
+    write_json_object(&file_path, &root).await?;
     Ok(())
 }
 
@@ -242,10 +252,7 @@ pub async fn append_repo_to_workspace_root_settings(
     root.insert("_seededBy".into(), Value::String(SEEDED_MARKER.into()));
     root.remove("_generatedBy");
 
-    let mut content = serde_json::to_string_pretty(&Value::Object(root))
-        .map_err(|e| AppError::Other(format!("serializing settings.local.json: {e}")))?;
-    content.push('\n');
-    fs::write(&file_path, content).await?;
+    write_json_object(&file_path, &root).await?;
     Ok(())
 }
 
@@ -264,6 +271,59 @@ async fn read_root_object(path: &Path) -> AppResult<Map<String, Value>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Map::new()),
         Err(e) => Err(AppError::Io(e)),
     }
+}
+
+/// Ensure `root.sandbox.filesystem.allowWrite` contains `path`, creating the
+/// nested `sandbox` / `filesystem` objects and the array as needed.
+/// Deduplicates and leaves any sibling sandbox config untouched — Claude
+/// Code deep-merges these objects across settings scopes, so we only
+/// contribute our one entry.
+fn ensure_sandbox_allow_write(root: &mut Map<String, Value>, path: &Path) {
+    let path_str = path.to_string_lossy().into_owned();
+
+    let sandbox = root
+        .entry("sandbox".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !sandbox.is_object() {
+        *sandbox = Value::Object(Map::new());
+    }
+    let Value::Object(sandbox_map) = sandbox else {
+        return;
+    };
+
+    let filesystem = sandbox_map
+        .entry("filesystem".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !filesystem.is_object() {
+        *filesystem = Value::Object(Map::new());
+    }
+    let Value::Object(fs_map) = filesystem else {
+        return;
+    };
+
+    let allow = fs_map
+        .entry("allowWrite".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !allow.is_array() {
+        *allow = Value::Array(Vec::new());
+    }
+    let Value::Array(arr) = allow else {
+        return;
+    };
+
+    if !arr.iter().any(|v| v.as_str() == Some(path_str.as_str())) {
+        arr.push(Value::String(path_str));
+    }
+}
+
+/// Serialize a settings object to pretty JSON (with a trailing newline) and
+/// write it to `path`.
+async fn write_json_object(path: &Path, root: &Map<String, Value>) -> AppResult<()> {
+    let mut content = serde_json::to_string_pretty(root)
+        .map_err(|e| AppError::Other(format!("serializing settings.local.json: {e}")))?;
+    content.push('\n');
+    fs::write(path, content).await?;
+    Ok(())
 }
 
 fn merge_permission_field(
@@ -427,6 +487,20 @@ mod tests {
         assert_eq!(deny.len(), 1);
         assert_eq!(deny[0].as_str(), Some("Bash(rm:*)"));
         assert!(!parsed["_seededBy"].as_str().unwrap_or("").is_empty());
+
+        let allow_write = parsed["sandbox"]["filesystem"]["allowWrite"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            allow_write.len(),
+            1,
+            "a single constant grant covers every repo's git data"
+        );
+        assert_eq!(
+            allow_write[0].as_str(),
+            Some(paths.repos_clone_dir().to_string_lossy().as_ref()),
+            "Tethys's repos dir is granted to the sandbox"
+        );
     }
 
     #[tokio::test]
@@ -464,5 +538,74 @@ mod tests {
         let parsed: Value = serde_json::from_str(&written).unwrap();
         // No permissions block when nothing was found.
         assert!(parsed.get("permissions").is_none());
+        // The sandbox grant is still added — it's derived from the repo key,
+        // not from the (missing) per-repo settings file.
+        let allow_write = parsed["sandbox"]["filesystem"]["allowWrite"]
+            .as_array()
+            .unwrap();
+        assert_eq!(allow_write.len(), 1);
+    }
+
+    #[test]
+    fn ensure_sandbox_allow_write_dedupes_and_preserves_siblings() {
+        let mut root = serde_json::json!({
+            "sandbox": {
+                "network": { "allowedDomains": ["github.com"] },
+                "filesystem": { "allowWrite": ["/already/here"] }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let git_dir = Path::new("/data/repos/x/.git");
+        ensure_sandbox_allow_write(&mut root, git_dir);
+        // Second call must be a no-op (deduped).
+        ensure_sandbox_allow_write(&mut root, git_dir);
+
+        let value = Value::Object(root);
+        let allow = value["sandbox"]["filesystem"]["allowWrite"]
+            .as_array()
+            .unwrap();
+        assert_eq!(allow.len(), 2);
+        assert_eq!(allow[0].as_str(), Some("/already/here"));
+        assert_eq!(allow[1].as_str(), Some("/data/repos/x/.git"));
+        // Unrelated sandbox config survives the deep insert.
+        assert_eq!(
+            value["sandbox"]["network"]["allowedDomains"][0].as_str(),
+            Some("github.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn install_symlink_seeds_sandbox_git_dir_grant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            data_dir: tmp.path().to_path_buf(),
+        };
+        let worktree = tmp.path().join("wt");
+        fs::create_dir_all(&worktree).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let job_tx = JobTx(tx);
+
+        install_symlink(&worktree, &paths, &job_tx, "backend")
+            .await
+            .unwrap();
+
+        let shared = paths.repo_shared_claude_local("backend");
+        let parsed: Value =
+            serde_json::from_str(&fs::read_to_string(&shared).await.unwrap()).unwrap();
+        let allow_write = parsed["sandbox"]["filesystem"]["allowWrite"]
+            .as_array()
+            .unwrap();
+        assert_eq!(allow_write.len(), 1);
+        assert_eq!(
+            allow_write[0].as_str(),
+            Some(paths.repos_clone_dir().to_string_lossy().as_ref())
+        );
+
+        // The worktree's settings.local.json is a symlink to the shared file.
+        let link = worktree.join(".claude/settings.local.json");
+        assert_eq!(fs::read_link(&link).await.unwrap(), shared);
     }
 }

@@ -196,13 +196,7 @@ async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLink> 
     )
     .await?;
 
-    claude_local::install_symlink(
-        ctx.worktree_path,
-        &ctx.paths.repo_shared_claude_local(&ctx.repo.key),
-        ctx.tx,
-        &ctx.repo.key,
-    )
-    .await?;
+    claude_local::install_symlink(ctx.worktree_path, ctx.paths, ctx.tx, &ctx.repo.key).await?;
 
     copy_configured_files(
         &clone_path,
