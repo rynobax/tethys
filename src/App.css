@@ -1481,15 +1481,16 @@ li.is-dragging {
   margin-bottom: 12px;
 }
 
-/* Pin the tab bar while the modal body scrolls. Negative margins + matching
-   padding bleed the opaque background over the modal's own padding so scrolled
-   content can't peek above or beside the tabs. */
+/* Pin the tab bar while the modal body scrolls. top:0 pins it flush against
+   the scrollport, covering the modal's top padding; the opaque background plus
+   padding-bottom (instead of margin) keep scrolled content from peeking
+   through the gap below the tabs. */
 .system-status-modal .modal-tabs {
   position: sticky;
   top: 0;
   z-index: 1;
-  margin: -20px -24px 0;
-  padding: 20px 24px 12px;
+  margin-bottom: 0;
+  padding-bottom: 12px;
   background: var(--bg);
 }
 
