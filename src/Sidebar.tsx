@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   DndContext,
   DragOverlay,
-  KeyboardSensor,
   PointerSensor,
   closestCenter,
   useSensor,
@@ -15,7 +14,6 @@ import type { SyntheticListenerMap } from "@dnd-kit/core/dist/hooks/utilities";
 import {
   SortableContext,
   arrayMove,
-  sortableKeyboardCoordinates,
   useSortable,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
@@ -70,10 +68,9 @@ export function Sidebar({
   const sensors = useSensors(
     // 5px activation distance prevents a single click from being interpreted
     // as a drag start, which would swallow row selection.
+    // Pointer-only: no KeyboardSensor, so focusing a row and pressing Enter
+    // doesn't trap the user in keyboard drag mode.
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    }),
   );
 
   // Defensive: clear stuck drag state if the dragged workspace falls out of
