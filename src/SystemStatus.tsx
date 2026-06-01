@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  Discrepancies,
   PendingPermission,
   RegistryStatus,
   SystemErrorEntry,
@@ -16,12 +17,21 @@ type Props = {
   /** Result of the last `registry_status` invoke — drives the config-path
    *  row in the Status tab. */
   registry: RegistryStatus | null;
+  /** State/disk mismatches surfaced in the Status tab. */
+  discrepancies: Discrepancies | null;
+  /** Reload app state after a discrepancy is resolved (remove orphan / forget). */
+  onDiscrepancyChange: () => void;
 };
 
 const HOUR_MS = 60 * 60 * 1000;
 type TabId = "status" | "pending_permissions";
 
-export function SystemStatus({ allWorkspaces, registry }: Props) {
+export function SystemStatus({
+  allWorkspaces,
+  registry,
+  discrepancies,
+  onDiscrepancyChange,
+}: Props) {
   const [errors, setErrors] = useState<SystemErrorEntry[]>([]);
   const [pending, setPending] = useState<PendingPermission[]>([]);
   const [open, setOpen] = useState(false);
@@ -56,7 +66,12 @@ export function SystemStatus({ allWorkspaces, registry }: Props) {
   const pendingDeletes = allWorkspaces.filter((w) => w.deleted_at !== null);
   const hasErrors = errors.length > 0;
   const hasPending = pending.length > 0;
-  const hasNotices = hasErrors || pendingDeletes.length > 0 || hasPending;
+  const hasDiscrepancies =
+    (discrepancies?.orphaned_dirs.length ?? 0) > 0 ||
+    (discrepancies?.missing_worktrees.length ?? 0) > 0;
+  // Yellow only signals something actionable: pending permission grants or a
+  // state/disk mismatch. Pending deletions are routine and don't warrant it.
+  const hasWarnings = hasPending || hasDiscrepancies;
 
   return (
     <>
@@ -68,7 +83,7 @@ export function SystemStatus({ allWorkspaces, registry }: Props) {
       >
         <span
           className={`status-dot ${
-            hasErrors ? "red" : hasNotices ? "yellow" : "green"
+            hasErrors ? "red" : hasWarnings ? "yellow" : "green"
           }`}
         />
         Status
@@ -80,10 +95,12 @@ export function SystemStatus({ allWorkspaces, registry }: Props) {
           errors={errors}
           pendingDeletes={pendingDeletes}
           pendingPermissions={pending}
+          discrepancies={discrepancies}
           registry={registry}
           onClose={() => setOpen(false)}
           onRefreshErrors={refreshErrors}
           onRefreshPending={refreshPending}
+          onDiscrepancyChange={onDiscrepancyChange}
         />
       )}
     </>
@@ -96,20 +113,24 @@ function SystemStatusModal({
   errors,
   pendingDeletes,
   pendingPermissions,
+  discrepancies,
   registry,
   onClose,
   onRefreshErrors,
   onRefreshPending,
+  onDiscrepancyChange,
 }: {
   tab: TabId;
   onTabChange: (t: TabId) => void;
   errors: SystemErrorEntry[];
   pendingDeletes: Workspace[];
   pendingPermissions: PendingPermission[];
+  discrepancies: Discrepancies | null;
   registry: RegistryStatus | null;
   onClose: () => void;
   onRefreshErrors: () => void;
   onRefreshPending: () => void;
+  onDiscrepancyChange: () => void;
 }) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -143,8 +164,10 @@ function SystemStatusModal({
           <StatusTab
             errors={errors}
             pendingDeletes={pendingDeletes}
+            discrepancies={discrepancies}
             registry={registry}
             onRefresh={onRefreshErrors}
+            onDiscrepancyChange={onDiscrepancyChange}
           />
         ) : (
           <PendingPermissionsTab
@@ -166,13 +189,17 @@ function SystemStatusModal({
 function StatusTab({
   errors,
   pendingDeletes,
+  discrepancies,
   registry,
   onRefresh,
+  onDiscrepancyChange,
 }: {
   errors: SystemErrorEntry[];
   pendingDeletes: Workspace[];
+  discrepancies: Discrepancies | null;
   registry: RegistryStatus | null;
   onRefresh: () => void;
+  onDiscrepancyChange: () => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -220,6 +247,11 @@ function StatusTab({
 
   return (
     <>
+      <DiskMismatchSection
+        discrepancies={discrepancies}
+        onChanged={onDiscrepancyChange}
+      />
+
       <section>
         <div className="section-header">
           <h4>Configuration</h4>
@@ -466,6 +498,151 @@ function PendingPermissionRow({
       </div>
     </li>
   );
+}
+
+function DiskMismatchSection({
+  discrepancies,
+  onChanged,
+}: {
+  discrepancies: Discrepancies | null;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState<Set<string>>(() => new Set());
+
+  const orphans = discrepancies?.orphaned_dirs ?? [];
+  const missing = discrepancies?.missing_worktrees ?? [];
+  if (orphans.length === 0 && missing.length === 0) return null;
+
+  const withBusy = async (key: string, fn: () => Promise<void>) => {
+    setBusy((prev) => new Set(prev).add(key));
+    try {
+      await fn();
+    } catch (e) {
+      alert(String(e));
+    } finally {
+      setBusy((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  };
+
+  const removeOrphan = (path: string) =>
+    withBusy(`orphan:${path}`, async () => {
+      await invoke("remove_orphan_dir", { path });
+      onChanged();
+    });
+
+  const forgetWorkspace = (id: string) =>
+    withBusy(`forget:${id}`, async () => {
+      await invoke("forget_workspace", { id });
+      onChanged();
+    });
+
+  // Collapse missing-worktree rows by workspace_id — multiple repos per
+  // workspace would otherwise show redundant Forget buttons.
+  const missingByWorkspace = new Map<
+    string,
+    { branch: string; repos: string[] }
+  >();
+  for (const m of missing) {
+    const entry = missingByWorkspace.get(m.workspace_id) ?? {
+      branch: m.branch,
+      repos: [],
+    };
+    entry.repos.push(m.repo_key);
+    missingByWorkspace.set(m.workspace_id, entry);
+  }
+
+  return (
+    <section>
+      <h4>State / disk mismatch</h4>
+      <p className="muted">
+        Tethys found things that don&apos;t line up between{" "}
+        <code>state.json</code> and your <code>worktree_root</code>. Usually the
+        result of a crash or manual filesystem surgery.
+      </p>
+
+      {orphans.length > 0 && (
+        <>
+          <h4>Orphaned worktrees</h4>
+          <p className="muted">
+            Directories with no matching workspace in state. Safe to remove.
+          </p>
+          <ul className="status-list">
+            {orphans.map((o) => {
+              const working = busy.has(`orphan:${o.path}`);
+              return (
+                <li key={o.path}>
+                  <div className="status-row">
+                    <code>{o.path}</code>
+                  </div>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => removeOrphan(o.path)}
+                    disabled={working}
+                  >
+                    {working ? (
+                      <>
+                        <Spinner /> Removing…
+                      </>
+                    ) : (
+                      "Remove"
+                    )}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
+
+      {missingByWorkspace.size > 0 && (
+        <>
+          <h4>Missing worktrees</h4>
+          <p className="muted">
+            Workspaces in state whose worktree directories have vanished. Forget
+            drops the workspace from state; it does not touch disk.
+          </p>
+          <ul className="status-list">
+            {Array.from(missingByWorkspace.entries()).map(
+              ([id, { branch, repos }]) => {
+                const working = busy.has(`forget:${id}`);
+                return (
+                  <li key={id}>
+                    <div className="status-row">
+                      <code>{branch}</code>{" "}
+                      <span className="muted">· missing: {repos.join(", ")}</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="danger"
+                      onClick={() => forgetWorkspace(id)}
+                      disabled={working}
+                    >
+                      {working ? (
+                        <>
+                          <Spinner /> Forgetting…
+                        </>
+                      ) : (
+                        "Forget"
+                      )}
+                    </button>
+                  </li>
+                );
+              },
+            )}
+          </ul>
+        </>
+      )}
+    </section>
+  );
+}
+
+function Spinner() {
+  return <span className="spinner" aria-hidden="true" />;
 }
 
 function formatRemaining(ms: number): string {

@@ -523,7 +523,12 @@ function App() {
           workspaceNeedsTurn={workspaceNeedsTurn}
         />
         <div className="sidebar-footer">
-          <SystemStatus allWorkspaces={workspaces} registry={registry} />
+          <SystemStatus
+            allWorkspaces={workspaces}
+            registry={registry}
+            discrepancies={discrepancies}
+            onDiscrepancyChange={refresh}
+          />
           <GithubAuthFooter />
         </div>
       </aside>
@@ -533,14 +538,6 @@ function App() {
         {registry && !registryOk && (
           <RegistryNotice registry={registry} onChanged={refresh} />
         )}
-        {discrepancies &&
-          (discrepancies.orphaned_dirs.length > 0 ||
-            discrepancies.missing_worktrees.length > 0) && (
-            <DiscrepancyNotice
-              discrepancies={discrepancies}
-              onChanged={refresh}
-            />
-          )}
         {/*
           Mount one runner per in-flight creation so the invoke stays
           alive — and its JobEvents stay in component state — regardless
@@ -698,143 +695,6 @@ function RegistryNotice({
           Re-check
         </button>
       </div>
-    </div>
-  );
-}
-
-function DiscrepancyNotice({
-  discrepancies,
-  onChanged,
-}: {
-  discrepancies: Discrepancies;
-  onChanged: () => void;
-}) {
-  const [busy, setBusy] = useState<Set<string>>(() => new Set());
-
-  const withBusy = async (key: string, fn: () => Promise<void>) => {
-    setBusy((prev) => new Set(prev).add(key));
-    try {
-      await fn();
-    } catch (e) {
-      alert(String(e));
-    } finally {
-      setBusy((prev) => {
-        const next = new Set(prev);
-        next.delete(key);
-        return next;
-      });
-    }
-  };
-
-  const removeOrphan = (path: string) =>
-    withBusy(`orphan:${path}`, async () => {
-      await invoke("remove_orphan_dir", { path });
-      onChanged();
-    });
-
-  const forgetWorkspace = (id: string) =>
-    withBusy(`forget:${id}`, async () => {
-      await invoke("forget_workspace", { id });
-      onChanged();
-    });
-
-  // Collapse missing-worktree rows by workspace_id — multiple repos per
-  // workspace would otherwise show redundant Forget buttons.
-  const missingByWorkspace = new Map<
-    string,
-    { branch: string; repos: string[] }
-  >();
-  for (const m of discrepancies.missing_worktrees) {
-    const entry = missingByWorkspace.get(m.workspace_id) ?? {
-      branch: m.branch,
-      repos: [],
-    };
-    entry.repos.push(m.repo_key);
-    missingByWorkspace.set(m.workspace_id, entry);
-  }
-
-  return (
-    <div className="discrepancy-notice">
-      <h2>State / disk mismatch</h2>
-      <p>
-        Tethys found things that don't line up between <code>state.json</code>{" "}
-        and your <code>worktree_root</code>. Usually the result of a crash or
-        manual filesystem surgery.
-      </p>
-
-      {discrepancies.orphaned_dirs.length > 0 && (
-        <>
-          <h3>Orphaned worktrees</h3>
-          <p className="muted">
-            Directories with no matching workspace in state. Safe to remove.
-          </p>
-          <ul className="discrepancy-list">
-            {discrepancies.orphaned_dirs.map((o) => {
-              const working = busy.has(`orphan:${o.path}`);
-              return (
-                <li key={o.path}>
-                  <code className="discrepancy-path">{o.path}</code>
-                  <button
-                    type="button"
-                    className="danger"
-                    onClick={() => removeOrphan(o.path)}
-                    disabled={working}
-                  >
-                    {working ? (
-                      <>
-                        <Spinner /> Removing…
-                      </>
-                    ) : (
-                      "Remove"
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </>
-      )}
-
-      {missingByWorkspace.size > 0 && (
-        <>
-          <h3>Missing worktrees</h3>
-          <p className="muted">
-            Workspaces in state whose worktree directories have vanished. Forget
-            drops the workspace from state; it does not touch disk.
-          </p>
-          <ul className="discrepancy-list">
-            {Array.from(missingByWorkspace.entries()).map(
-              ([id, { branch, repos }]) => {
-                const working = busy.has(`forget:${id}`);
-                return (
-                  <li key={id}>
-                    <div className="discrepancy-meta">
-                      <code>{branch}</code>{" "}
-                      <span className="muted">
-                        · missing: {repos.join(", ")}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      className="danger"
-                      onClick={() => forgetWorkspace(id)}
-                      disabled={working}
-                    >
-                      {working ? (
-                        <>
-                          <Spinner /> Forgetting…
-                        </>
-                      ) : (
-                        "Forget"
-                      )}
-                    </button>
-                  </li>
-                );
-              },
-            )}
-          </ul>
-        </>
-      )}
     </div>
   );
 }
