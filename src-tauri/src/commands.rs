@@ -163,6 +163,10 @@ async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLink> 
     let clone_path = ctx.paths.repo_clone_path(&ctx.repo.key);
 
     git::ensure_clone(&clone_path, &ctx.repo.remote_url, ctx.tx, &ctx.repo.key).await?;
+    // A stray checkout in the clone would otherwise feed the wrong base into
+    // the pull (fast-forwards HEAD) and into any `track_from = None` worktree
+    // (branches off HEAD). Put it back on the default branch first.
+    git::ensure_clone_on_default_branch(&clone_path, ctx.tx, &ctx.repo.key).await?;
     git::pull_clone(&clone_path, ctx.tx, &ctx.repo.key).await?;
 
     // Pre-check: if the branch already exists, git worktree add will fail

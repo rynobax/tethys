@@ -260,6 +260,92 @@ pub async fn worktree_add(
     Ok(())
 }
 
+/// Ensure the clone is checked out on origin's default branch before we pull
+/// and branch new worktrees off its HEAD.
+///
+/// Tethys treats the clone as a stable base that always sits on the default
+/// branch: `pull_clone` fast-forwards whatever is checked out, and
+/// `worktree_add` with `track_from = None` branches off the clone's current
+/// HEAD. If a stray manual checkout (or an interrupted git operation) left the
+/// clone on some other branch, both of those silently use the wrong base, so
+/// we detect that here and switch back.
+///
+/// Detection is best-effort: if `refs/remotes/origin/HEAD` is missing we can't
+/// know the default branch and leave the clone alone rather than guess. But
+/// once we know we're on the wrong branch, a failed `checkout` (e.g. a dirty
+/// working tree) is bubbled so provisioning aborts loudly instead of branching
+/// off stale code.
+pub async fn ensure_clone_on_default_branch(
+    clone_path: &Path,
+    tx: &JobTx,
+    repo: &str,
+) -> AppResult<()> {
+    let Some(default) = origin_default_branch(clone_path).await else {
+        return Ok(());
+    };
+    if current_branch(clone_path).await.as_deref() == Some(default.as_str()) {
+        return Ok(());
+    }
+    tx.status(
+        format!("clone is not on '{default}'; switching back before branching"),
+        Some(repo),
+    );
+    let args: [&OsStr; 4] = [
+        "-C".as_ref(),
+        clone_path.as_os_str(),
+        "checkout".as_ref(),
+        default.as_ref(),
+    ];
+    let status = run_streamed("git", args, None, tx, Some(repo)).await?;
+    if !status.success() {
+        return Err(AppError::Other(format!(
+            "git checkout {default} in {} exited with {:?}",
+            clone_path.display(),
+            status.code()
+        )));
+    }
+    Ok(())
+}
+
+/// Origin's default branch as recorded in the clone's `refs/remotes/origin/HEAD`
+/// (written by `git clone`), e.g. `"main"`. `None` if the ref is missing or
+/// unreadable.
+async fn origin_default_branch(clone_path: &Path) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(clone_path)
+        .arg("symbolic-ref")
+        .arg("--short")
+        .arg("refs/remotes/origin/HEAD")
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // `--short` still yields "origin/main"; strip the remote prefix.
+    name.strip_prefix("origin/").map(str::to_string)
+}
+
+/// The branch currently checked out in the clone, e.g. `"main"`. `None` if
+/// unreadable or HEAD is detached.
+async fn current_branch(clone_path: &Path) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(clone_path)
+        .arg("symbolic-ref")
+        .arg("--short")
+        .arg("HEAD")
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 /// `git -C <clone_path> show-ref --verify --quiet refs/heads/<branch>`.
 /// Returns true if the branch exists locally in the clone. Non-zero exit
 /// means the branch doesn't exist — not an error.
@@ -434,4 +520,107 @@ pub async fn worktree_remove(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command as StdCommand;
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let out = StdCommand::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Initialize `dir` as a git repo on `main` with a single commit.
+    fn init_repo_with_commit(dir: &Path) {
+        let out = StdCommand::new("git")
+            .arg("init")
+            .arg("-b")
+            .arg("main")
+            .arg(dir)
+            .output()
+            .expect("spawn git init");
+        assert!(
+            out.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        git_ok(dir, &["config", "user.email", "test@example.com"]);
+        git_ok(dir, &["config", "user.name", "Test"]);
+        std::fs::write(dir.join("README.md"), "hi").unwrap();
+        git_ok(dir, &["add", "."]);
+        git_ok(dir, &["commit", "-m", "init"]);
+    }
+
+    fn clone(origin: &Path, dest: &Path) {
+        let out = StdCommand::new("git")
+            .arg("clone")
+            .arg(origin)
+            .arg(dest)
+            .output()
+            .expect("spawn git clone");
+        assert!(
+            out.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn noop_tx() -> JobTx {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        JobTx(tx)
+    }
+
+    #[tokio::test]
+    async fn switches_clone_back_to_default_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        init_repo_with_commit(&origin);
+
+        let clone_path = tmp.path().join("clone");
+        clone(&origin, &clone_path);
+
+        // Simulate something accidentally checking out the wrong branch.
+        git_ok(&clone_path, &["checkout", "-b", "stray"]);
+        assert_eq!(current_branch(&clone_path).await.as_deref(), Some("stray"));
+
+        ensure_clone_on_default_branch(&clone_path, &noop_tx(), "repo")
+            .await
+            .unwrap();
+
+        assert_eq!(current_branch(&clone_path).await.as_deref(), Some("main"));
+    }
+
+    #[tokio::test]
+    async fn leaves_clone_on_default_branch_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        init_repo_with_commit(&origin);
+
+        let clone_path = tmp.path().join("clone");
+        clone(&origin, &clone_path);
+        assert_eq!(
+            origin_default_branch(&clone_path).await.as_deref(),
+            Some("main")
+        );
+        assert_eq!(current_branch(&clone_path).await.as_deref(), Some("main"));
+
+        ensure_clone_on_default_branch(&clone_path, &noop_tx(), "repo")
+            .await
+            .unwrap();
+
+        assert_eq!(current_branch(&clone_path).await.as_deref(), Some("main"));
+    }
 }
