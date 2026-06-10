@@ -1649,7 +1649,7 @@ function CreateWorkspaceDialog({
   const [selected, setSelected] = useState<Set<string>>(() =>
     loadLastRepoSelection(repos),
   );
-  const [useHipaa, setUseHipaa] = useState(false);
+  const [claudeBinary, setClaudeBinary] = useState("claude");
 
   const toggle = (key: string) => {
     setSelected((prev) => {
@@ -1676,7 +1676,7 @@ function CreateWorkspaceDialog({
     onSubmit({
       branch: branch.trim(),
       repo_selections: repoSelections,
-      claude_binary: useHipaa ? "claude-hipaa" : null,
+      claude_binary: claudeBinary === "claude" ? null : claudeBinary,
     });
   };
 
@@ -1723,15 +1723,16 @@ function CreateWorkspaceDialog({
             </ul>
           )}
         </div>
-        <label className="repo-row">
-          <input
-            type="checkbox"
-            checked={useHipaa}
-            onChange={(e) => setUseHipaa(e.target.checked)}
-          />
-          <span className="repo-display">
-            Use <code>claude-hipaa</code> for sessions in this workspace
-          </span>
+        <label>
+          Claude binary
+          <select
+            value={claudeBinary}
+            onChange={(e) => setClaudeBinary(e.target.value)}
+          >
+            <option value="claude">claude</option>
+            <option value="claude-hipaa">claude-hipaa</option>
+            <option value="claude-unsafe">claude-unsafe</option>
+          </select>
         </label>
         <div className="modal-actions">
           <button type="button" onClick={onClose}>

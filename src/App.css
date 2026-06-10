@@ -457,7 +457,8 @@ button.danger {
   letter-spacing: 0.04em;
 }
 
-.modal input {
+.modal input,
+.modal select {
   font: inherit;
   padding: 6px 8px;
   border: 1px solid var(--border);
@@ -468,7 +469,8 @@ button.danger {
   letter-spacing: normal;
 }
 
-.modal input:focus {
+.modal input:focus,
+.modal select:focus {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
   border-color: transparent;
