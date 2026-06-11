@@ -191,6 +191,7 @@ impl ScriptSupervisor {
         }
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
+        crate::child_env::sanitize_for_child_repo(&mut cmd);
 
         let child = pair
             .slave

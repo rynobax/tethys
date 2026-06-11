@@ -30,6 +30,7 @@ pub async fn run_setup_script(
     cmd.arg("-c").arg(script);
     cmd.current_dir(cwd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    crate::child_env::sanitize_for_child_repo(&mut cmd);
 
     let mut child = cmd
         .spawn()

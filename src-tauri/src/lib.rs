@@ -1,3 +1,4 @@
+mod child_env;
 mod claude;
 mod claude_local;
 mod commands;
