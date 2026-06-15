@@ -767,6 +767,52 @@ button.danger.primary:hover:not(:disabled) {
   margin-left: auto;
 }
 
+/* Chips listing the scripts currently running in a workspace. */
+.workspace-scripts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.script-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--script-chip-fg, #2f7d54);
+  background: color-mix(in oklab, var(--script-chip, #4caf78) 18%, transparent);
+  border: 1px solid color-mix(in oklab, var(--script-chip, #4caf78) 35%, transparent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Leading pulse dot to read as "active". */
+.script-chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--script-chip, #4caf78);
+  flex-shrink: 0;
+  animation: script-chip-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes script-chip-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
 .session-pane {
   display: flex;
   flex-direction: column;

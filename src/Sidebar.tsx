@@ -32,6 +32,8 @@ type Props = {
   onDelete: (ws: Workspace) => void;
   onClearTurn: (ws: Workspace) => void;
   workspaceNeedsTurn: (ws: Workspace) => boolean;
+  /** Names of scripts currently running in the workspace (empty if none). */
+  runningScriptNames: (ws: Workspace) => string[];
 };
 
 export function Sidebar({
@@ -43,6 +45,7 @@ export function Sidebar({
   onDelete,
   onClearTurn,
   workspaceNeedsTurn,
+  runningScriptNames,
 }: Props) {
   const { active, archived } = useMemo(() => {
     const active: Workspace[] = [];
@@ -129,6 +132,7 @@ export function Sidebar({
                 workspace={w}
                 selected={w.id === selectedId}
                 needsTurn={workspaceNeedsTurn(w)}
+                runningScripts={runningScriptNames(w)}
                 onSelect={() => onSelect(w.id)}
                 onContextMenu={(x, y) => setMenu({ ws: w, x, y })}
               />
@@ -140,6 +144,7 @@ export function Sidebar({
                 workspace={activeWorkspace}
                 selected={activeWorkspace.id === selectedId}
                 needsTurn={workspaceNeedsTurn(activeWorkspace)}
+                runningScripts={runningScriptNames(activeWorkspace)}
                 isDragging
                 onSelect={() => {}}
                 onContextMenu={() => {}}
@@ -167,6 +172,7 @@ export function Sidebar({
               workspace={w}
               selected={w.id === selectedId}
               needsTurn={workspaceNeedsTurn(w)}
+              runningScripts={runningScriptNames(w)}
               isArchived
               onSelect={() => onSelect(w.id)}
               onContextMenu={(x, y) => setMenu({ ws: w, x, y })}
@@ -193,12 +199,14 @@ function SortableWorkspaceRow({
   workspace,
   selected,
   needsTurn,
+  runningScripts,
   onSelect,
   onContextMenu,
 }: {
   workspace: Workspace;
   selected: boolean;
   needsTurn: boolean;
+  runningScripts: string[];
   onSelect: () => void;
   onContextMenu: (x: number, y: number) => void;
 }) {
@@ -216,6 +224,7 @@ function SortableWorkspaceRow({
       workspace={workspace}
       selected={selected}
       needsTurn={needsTurn}
+      runningScripts={runningScripts}
       isDragging={isDragging}
       onSelect={onSelect}
       onContextMenu={onContextMenu}
@@ -240,6 +249,7 @@ function WorkspaceRow({
   workspace,
   selected,
   needsTurn,
+  runningScripts,
   isArchived = false,
   isDragging = false,
   onSelect,
@@ -249,6 +259,7 @@ function WorkspaceRow({
   workspace: Workspace;
   selected: boolean;
   needsTurn: boolean;
+  runningScripts: string[];
   isArchived?: boolean;
   isDragging?: boolean;
   onSelect: () => void;
@@ -292,6 +303,19 @@ function WorkspaceRow({
           />
         )}
       </div>
+      {status === "ready" && runningScripts.length > 0 && (
+        <div className="workspace-scripts">
+          {runningScripts.map((name) => (
+            <span
+              key={name}
+              className="script-chip"
+              title={`Script running: ${name}`}
+            >
+              {name}
+            </span>
+          ))}
+        </div>
+      )}
       {status === "creating" && <div className="pending-label">creating…</div>}
       {status === "creation_failed" && (
         <div className="pending-label">creation failed</div>

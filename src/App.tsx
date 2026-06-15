@@ -169,6 +169,15 @@ function App() {
     [turnStates],
   );
 
+  const runningScriptNamesFor = useCallback(
+    (w: Workspace): string[] => {
+      const scripts = scriptsByWorkspace.get(w.id);
+      if (!scripts) return [];
+      return scripts.filter((s) => s.running).map((s) => s.script_name);
+    },
+    [scriptsByWorkspace],
+  );
+
   const handleClearTurn = useCallback(
     (workspace: Workspace) => {
       // Backend persists turn_acknowledged + emits session:turn_changed
@@ -521,6 +530,7 @@ function App() {
           onDelete={handleDelete}
           onClearTurn={handleClearTurn}
           workspaceNeedsTurn={workspaceNeedsTurn}
+          runningScriptNames={runningScriptNamesFor}
         />
         <div className="sidebar-footer">
           <SystemStatus
