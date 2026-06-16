@@ -39,6 +39,13 @@ pub struct Repo {
     /// you maintain separately.
     pub remote_url: String,
 
+    /// Branch new worktrees are cut from. Tethys switches the base clone to
+    /// this branch (creating a local tracking branch from `origin/<branch>` if
+    /// needed) before `git worktree add`. Defaults to the remote's default
+    /// branch (`refs/remotes/origin/HEAD`) when unset.
+    #[serde(default)]
+    pub default_branch: Option<String>,
+
     /// Shell command run in each new worktree immediately after it's created
     /// (e.g. `pnpm install`). Optional.
     #[serde(default)]
@@ -234,6 +241,7 @@ worktree_root = "CHANGE_ME_TO_AN_ABSOLUTE_PATH"
 # [[repo]]
 # key = "frontend"
 # remote_url = "git@github.com:me/frontend.git"
+# default_branch = "main"          # defaults to the remote's default branch
 # default_setup_script = "pnpm install"
 # setup_timeout_secs = 600
 # copy_files = [".env", "apps/web/.env.local"]

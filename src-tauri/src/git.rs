@@ -260,8 +260,12 @@ pub async fn worktree_add(
     Ok(())
 }
 
-/// Ensure the clone is checked out on origin's default branch before we pull
-/// and branch new worktrees off its HEAD.
+/// Ensure the clone is checked out on its default branch before we pull and
+/// branch new worktrees off its HEAD.
+///
+/// `override_branch` is the repo's `default_branch` from `repos.toml` when the
+/// user pinned one; otherwise we fall back to origin's default branch as
+/// recorded in `refs/remotes/origin/HEAD`.
 ///
 /// Tethys treats the clone as a stable base that always sits on the default
 /// branch: `pull_clone` fast-forwards whatever is checked out, and
@@ -270,18 +274,26 @@ pub async fn worktree_add(
 /// clone on some other branch, both of those silently use the wrong base, so
 /// we detect that here and switch back.
 ///
-/// Detection is best-effort: if `refs/remotes/origin/HEAD` is missing we can't
-/// know the default branch and leave the clone alone rather than guess. But
-/// once we know we're on the wrong branch, a failed `checkout` (e.g. a dirty
-/// working tree) is bubbled so provisioning aborts loudly instead of branching
+/// Fallback detection is best-effort: with no override and a missing
+/// `refs/remotes/origin/HEAD` we can't know the default branch and leave the
+/// clone alone rather than guess. But once we know which branch we want, a
+/// failed `checkout` (e.g. a dirty working tree, or a pinned branch that
+/// doesn't exist) is bubbled so provisioning aborts loudly instead of branching
 /// off stale code.
 pub async fn ensure_clone_on_default_branch(
     clone_path: &Path,
+    override_branch: Option<&str>,
     tx: &JobTx,
     repo: &str,
 ) -> AppResult<()> {
-    let Some(default) = origin_default_branch(clone_path).await else {
-        return Ok(());
+    let default = match override_branch {
+        Some(branch) => branch.to_string(),
+        None => {
+            let Some(detected) = origin_default_branch(clone_path).await else {
+                return Ok(());
+            };
+            detected
+        }
     };
     if current_branch(clone_path).await.as_deref() == Some(default.as_str()) {
         return Ok(());
@@ -595,11 +607,35 @@ mod tests {
         git_ok(&clone_path, &["checkout", "-b", "stray"]);
         assert_eq!(current_branch(&clone_path).await.as_deref(), Some("stray"));
 
-        ensure_clone_on_default_branch(&clone_path, &noop_tx(), "repo")
+        ensure_clone_on_default_branch(&clone_path, None, &noop_tx(), "repo")
             .await
             .unwrap();
 
         assert_eq!(current_branch(&clone_path).await.as_deref(), Some("main"));
+    }
+
+    #[tokio::test]
+    async fn switches_clone_to_overridden_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        init_repo_with_commit(&origin);
+        // A second branch on the origin the user wants to base worktrees off.
+        git_ok(&origin, &["checkout", "-b", "develop"]);
+        git_ok(&origin, &["checkout", "main"]);
+
+        let clone_path = tmp.path().join("clone");
+        clone(&origin, &clone_path);
+        assert_eq!(current_branch(&clone_path).await.as_deref(), Some("main"));
+
+        ensure_clone_on_default_branch(&clone_path, Some("develop"), &noop_tx(), "repo")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            current_branch(&clone_path).await.as_deref(),
+            Some("develop")
+        );
     }
 
     #[tokio::test]
@@ -617,7 +653,7 @@ mod tests {
         );
         assert_eq!(current_branch(&clone_path).await.as_deref(), Some("main"));
 
-        ensure_clone_on_default_branch(&clone_path, &noop_tx(), "repo")
+        ensure_clone_on_default_branch(&clone_path, None, &noop_tx(), "repo")
             .await
             .unwrap();
 
