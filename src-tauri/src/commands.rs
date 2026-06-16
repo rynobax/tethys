@@ -73,6 +73,25 @@ pub async fn github_reprobe_auth(
     Ok(poller.auth_snapshot().await)
 }
 
+/// The editor Tethys opens files and worktrees in. Centralized so switching
+/// editors is a one-line change shared by every "open in editor" action.
+const EDITOR_APP: &str = "Visual Studio Code";
+
+/// Open `path` (a file or directory) in [`EDITOR_APP`] via macOS `open -a`.
+fn open_in_editor(path: &Path) -> AppResult<()> {
+    std::process::Command::new("open")
+        .args(["-a", EDITOR_APP])
+        .arg(path)
+        .status()
+        .map_err(|e| {
+            AppError::Other(format!(
+                "failed to open {} in {EDITOR_APP}: {e}",
+                path.display()
+            ))
+        })?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn open_repos_config(paths: State<'_, Paths>) -> AppResult<()> {
     let path = paths.repos_config_file();
@@ -84,21 +103,7 @@ pub fn open_repos_config(paths: State<'_, Paths>) -> AppResult<()> {
         info!(?path, "wrote starter repos.toml");
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(&path)
-            .status()
-            .map_err(|e| AppError::Other(format!("failed to open {}: {e}", path.display())))?;
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        return Err(AppError::Other(
-            "open_repos_config is only implemented for macOS in M2".into(),
-        ));
-    }
-
-    Ok(())
+    open_in_editor(&path)
 }
 
 #[tauri::command]
@@ -117,18 +122,7 @@ pub async fn open_in_vscode(
         .await
         .ok_or_else(|| AppError::WorkspaceNotFound(id.clone()))?;
 
-    std::process::Command::new("open")
-        .args(["-a", "Visual Studio Code"])
-        .arg(&workspace_root)
-        .status()
-        .map_err(|e| {
-            AppError::Other(format!(
-                "failed to open {} in VS Code: {e}",
-                workspace_root.display()
-            ))
-        })?;
-
-    Ok(())
+    open_in_editor(&workspace_root)
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,7 +160,13 @@ async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLink> 
     // A stray checkout in the clone would otherwise feed the wrong base into
     // the pull (fast-forwards HEAD) and into any `track_from = None` worktree
     // (branches off HEAD). Put it back on the default branch first.
-    git::ensure_clone_on_default_branch(&clone_path, ctx.tx, &ctx.repo.key).await?;
+    git::ensure_clone_on_default_branch(
+        &clone_path,
+        ctx.repo.default_branch.as_deref(),
+        ctx.tx,
+        &ctx.repo.key,
+    )
+    .await?;
     git::pull_clone(&clone_path, ctx.tx, &ctx.repo.key).await?;
 
     // Pre-check: if the branch already exists, git worktree add will fail
