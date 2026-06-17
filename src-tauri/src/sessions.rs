@@ -1,10 +1,8 @@
-use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
@@ -13,12 +11,12 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::hook_listener::HookMessage;
+use crate::pty::{OnExit, PtyProcess, PtySpawn, Ring};
 use crate::state::SessionRuntimeState;
 use crate::store::Store;
 use crate::tmux;
 
 const RING_CAPACITY: usize = 2 * 1024 * 1024; // 2 MB scrollback per session
-const READ_BUF: usize = 4096;
 
 /// Inputs to `SessionSupervisor::spawn_with_id`. Bundled in a struct so the
 /// inner function doesn't trip clippy's `too_many_arguments` lint.
@@ -61,14 +59,7 @@ pub struct SessionInfo {
 
 struct SessionHandle {
     info: SessionInfo,
-    master: Box<dyn MasterPty + Send>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    ring: Arc<Mutex<VecDeque<u8>>>,
-    /// Fan-out targets for live PTY bytes. Writers that error (client closed)
-    /// are dropped on the next tick.
-    subscribers: Arc<Mutex<Vec<Channel<InvokeResponseBody>>>>,
-    /// Flipped to `false` when the child process exits.
-    running: Arc<Mutex<bool>>,
+    pty: PtyProcess,
 }
 
 /// One entry per in-flight Claude spawn awaiting its `SessionStart` hook.
@@ -265,39 +256,6 @@ impl SessionSupervisor {
             seed_bytes,
             initial_state,
         } = req;
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: 30,
-                cols: 100,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| AppError::Other(format!("openpty failed: {e}")))?;
-
-        let mut cmd = CommandBuilder::new(program);
-        for arg in args {
-            cmd.arg(arg);
-        }
-        cmd.cwd(cwd);
-        cmd.env("TERM", "xterm-256color");
-        crate::child_env::sanitize_for_child_repo(&mut cmd);
-
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|e| AppError::Other(format!("spawn failed: {e}")))?;
-        drop(pair.slave);
-
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| AppError::Other(format!("clone reader failed: {e}")))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| AppError::Other(format!("take writer failed: {e}")))?;
-
         let info = SessionInfo {
             id: id.clone(),
             workspace_id: workspace_id.clone(),
@@ -309,34 +267,22 @@ impl SessionSupervisor {
             turn_acknowledged: false,
         };
 
-        let ring = Arc::new(Mutex::new(VecDeque::with_capacity(RING_CAPACITY)));
-        if !seed_bytes.is_empty() {
-            // Seed the ring before the reader thread starts so the first
-            // attach sees [seed][tmux's fresh redraw] in that order.
-            append_to_ring(&ring, seed_bytes);
-        }
-        let subscribers: Arc<Mutex<Vec<Channel<InvokeResponseBody>>>> =
-            Arc::new(Mutex::new(Vec::new()));
-        let running = Arc::new(Mutex::new(true));
-
-        spawn_reader_thread(reader, ring.clone(), subscribers.clone());
-        spawn_child_watcher(
-            child,
-            id.clone(),
-            workspace_id.clone(),
-            running.clone(),
-            ring.clone(),
-            tmux_bin,
-            self.app.clone(),
-        );
+        let pty = PtyProcess::spawn(
+            PtySpawn {
+                program,
+                args,
+                cwd,
+                seed_bytes,
+                ring_capacity: RING_CAPACITY,
+                tmux_session_name: id.clone(),
+                tmux_bin,
+            },
+            session_exit_hook(self.app.clone(), workspace_id.clone(), id.clone()),
+        )?;
 
         let handle = SessionHandle {
             info: info.clone(),
-            master: pair.master,
-            writer: Arc::new(Mutex::new(writer)),
-            ring,
-            subscribers,
-            running,
+            pty,
         };
 
         self.sessions.lock().unwrap().insert(id.clone(), handle);
@@ -680,44 +626,25 @@ impl SessionSupervisor {
         let handle = sessions
             .get(session_id)
             .ok_or_else(|| AppError::Other(format!("session not found: {session_id}")))?;
-
-        let scrollback: Vec<u8> = handle.ring.lock().unwrap().iter().copied().collect();
-        handle.subscribers.lock().unwrap().push(channel);
-        Ok(scrollback)
+        Ok(handle.pty.attach(channel))
     }
 
     pub fn send_input(&self, session_id: &str, data: &[u8]) -> AppResult<()> {
-        let writer = {
-            let sessions = self.sessions.lock().unwrap();
-            sessions
-                .get(session_id)
-                .ok_or_else(|| AppError::Other(format!("session not found: {session_id}")))?
-                .writer
-                .clone()
-        };
-        writer
-            .lock()
-            .unwrap()
-            .write_all(data)
-            .map_err(|e| AppError::Other(format!("write: {e}")))?;
-        Ok(())
+        let sessions = self.sessions.lock().unwrap();
+        sessions
+            .get(session_id)
+            .ok_or_else(|| AppError::Other(format!("session not found: {session_id}")))?
+            .pty
+            .send_input(data)
     }
 
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> AppResult<()> {
         let sessions = self.sessions.lock().unwrap();
-        let handle = sessions
+        sessions
             .get(session_id)
-            .ok_or_else(|| AppError::Other(format!("session not found: {session_id}")))?;
-        handle
-            .master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| AppError::Other(format!("resize: {e}")))?;
-        Ok(())
+            .ok_or_else(|| AppError::Other(format!("session not found: {session_id}")))?
+            .pty
+            .resize(cols, rows)
     }
 
     pub fn list_for_workspace(&self, workspace_id: &str) -> Vec<SessionInfo> {
@@ -728,7 +655,7 @@ impl SessionSupervisor {
             .filter(|h| h.info.workspace_id == workspace_id)
             .map(|h| {
                 let mut info = h.info.clone();
-                info.running = *h.running.lock().unwrap();
+                info.running = h.pty.is_running();
                 let turn = turn_map.get(&h.info.id).cloned().unwrap_or_default();
                 info.runtime_state = turn.state;
                 info.notification_type = turn.notification_type;
@@ -760,43 +687,47 @@ fn parent_session_from_subagent_path(transcript_path: &str) -> Option<String> {
     Some(subagents_dir.parent()?.file_name()?.to_str()?.to_string())
 }
 
-fn spawn_reader_thread(
-    mut reader: Box<dyn Read + Send>,
-    ring: Arc<Mutex<VecDeque<u8>>>,
-    subscribers: Arc<Mutex<Vec<Channel<InvokeResponseBody>>>>,
-) {
-    std::thread::spawn(move || {
-        let mut buf = [0u8; READ_BUF];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => {
-                    debug!("pty reader: EOF");
-                    break;
-                }
-                Ok(n) => {
-                    let chunk = &buf[..n];
-                    append_to_ring(&ring, chunk);
-                    // Fan out, dropping subscribers whose channel errored.
-                    let mut subs = subscribers.lock().unwrap();
-                    subs.retain(|sub| {
-                        sub.send(InvokeResponseBody::Raw(chunk.to_vec())).is_ok()
-                    });
-                }
-                Err(e) => {
-                    warn!(error = %e, "pty reader error");
-                    break;
-                }
-            }
-        }
-    });
+/// Build the exit hook handed to [`PtyProcess::spawn`]. It runs only on a
+/// true child exit (the watcher already filtered out client detaches): scrub
+/// tmux's detach epilogue from the ring, then emit `session:exit` and a
+/// `Dormant` `session:turn_changed` so the UI stops showing Working forever.
+fn session_exit_hook(app: AppHandle, workspace_id: String, session_id: SessionId) -> OnExit {
+    Box::new(move |code, ring| {
+        // Session truly gone — tmux client printed `[detached (from
+        // session …)]` to the pty just before exiting. Strip that trailing
+        // line from the ring so it doesn't surface when the user revisits
+        // the workspace.
+        trim_detach_epilogue(ring);
+
+        info!(%session_id, ?code, "session child exited");
+        let _ = app.emit(
+            "session:exit",
+            serde_json::json!({
+                "workspace_id": workspace_id,
+                "session_id": session_id,
+                "code": code,
+            }),
+        );
+        // Turn state is stale once the PTY is gone — emit a Dormant
+        // transition so the UI doesn't keep showing Working indefinitely.
+        let _ = app.emit(
+            "session:turn_changed",
+            serde_json::json!({
+                "workspace_id": workspace_id,
+                "session_id": session_id,
+                "runtime_state": SessionRuntimeState::Dormant,
+                "notification_type": Option::<String>::None,
+            }),
+        );
+    })
 }
 
 /// Scan the tail of the ring for tmux's detach epilogue
 /// (`[detached (from session …)]` + surrounding CR/LFs) and remove it.
 /// Tmux emits this line to the client's terminal right before the client
 /// exits, so it lands in our buffer via the reader thread. Called from
-/// the child watcher once we've confirmed the session itself is gone.
-fn trim_detach_epilogue(ring: &Arc<Mutex<VecDeque<u8>>>) {
+/// the exit hook once we've confirmed the session itself is gone.
+fn trim_detach_epilogue(ring: &Ring) {
     const NEEDLE: &[u8] = b"[detached ";
     // Search back at most ~256 bytes — the message is short.
     const SCAN_WINDOW: usize = 256;
@@ -821,76 +752,6 @@ fn trim_detach_epilogue(ring: &Arc<Mutex<VecDeque<u8>>>) {
         cut_from -= 1;
     }
     ring.truncate(cut_from);
-}
-
-fn append_to_ring(ring: &Arc<Mutex<VecDeque<u8>>>, data: &[u8]) {
-    let mut ring = ring.lock().unwrap();
-    if data.len() >= RING_CAPACITY {
-        ring.clear();
-        ring.extend(&data[data.len() - RING_CAPACITY..]);
-        return;
-    }
-    let overflow = (ring.len() + data.len()).saturating_sub(RING_CAPACITY);
-    for _ in 0..overflow {
-        ring.pop_front();
-    }
-    ring.extend(data.iter().copied());
-}
-
-fn spawn_child_watcher(
-    mut child: Box<dyn portable_pty::Child + Send + Sync>,
-    session_id: SessionId,
-    workspace_id: String,
-    running: Arc<Mutex<bool>>,
-    ring: Arc<Mutex<VecDeque<u8>>>,
-    tmux_bin: PathBuf,
-    app: AppHandle,
-) {
-    std::thread::spawn(move || {
-        let status = child.wait();
-        *running.lock().unwrap() = false;
-        let code = status.ok().map(|s| s.exit_code() as i32);
-
-        // The child here is the tmux *client*. It exits both when claude
-        // truly ends (session disappears) and when the client merely
-        // detaches (app shutdown, another client steals with -D, etc.).
-        // Check has-session to tell them apart.
-        if tmux::has_session(&tmux_bin, &session_id) {
-            info!(
-                %session_id,
-                ?code,
-                "tmux client exited but session still alive (detach)"
-            );
-            return;
-        }
-
-        // Session truly gone — tmux client printed `[detached (from
-        // session …)]` to the pty just before exiting. Strip that
-        // trailing line from the ring so it doesn't surface when the
-        // user revisits the workspace.
-        trim_detach_epilogue(&ring);
-
-        info!(%session_id, ?code, "session child exited");
-        let _ = app.emit(
-            "session:exit",
-            serde_json::json!({
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "code": code,
-            }),
-        );
-        // Turn state is stale once the PTY is gone — emit a Dormant
-        // transition so the UI doesn't keep showing Working indefinitely.
-        let _ = app.emit(
-            "session:turn_changed",
-            serde_json::json!({
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "runtime_state": SessionRuntimeState::Dormant,
-                "notification_type": Option::<String>::None,
-            }),
-        );
-    });
 }
 
 #[cfg(test)]

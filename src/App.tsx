@@ -789,9 +789,9 @@ function WorkspaceDetail({
   const autoResumedRef = useRef<Set<string>>(new Set());
 
   const liveById = new Map(sessions.map((s) => [s.id, s]));
-  // Newest first — the most recently started session is usually what you
-  // want to see. `workspace.sessions` is append-ordered on the backend.
-  const ordered = [...workspace.sessions].reverse();
+  // `workspace.sessions` is append-ordered on the backend, so the most
+  // recently started session sits last — i.e. on the right of the tab row.
+  const ordered = [...workspace.sessions];
   const visibleOrdered = ordered.filter((m) => !m.hidden);
   const hiddenOrdered = ordered.filter((m) => m.hidden);
   const [showHidden, setShowHidden] = useState(false);
@@ -828,14 +828,14 @@ function WorkspaceDetail({
 
   // Effective session selection: only used when a session tab (or nothing)
   // is selected. Prefer the user's explicit pick when it's still visible,
-  // else first live, else newest.
+  // else newest live, else newest. Newest is last in append order.
   const candidates = showHidden ? ordered : visibleOrdered;
   const effectiveSelected = (() => {
     if (selectedTab?.kind === "script") return null;
     if (selectedSessionId && candidates.some((m) => m.id === selectedSessionId))
       return selectedSessionId;
-    const firstLive = candidates.find((m) => liveById.has(m.id));
-    return firstLive?.id ?? candidates[0]?.id ?? null;
+    const lastLive = [...candidates].reverse().find((m) => liveById.has(m.id));
+    return lastLive?.id ?? candidates[candidates.length - 1]?.id ?? null;
   })();
 
   const selected = effectiveSelected

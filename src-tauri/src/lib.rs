@@ -12,6 +12,7 @@ mod job;
 mod logging;
 mod paths;
 mod pending_permissions;
+mod pty;
 mod purge;
 mod reconcile;
 mod registry;
