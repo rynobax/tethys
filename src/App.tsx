@@ -861,6 +861,16 @@ function WorkspaceDetail({
     }
   };
 
+  // Acknowledge a single session's "your turn" indicator. The backend
+  // persists turn_acknowledged + emits session:turn_changed, which clears
+  // the chip dot (and folds into the workspace row aggregate).
+  const clearSessionTurn = (sessionId: string) => {
+    invoke("acknowledge_session_turn", {
+      workspaceId: workspace.id,
+      sessionId,
+    }).catch((e) => console.error("acknowledge_session_turn failed:", e));
+  };
+
   const setSessionHidden = async (sessionId: string, hidden: boolean) => {
     setBusy(true);
     setError(null);
@@ -1042,6 +1052,7 @@ function WorkspaceDetail({
           onSelect={selectSession}
           onStartInRepo={startInRepo}
           onSetHidden={setSessionHidden}
+          onClearTurn={clearSessionTurn}
           scriptChips={scriptChips}
           selectedScriptKey={
             selectedTab?.kind === "script"
@@ -1205,6 +1216,7 @@ function SessionChip({
   live,
   onSelect,
   onSetHidden,
+  onContextMenu,
 }: {
   meta: ChipMeta;
   hidden: boolean;
@@ -1212,6 +1224,7 @@ function SessionChip({
   live: SessionInfo | undefined;
   onSelect: (id: string) => void;
   onSetHidden: (id: string, hidden: boolean) => void;
+  onContextMenu: (id: string, x: number, y: number) => void;
 }) {
   const label = meta.id.slice(0, 8);
   const needsTurn =
@@ -1230,6 +1243,10 @@ function SessionChip({
       tabIndex={0}
       className={chipClass}
       onClick={() => onSelect(meta.id)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onContextMenu(meta.id, e.clientX, e.clientY);
+      }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
@@ -1326,6 +1343,7 @@ function SessionBar({
   onSelect,
   onStartInRepo,
   onSetHidden,
+  onClearTurn,
   scriptChips,
   selectedScriptKey,
   showRepoOnScript,
@@ -1344,6 +1362,7 @@ function SessionBar({
   /** `null` => start at the workspace root. */
   onStartInRepo: (repoKey: string | null) => void;
   onSetHidden: (id: string, hidden: boolean) => void;
+  onClearTurn: (id: string) => void;
   scriptChips: ScriptChipData[];
   selectedScriptKey: string | null;
   /** Show the repo prefix on the script chip — only useful when the
@@ -1355,6 +1374,15 @@ function SessionBar({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
+
+  // Right-click context menu for a single session chip.
+  const [chipMenu, setChipMenu] = useState<{
+    sessionId: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const openChipMenu = (sessionId: string, x: number, y: number) =>
+    setChipMenu({ sessionId, x, y });
 
   // Close the "+ New" repo menu on outside click.
   useEffect(() => {
@@ -1388,6 +1416,7 @@ function SessionBar({
           live={liveById.get(m.id)}
           onSelect={onSelect}
           onSetHidden={onSetHidden}
+          onContextMenu={openChipMenu}
         />
       ))}
       {showHidden &&
@@ -1400,6 +1429,7 @@ function SessionBar({
             live={liveById.get(m.id)}
             onSelect={onSelect}
             onSetHidden={onSetHidden}
+            onContextMenu={openChipMenu}
           />
         ))}
       {scriptChips.length > 0 && <span className="chip-bar-divider" />}
@@ -1473,6 +1503,91 @@ function SessionBar({
             : `Show ${hiddenSessions.length} hidden`}
         </button>
       )}
+      {chipMenu &&
+        (() => {
+          const live = liveById.get(chipMenu.sessionId);
+          const needsTurn =
+            !!live?.running &&
+            (live.runtime_state === "idle" ||
+              live.runtime_state === "waiting_input");
+          const isHidden = hiddenSessions.some(
+            (m) => m.id === chipMenu.sessionId,
+          );
+          return (
+            <SessionChipMenu
+              x={chipMenu.x}
+              y={chipMenu.y}
+              needsTurn={needsTurn}
+              hidden={isHidden}
+              onClearTurn={() => onClearTurn(chipMenu.sessionId)}
+              onSetHidden={() => onSetHidden(chipMenu.sessionId, !isHidden)}
+              onClose={() => setChipMenu(null)}
+            />
+          );
+        })()}
+    </div>
+  );
+}
+
+function SessionChipMenu({
+  x,
+  y,
+  needsTurn,
+  hidden,
+  onClearTurn,
+  onSetHidden,
+  onClose,
+}: {
+  x: number;
+  y: number;
+  needsTurn: boolean;
+  hidden: boolean;
+  onClearTurn: () => void;
+  onSetHidden: () => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const handle = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("mousedown", handle);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", handle);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  // Keep the menu inside the viewport.
+  const ESTIMATED_W = 180;
+  const ESTIMATED_H = 80;
+  const left = Math.min(x, window.innerWidth - ESTIMATED_W - 4);
+  const top = Math.min(y, window.innerHeight - ESTIMATED_H - 4);
+
+  const wrap = (fn: () => void) => () => {
+    fn();
+    onClose();
+  };
+
+  return (
+    <div ref={ref} className="context-menu" style={{ left, top }} role="menu">
+      {needsTurn && (
+        <button
+          type="button"
+          role="menuitem"
+          onClick={wrap(onClearTurn)}
+        >
+          Clear notification
+        </button>
+      )}
+      <button type="button" role="menuitem" onClick={wrap(onSetHidden)}>
+        {hidden ? "Show this chat" : "Hide this chat"}
+      </button>
     </div>
   );
 }
