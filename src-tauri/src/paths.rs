@@ -47,6 +47,16 @@ impl Paths {
         self.repos_clone_dir().join(repo_key)
     }
 
+    /// The clone's git directory — `.../repos/<repo_key>/.git`. Every worktree
+    /// Tethys branches off this clone keeps its git metadata here (shared
+    /// `config`/`refs`/`logs` plus a per-worktree subdir under
+    /// `.git/worktrees/`), so this is the path the sandbox must let git write.
+    /// Scoped to `.git` specifically so the clone's source tree beside it
+    /// stays read-only.
+    pub fn repo_git_dir(&self, repo_key: &str) -> PathBuf {
+        self.repo_clone_path(repo_key).join(".git")
+    }
+
     pub fn symlinks_dir(&self) -> PathBuf {
         self.data_dir.join("symlinks")
     }

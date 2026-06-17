@@ -31,11 +31,12 @@ const SEEDED_MARKER: &str = "tethys (seeded on workspace create; safe to edit)";
 /// Ensure `<worktree>/.claude/settings.local.json` is a symlink to the
 /// repo's shared settings file, creating that file if it's the first
 /// worktree to touch it. The shared file is (re-)seeded on every worktree
-/// creation with a `sandbox.filesystem.allowWrite` grant for Tethys's repos
-/// directory: every worktree's git metadata lives under there (in the app
-/// data dir) rather than beside the worktree, so without this grant Claude
-/// Code's sandbox denies routine git writes (index refresh, `add`,
-/// `commit`). Claude Code unions these arrays across settings scopes, so the
+/// creation with a `sandbox.filesystem.allowWrite` grant for the repo's clone
+/// `.git` directory: every worktree's git metadata lives under there (in the
+/// app data dir) rather than beside the worktree, so without this grant Claude
+/// Code's sandbox denies routine git writes (index refresh, `add`, `commit`,
+/// branch tracking, push). Scoping to `.git` keeps the clone's source tree
+/// read-only. Claude Code unions these arrays across settings scopes, so the
 /// grant coexists with whatever Claude later writes to the same file.
 ///
 /// If the worktree already has a real file there (e.g. the repo tracks one),
@@ -52,7 +53,11 @@ pub async fn install_symlink(
         fs::create_dir_all(parent).await?;
     }
     let mut shared = read_root_object(&shared_path).await?;
-    ensure_sandbox_allow_write(&mut shared, &paths.repos_clone_dir());
+    // Migrate files seeded by the earlier fix that granted the whole repos
+    // dir (which left the clone's source tree writable); the scoped `.git`
+    // grant below replaces it.
+    remove_sandbox_allow_write(&mut shared, &paths.repos_clone_dir());
+    ensure_sandbox_allow_write(&mut shared, &paths.repo_git_dir(repo_key));
     write_json_object(&shared_path, &shared).await?;
 
     let claude_dir = worktree_path.join(".claude");
@@ -186,9 +191,11 @@ pub async fn write_workspace_root_settings(
 
     // Sessions started at the workspace root run git against every repo's
     // worktree, whose git dirs live under the app data dir — outside the
-    // sandbox's default writable set. Grant Tethys's repos dir (see
+    // sandbox's default writable set. Grant each repo's `.git` (see
     // `install_symlink`).
-    ensure_sandbox_allow_write(&mut root, &paths.repos_clone_dir());
+    for repo_key in repo_keys {
+        ensure_sandbox_allow_write(&mut root, &paths.repo_git_dir(repo_key));
+    }
 
     let claude_dir = workspace_root.join(".claude");
     fs::create_dir_all(&claude_dir).await?;
@@ -314,6 +321,22 @@ fn ensure_sandbox_allow_write(root: &mut Map<String, Value>, path: &Path) {
     if !arr.iter().any(|v| v.as_str() == Some(path_str.as_str())) {
         arr.push(Value::String(path_str));
     }
+}
+
+/// Remove `path` from `root.sandbox.filesystem.allowWrite` if present,
+/// leaving the surrounding structure untouched. Used to retire a grant a
+/// prior version seeded.
+fn remove_sandbox_allow_write(root: &mut Map<String, Value>, path: &Path) {
+    let path_str = path.to_string_lossy();
+    let Some(arr) = root
+        .get_mut("sandbox")
+        .and_then(|v| v.get_mut("filesystem"))
+        .and_then(|v| v.get_mut("allowWrite"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    arr.retain(|v| v.as_str() != Some(path_str.as_ref()));
 }
 
 /// Serialize a settings object to pretty JSON (with a trailing newline) and
@@ -491,15 +514,15 @@ mod tests {
         let allow_write = parsed["sandbox"]["filesystem"]["allowWrite"]
             .as_array()
             .unwrap();
+        let allow_write_strs: Vec<&str> =
+            allow_write.iter().filter_map(|v| v.as_str()).collect();
         assert_eq!(
-            allow_write.len(),
-            1,
-            "a single constant grant covers every repo's git data"
-        );
-        assert_eq!(
-            allow_write[0].as_str(),
-            Some(paths.repos_clone_dir().to_string_lossy().as_ref()),
-            "Tethys's repos dir is granted to the sandbox"
+            allow_write_strs,
+            vec![
+                paths.repo_git_dir("frontend").to_string_lossy().as_ref(),
+                paths.repo_git_dir("backend").to_string_lossy().as_ref(),
+            ],
+            "each repo's clone .git dir is granted — not the source-bearing repos dir"
         );
     }
 
@@ -544,6 +567,10 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(allow_write.len(), 1);
+        assert_eq!(
+            allow_write[0].as_str(),
+            Some(paths.repo_git_dir("never-symlinked").to_string_lossy().as_ref())
+        );
     }
 
     #[test]
@@ -601,11 +628,46 @@ mod tests {
         assert_eq!(allow_write.len(), 1);
         assert_eq!(
             allow_write[0].as_str(),
-            Some(paths.repos_clone_dir().to_string_lossy().as_ref())
+            Some(paths.repo_git_dir("backend").to_string_lossy().as_ref())
         );
 
         // The worktree's settings.local.json is a symlink to the shared file.
         let link = worktree.join(".claude/settings.local.json");
         assert_eq!(fs::read_link(&link).await.unwrap(), shared);
+    }
+
+    #[tokio::test]
+    async fn install_symlink_retires_old_repos_dir_grant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            data_dir: tmp.path().to_path_buf(),
+        };
+        // Pre-seed the shared file with the old over-broad grant.
+        let shared = paths.repo_shared_claude_local("backend");
+        fs::create_dir_all(shared.parent().unwrap()).await.unwrap();
+        let mut root = Map::new();
+        ensure_sandbox_allow_write(&mut root, &paths.repos_clone_dir());
+        write_json_object(&shared, &root).await.unwrap();
+
+        let worktree = tmp.path().join("wt");
+        fs::create_dir_all(&worktree).await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        install_symlink(&worktree, &paths, &JobTx(tx), "backend")
+            .await
+            .unwrap();
+
+        let parsed: Value =
+            serde_json::from_str(&fs::read_to_string(&shared).await.unwrap()).unwrap();
+        let allow_write: Vec<&str> = parsed["sandbox"]["filesystem"]["allowWrite"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            allow_write,
+            vec![paths.repo_git_dir("backend").to_string_lossy().as_ref()],
+            "the broad repos-dir grant is replaced by the scoped .git grant"
+        );
     }
 }
