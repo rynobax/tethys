@@ -91,6 +91,32 @@ struct TurnState {
     acknowledged: bool,
 }
 
+impl TurnState {
+    /// Apply an incoming turn signal. Returns `true` when the UI needs a
+    /// fresh `session:turn_changed` (state/notification changed, or a
+    /// dismissed indicator must re-light because a new signal arrived for
+    /// the same state). A repeated signal for an already-lit state is a
+    /// no-op so we don't spam redundant events.
+    fn apply(
+        &mut self,
+        state: SessionRuntimeState,
+        notification_type: Option<String>,
+    ) -> bool {
+        let unchanged =
+            self.state == state && self.notification_type == notification_type;
+        // An acknowledged indicator re-lights on the next signal even when the
+        // state is identical: a repeated idle_prompt is a fresh nudge, not
+        // noise, so a cleared "your turn" row doesn't stay dark forever.
+        if unchanged && !self.acknowledged {
+            return false;
+        }
+        self.state = state;
+        self.notification_type = notification_type;
+        self.acknowledged = false;
+        true
+    }
+}
+
 pub struct SessionSupervisor {
     sessions: Mutex<HashMap<SessionId, SessionHandle>>,
     /// Maps the `TETHYS_SPAWN_TOKEN` we set on the PTY env to the
@@ -150,16 +176,7 @@ impl SessionSupervisor {
         let changed = {
             let mut map = self.turn.lock().unwrap();
             let current = map.entry(session_id.to_string()).or_default();
-            if current.state == state && current.notification_type == notification_type {
-                false
-            } else {
-                current.state = state;
-                current.notification_type = notification_type.clone();
-                // A state transition is the user-facing signal that something
-                // fresh happened — re-light any dismissed indicator.
-                current.acknowledged = false;
-                true
-            }
+            current.apply(state, notification_type.clone())
         };
         if !changed {
             return;
@@ -879,6 +896,47 @@ fn spawn_child_watcher(
 #[cfg(test)]
 mod tests {
     use super::parent_session_from_subagent_path;
+    use super::TurnState;
+    use crate::state::SessionRuntimeState;
+
+    #[test]
+    fn apply_reports_change_on_state_transition() {
+        let mut turn = TurnState::default();
+        assert!(turn.apply(SessionRuntimeState::Working, None));
+        assert_eq!(turn.state, SessionRuntimeState::Working);
+        assert!(!turn.acknowledged);
+    }
+
+    #[test]
+    fn apply_is_noop_for_repeated_unacknowledged_signal() {
+        let mut turn = TurnState::default();
+        turn.apply(
+            SessionRuntimeState::WaitingInput,
+            Some("idle_prompt".into()),
+        );
+        // Same state + notification, still lit — nothing to re-emit.
+        assert!(!turn.apply(
+            SessionRuntimeState::WaitingInput,
+            Some("idle_prompt".into())
+        ));
+    }
+
+    #[test]
+    fn apply_relights_acknowledged_indicator_on_repeated_signal() {
+        let mut turn = TurnState::default();
+        turn.apply(
+            SessionRuntimeState::WaitingInput,
+            Some("idle_prompt".into()),
+        );
+        turn.acknowledged = true; // user cleared the notification
+
+        // A repeated idle_prompt for the same state must re-light the row.
+        assert!(turn.apply(
+            SessionRuntimeState::WaitingInput,
+            Some("idle_prompt".into())
+        ));
+        assert!(!turn.acknowledged);
+    }
 
     #[test]
     fn extracts_parent_uuid_from_subagent_transcript() {
