@@ -31,6 +31,10 @@ struct SpawnRequest<'a> {
     args: &'a [String],
     tmux_bin: PathBuf,
     seed_bytes: &'a [u8],
+    /// Runtime state to seed the session with before any hooks arrive. A
+    /// brand-new spawn sits at an empty prompt (`WaitingInput`); a reattach
+    /// may be mid-response (`Working`).
+    initial_state: SessionRuntimeState,
 }
 
 pub type SessionId = String;
@@ -242,6 +246,7 @@ impl SessionSupervisor {
             args,
             tmux_bin,
             seed_bytes,
+            initial_state,
         } = req;
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -282,7 +287,7 @@ impl SessionSupervisor {
             repo_key,
             cwd: cwd.to_path_buf(),
             running: true,
-            runtime_state: SessionRuntimeState::Working,
+            runtime_state: initial_state,
             notification_type: None,
             turn_acknowledged: false,
         };
@@ -318,13 +323,13 @@ impl SessionSupervisor {
         };
 
         self.sessions.lock().unwrap().insert(id.clone(), handle);
-        // Default to Working — a just-spawned/attached Claude is likely
-        // doing something (starting up, or mid-response after we reattach).
-        // Hooks will refine shortly.
+        // Seed the caller-provided initial state. Hooks refine it shortly: a
+        // brand-new spawn waits at the prompt (WaitingInput), a reattach is
+        // assumed mid-response (Working).
         self.turn.lock().unwrap().insert(
             id,
             TurnState {
-                state: SessionRuntimeState::Working,
+                state: initial_state,
                 notification_type: None,
                 acknowledged: false,
             },
@@ -391,6 +396,9 @@ impl SessionSupervisor {
             args: &args,
             tmux_bin: tmux_bin.to_path_buf(),
             seed_bytes: &[],
+            // Freshly-spawned (or freshly-resumed) Claude lands at an empty
+            // prompt waiting on the user — show "your turn", not "working".
+            initial_state: SessionRuntimeState::WaitingInput,
         })?;
 
         // Prune any expired pending correlations while we're here.
@@ -449,6 +457,9 @@ impl SessionSupervisor {
             args: &args,
             tmux_bin: tmux_bin.to_path_buf(),
             seed_bytes: &seed,
+            // A reattached session may be mid-response; assume Working and let
+            // hooks correct it.
+            initial_state: SessionRuntimeState::Working,
         })
     }
 

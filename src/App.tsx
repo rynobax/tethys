@@ -169,6 +169,18 @@ function App() {
     [turnStates],
   );
 
+  const workspaceWorking = useCallback(
+    (w: Workspace): boolean => {
+      if (w.archived_at) return false;
+      for (const info of turnStates.values()) {
+        if (info.workspaceId !== w.id) continue;
+        if (info.state === "working") return true;
+      }
+      return false;
+    },
+    [turnStates],
+  );
+
   const runningScriptNamesFor = useCallback(
     (w: Workspace): string[] => {
       const scripts = scriptsByWorkspace.get(w.id);
@@ -530,6 +542,7 @@ function App() {
           onDelete={handleDelete}
           onClearTurn={handleClearTurn}
           workspaceNeedsTurn={workspaceNeedsTurn}
+          workspaceWorking={workspaceWorking}
           runningScriptNames={runningScriptNamesFor}
         />
         <div className="sidebar-footer">

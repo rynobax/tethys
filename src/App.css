@@ -752,9 +752,9 @@ button.danger.primary:hover:not(:disabled) {
 }
 
 /*
- * Single indicator: "your turn". Shows yellow with a soft halo whenever
- * Claude is done working (either finished a turn or actively prompting).
- * Paused workspaces dim the whole row instead.
+ * "Your turn" dot on session chips: yellow with a soft halo whenever a
+ * session is done working and waiting on you. (Workspace rows use the
+ * right-edge status bleed below instead.)
  */
 .turn-dot {
   width: 7px;
@@ -765,6 +765,24 @@ button.danger.primary:hover:not(:disabled) {
     color-mix(in oklab, var(--turn-dot, #e2b23a) 25%, transparent);
   display: inline-block;
   margin-left: auto;
+}
+
+/*
+ * Per-workspace status tint: the whole row takes on a color while a session is
+ * working (green) or it's your turn (yellow — more saturated so it reads as the
+ * attention state). Idle/cleared rows keep their default background.
+ */
+.workspace-list > li.status-working {
+  background: color-mix(in oklab, #2fb84d 16%, transparent);
+}
+.workspace-list > li.status-working:hover {
+  background: color-mix(in oklab, #2fb84d 22%, transparent);
+}
+.workspace-list > li.status-turn {
+  background: color-mix(in oklab, var(--turn-dot, #e2b23a) 34%, transparent);
+}
+.workspace-list > li.status-turn:hover {
+  background: color-mix(in oklab, var(--turn-dot, #e2b23a) 42%, transparent);
 }
 
 /* Chips listing the scripts currently running in a workspace. */

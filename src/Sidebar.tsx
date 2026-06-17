@@ -32,6 +32,8 @@ type Props = {
   onDelete: (ws: Workspace) => void;
   onClearTurn: (ws: Workspace) => void;
   workspaceNeedsTurn: (ws: Workspace) => boolean;
+  /** True when a session in the workspace is actively processing (Claude working). */
+  workspaceWorking: (ws: Workspace) => boolean;
   /** Names of scripts currently running in the workspace (empty if none). */
   runningScriptNames: (ws: Workspace) => string[];
 };
@@ -45,6 +47,7 @@ export function Sidebar({
   onDelete,
   onClearTurn,
   workspaceNeedsTurn,
+  workspaceWorking,
   runningScriptNames,
 }: Props) {
   const { active, archived } = useMemo(() => {
@@ -132,6 +135,7 @@ export function Sidebar({
                 workspace={w}
                 selected={w.id === selectedId}
                 needsTurn={workspaceNeedsTurn(w)}
+                working={workspaceWorking(w)}
                 runningScripts={runningScriptNames(w)}
                 onSelect={() => onSelect(w.id)}
                 onContextMenu={(x, y) => setMenu({ ws: w, x, y })}
@@ -144,6 +148,7 @@ export function Sidebar({
                 workspace={activeWorkspace}
                 selected={activeWorkspace.id === selectedId}
                 needsTurn={workspaceNeedsTurn(activeWorkspace)}
+                working={workspaceWorking(activeWorkspace)}
                 runningScripts={runningScriptNames(activeWorkspace)}
                 isDragging
                 onSelect={() => {}}
@@ -172,6 +177,7 @@ export function Sidebar({
               workspace={w}
               selected={w.id === selectedId}
               needsTurn={workspaceNeedsTurn(w)}
+              working={workspaceWorking(w)}
               runningScripts={runningScriptNames(w)}
               isArchived
               onSelect={() => onSelect(w.id)}
@@ -199,6 +205,7 @@ function SortableWorkspaceRow({
   workspace,
   selected,
   needsTurn,
+  working,
   runningScripts,
   onSelect,
   onContextMenu,
@@ -206,6 +213,7 @@ function SortableWorkspaceRow({
   workspace: Workspace;
   selected: boolean;
   needsTurn: boolean;
+  working: boolean;
   runningScripts: string[];
   onSelect: () => void;
   onContextMenu: (x: number, y: number) => void;
@@ -224,6 +232,7 @@ function SortableWorkspaceRow({
       workspace={workspace}
       selected={selected}
       needsTurn={needsTurn}
+      working={working}
       runningScripts={runningScripts}
       isDragging={isDragging}
       onSelect={onSelect}
@@ -249,6 +258,7 @@ function WorkspaceRow({
   workspace,
   selected,
   needsTurn,
+  working,
   runningScripts,
   isArchived = false,
   isDragging = false,
@@ -259,6 +269,7 @@ function WorkspaceRow({
   workspace: Workspace;
   selected: boolean;
   needsTurn: boolean;
+  working: boolean;
   runningScripts: string[];
   isArchived?: boolean;
   isDragging?: boolean;
@@ -267,12 +278,24 @@ function WorkspaceRow({
   dndProps?: DndProps;
 }) {
   const status = workspace.status.kind;
+  // Status tint for live workspaces: yellow when it's your turn, green while a
+  // session is working. Your-turn wins over working since it's the actionable
+  // state. Idle/cleared rows keep their default background.
+  const statusEdge =
+    status === "ready" && !isArchived
+      ? needsTurn
+        ? "status-turn"
+        : working
+          ? "status-working"
+          : ""
+      : "";
   const classes = [
     selected ? "selected" : "",
     isArchived ? "is-archived" : "",
     isDragging ? "is-dragging" : "",
     status === "creating" ? "pending" : "",
     status === "creation_failed" ? "creation-failed" : "",
+    statusEdge,
   ]
     .filter(Boolean)
     .join(" ");
@@ -295,13 +318,6 @@ function WorkspaceRow({
         <span className="workspace-name-text" title={workspace.branch}>
           {workspace.branch}
         </span>
-        {status === "ready" && needsTurn && (
-          <span
-            className="turn-dot"
-            title="Your turn"
-            aria-label="your turn"
-          />
-        )}
       </div>
       {status === "ready" && runningScripts.length > 0 && (
         <div className="workspace-scripts">
