@@ -909,6 +909,7 @@ button.danger.primary:hover:not(:disabled) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  user-select: none;
 }
 
 .session-chip:hover:not(:disabled) {
@@ -1007,7 +1008,6 @@ button.danger.primary:hover:not(:disabled) {
 
 .session-chip.script-chip {
   cursor: pointer;
-  user-select: none;
 }
 
 .session-chip.script-chip .script-indicator {

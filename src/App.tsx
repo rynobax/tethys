@@ -1229,6 +1229,7 @@ function SessionChip({
   const label = meta.id.slice(0, 8);
   const needsTurn =
     live?.running &&
+    !live.turn_acknowledged &&
     (live.runtime_state === "idle" || live.runtime_state === "waiting_input");
   const chipClass = [
     "session-chip",
@@ -1508,6 +1509,7 @@ function SessionBar({
           const live = liveById.get(chipMenu.sessionId);
           const needsTurn =
             !!live?.running &&
+            !live.turn_acknowledged &&
             (live.runtime_state === "idle" ||
               live.runtime_state === "waiting_input");
           const isHidden = hiddenSessions.some(
