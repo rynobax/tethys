@@ -909,6 +909,7 @@ button.danger.primary:hover:not(:disabled) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  -webkit-user-select: none;
   user-select: none;
 }
 
