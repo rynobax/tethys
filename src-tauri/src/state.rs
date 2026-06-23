@@ -106,6 +106,18 @@ pub struct RepoLink {
     pub setup_script_ran_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub github: Option<GithubPrStatus>,
+    /// Whether Tethys created this branch (branched off HEAD or off a remote
+    /// tracking ref) versus checked out a branch that already existed locally.
+    /// Teardown only deletes branches Tethys created, so checking out a
+    /// pre-existing PR branch never destroys it. Defaults to `true` for state
+    /// written before this field existed — those branches were always created
+    /// by Tethys under the old branch pre-check.
+    #[serde(default = "default_created_branch")]
+    pub created_branch: bool,
+}
+
+fn default_created_branch() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
