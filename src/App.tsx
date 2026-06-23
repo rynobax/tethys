@@ -27,6 +27,16 @@ import { useTauriEvent } from "./useTauriEvent";
 import { isReadyToDelete } from "./workspaceDerived";
 import "./App.css";
 
+/** Bracketed-paste markers: Claude Code treats the wrapped bytes as pasted
+ *  text rather than typed keystrokes, so the draft lands in the prompt box
+ *  without being submitted. Mirrors the drag-drop paste in SessionTerminal. */
+const PASTE_START = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
+/** Give Claude's TUI a beat to mount its input box after the SessionStart
+ *  hook fires before pasting, so the draft isn't swallowed by the startup
+ *  redraw. */
+const DRAFT_PROMPT_SETTLE_MS = 500;
+
 function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [registry, setRegistry] = useState<RegistryStatus | null>(null);
@@ -79,6 +89,21 @@ function App() {
   const [scriptsByWorkspace, setScriptsByWorkspace] = useState<
     Map<WorkspaceId, ScriptInfo[]>
   >(new Map());
+  /**
+   * Draft "initial prompt" text the user types while a workspace is still
+   * provisioning, keyed by workspace_id. Once that workspace's first Claude
+   * session reports a `claude_session_id` (its SessionStart hook fired, so the
+   * TUI is up), the draft is pasted into the session — bracketed paste, no
+   * submit — and the entry is dropped.
+   */
+  const [draftPrompts, setDraftPrompts] = useState<Map<WorkspaceId, string>>(
+    new Map(),
+  );
+  /**
+   * Workspaces whose draft prompt has already been pasted (or is mid-paste),
+   * so the flush effect doesn't double-send on repeated `workspace:changed`.
+   */
+  const flushedDraftsRef = useRef<Set<WorkspaceId>>(new Set());
   const [theme, setTheme] = useState<Theme | null>(null);
 
   useEffect(() => {
@@ -318,6 +343,47 @@ function App() {
     refreshScriptsFor(event.payload.workspace_id);
   });
 
+  // Paste any draft initial-prompt into a workspace's first Claude session
+  // once it's up. `workspace:changed` fires (and refreshes `workspaces`) when
+  // the SessionStart hook populates `claude_session_id`, which is our signal
+  // that the TUI is ready to receive a paste.
+  useEffect(() => {
+    for (const [workspaceId, prompt] of draftPrompts) {
+      if (flushedDraftsRef.current.has(workspaceId)) continue;
+      if (prompt.trim().length === 0) continue;
+      const ws = workspaces.find((w) => w.id === workspaceId);
+      if (!ws || ws.status.kind !== "ready") continue;
+      const session = ws.sessions.find((s) => s.claude_session_id !== null);
+      if (!session) continue;
+
+      flushedDraftsRef.current.add(workspaceId);
+      const sessionId = session.id;
+      const bytes = Array.from(
+        new TextEncoder().encode(`${PASTE_START}${prompt}${PASTE_END}`),
+      );
+      const flush = async () => {
+        await new Promise((resolve) =>
+          setTimeout(resolve, DRAFT_PROMPT_SETTLE_MS),
+        );
+        try {
+          await invoke("send_input", { sessionId, data: bytes });
+        } catch (e) {
+          console.error("flush draft prompt failed:", e);
+          // Let a later `workspace:changed` retry the paste.
+          flushedDraftsRef.current.delete(workspaceId);
+          return;
+        }
+        setDraftPrompts((prev) => {
+          if (!prev.has(workspaceId)) return prev;
+          const next = new Map(prev);
+          next.delete(workspaceId);
+          return next;
+        });
+      };
+      void flush();
+    }
+  }, [workspaces, draftPrompts]);
+
   const visibleWorkspaces = useMemo(
     () => workspaces.filter((w) => !w.deleted_at),
     [workspaces],
@@ -451,6 +517,14 @@ function App() {
         next.delete(workspaceId);
         return next;
       });
+      // Drop any draft prompt the user typed for this (now-abandoned) workspace.
+      setDraftPrompts((prev) => {
+        if (!prev.has(workspaceId)) return prev;
+        const next = new Map(prev);
+        next.delete(workspaceId);
+        return next;
+      });
+      flushedDraftsRef.current.delete(workspaceId);
       setSelectedId((cur) => (cur === workspaceId ? null : cur));
       // Drop the failed draft from state. `forget_workspace` is a hard
       // delete with no grace window — the right call here since there are
@@ -573,6 +647,14 @@ function App() {
             workspaceId={id}
             args={args}
             isShown={id === selectedId}
+            draftPrompt={draftPrompts.get(id) ?? ""}
+            onPromptChange={(value) =>
+              setDraftPrompts((prev) => {
+                const next = new Map(prev);
+                next.set(id, value);
+                return next;
+              })
+            }
             onSuccess={handleCreateSuccess}
             onDismiss={() => handleCreationDismiss(id)}
           />
@@ -640,12 +722,16 @@ function CreationRunner({
   workspaceId,
   args,
   isShown,
+  draftPrompt,
+  onPromptChange,
   onSuccess,
   onDismiss,
 }: {
   workspaceId: WorkspaceId;
   args: CreateWorkspaceArgs;
   isShown: boolean;
+  draftPrompt: string;
+  onPromptChange: (value: string) => void;
   onSuccess: (workspaceId: WorkspaceId, result: unknown) => void;
   onDismiss: () => void;
 }) {
@@ -662,12 +748,23 @@ function CreationRunner({
   });
   if (!isShown) return null;
   return (
-    <JobLogPane
-      title={`Creating ${args.branch}`}
-      events={events}
-      state={state}
-      onDismiss={onDismiss}
-    />
+    <div className="creation-pane">
+      <JobLogPane
+        title={`Creating ${args.branch}`}
+        events={events}
+        state={state}
+        onDismiss={onDismiss}
+      />
+      <label className="draft-prompt">
+        <span className="draft-prompt-label">Initial prompt</span>
+        <textarea
+          autoFocus
+          value={draftPrompt}
+          onChange={(e) => onPromptChange(e.target.value)}
+          placeholder="Write your first prompt while the workspace provisions — it'll be pasted into Claude once the session opens."
+        />
+      </label>
+    </div>
   );
 }
 

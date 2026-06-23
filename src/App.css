@@ -602,6 +602,42 @@ button.danger.primary:hover:not(:disabled) {
   gap: 8px;
 }
 
+.creation-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 12px;
+}
+
+.draft-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.draft-prompt-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.draft-prompt textarea {
+  resize: vertical;
+  min-height: 80px;
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--fg);
+}
+
 .job-log-pane {
   flex: 1;
   display: flex;
