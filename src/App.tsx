@@ -910,7 +910,20 @@ function WorkspaceDetail({
   const isDev = (m: typeof workspace.sessions[number]) =>
     isFeDev(m) || isBeDev(m);
   const ordered = (() => {
-    const reversed = [...workspace.sessions].reverse();
+    // Collapse any duplicate session ids (first occurrence wins) before
+    // ordering. The pinned path below dedups via its id map + `seen` set,
+    // but the default path filters by kind only — so a duplicate id in
+    // `workspace.sessions` would render two identical chips. Dedup at the
+    // source so both paths are safe.
+    const uniqueIds = new Set<string>();
+    const unique: typeof workspace.sessions = [];
+    for (const s of workspace.sessions) {
+      if (!uniqueIds.has(s.id)) {
+        uniqueIds.add(s.id);
+        unique.push(s);
+      }
+    }
+    const reversed = [...unique].reverse();
     const pin = workspace.session_order;
     if (!pin || pin.length === 0) {
       return [
@@ -919,7 +932,7 @@ function WorkspaceDetail({
         ...reversed.filter(isBeDev),
       ];
     }
-    const byId = new Map(workspace.sessions.map((s) => [s.id, s]));
+    const byId = new Map(unique.map((s) => [s.id, s]));
     const seen = new Set<string>();
     const result: typeof workspace.sessions = [];
     for (const id of pin) {
