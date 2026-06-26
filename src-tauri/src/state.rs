@@ -87,6 +87,28 @@ pub struct Workspace {
     /// state via the memory poller.
     #[serde(default)]
     pub dev_servers: Option<DevServersMeta>,
+    /// PRs the user manually attached to this workspace — e.g. PRs an agent
+    /// opened on a branch other than the worktree's own. The auto-detect path
+    /// only ever finds the single PR whose head is `branch`; these are polled
+    /// by PR number instead, so they carry the same status indicators. Empty
+    /// for workspaces that predate the field.
+    #[serde(default)]
+    pub manual_prs: Vec<ManualPr>,
+}
+
+/// A PR the user explicitly attached to a workspace, identified by its
+/// GitHub coordinates so the poller can fetch it by number regardless of
+/// which branch (or repo) it lives on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualPr {
+    pub owner: String,
+    pub name: String,
+    pub number: u32,
+    /// Latest polled status — same shape as an auto-detected repo-link PR.
+    /// `None` until the first poll after attaching (or if the PR can't be
+    /// fetched).
+    #[serde(default)]
+    pub github: Option<GithubPrStatus>,
 }
 
 /// Per-workspace dev-server state. Populated by `start_dev_servers` and
@@ -485,5 +507,51 @@ mod tests {
         let bytes = serde_json::to_vec(&parsed).expect("serialize");
         let back: AppState = serde_json::from_slice(&bytes).expect("re-deserialize");
         assert_eq!(back.workspaces[0].session_order, ws.session_order);
+    }
+
+    #[test]
+    fn pre_manual_prs_defaults_to_empty() {
+        // state.json from before manual_prs landed must still deserialize,
+        // with the field defaulting to an empty list.
+        let raw = r#"{
+            "workspaces": [
+                {
+                    "id": "abc-123",
+                    "branch": "feat/foo",
+                    "created_at": "2026-04-01T12:00:00Z",
+                    "repo_links": []
+                }
+            ]
+        }"#;
+        let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
+        assert!(parsed.workspaces[0].manual_prs.is_empty());
+    }
+
+    #[test]
+    fn manual_prs_round_trip() {
+        let raw = r#"{
+            "workspaces": [
+                {
+                    "id": "abc-123",
+                    "branch": "feat/foo",
+                    "created_at": "2026-04-01T12:00:00Z",
+                    "repo_links": [],
+                    "manual_prs": [
+                        {"owner": "acme", "name": "web", "number": 4321}
+                    ]
+                }
+            ]
+        }"#;
+        let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
+        let pr = &parsed.workspaces[0].manual_prs[0];
+        assert_eq!(pr.owner, "acme");
+        assert_eq!(pr.name, "web");
+        assert_eq!(pr.number, 4321);
+        assert!(pr.github.is_none());
+        // Round-trip through serialization too.
+        let bytes = serde_json::to_vec(&parsed).expect("serialize");
+        let back: AppState = serde_json::from_slice(&bytes).expect("re-deserialize");
+        assert_eq!(back.workspaces[0].manual_prs.len(), 1);
+        assert_eq!(back.workspaces[0].manual_prs[0].number, 4321);
     }
 }

@@ -259,6 +259,8 @@ pub fn run() {
             commands::registry_status,
             commands::github_auth_status,
             commands::github_reprobe_auth,
+            commands::attach_manual_pr,
+            commands::detach_manual_pr,
             commands::open_repos_config,
             commands::open_in_ide,
             commands::get_settings,

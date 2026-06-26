@@ -327,6 +327,22 @@ function WorkspaceRow({
           ))}
         </ul>
       )}
+      {status === "ready" &&
+        workspace.manual_prs.some((p) => p.github) && (
+          <ul className="workspace-repo-list">
+            {workspace.manual_prs.map(
+              (p) =>
+                p.github && (
+                  <li key={`${p.owner}/${p.name}#${p.number}`}>
+                    <span className="repo-key">{p.name}</span>
+                    <div className="repo-gh-footer">
+                      <GithubChip status={p.github} linkable={false} />
+                    </div>
+                  </li>
+                ),
+            )}
+          </ul>
+        )}
       {status === "ready" && (
         <SidebarWorkspaceMemoryChip workspace={workspace} memory={memory} />
       )}

@@ -13,6 +13,7 @@ use crate::claude;
 use crate::claude_local;
 use crate::error::{AppError, AppResult};
 use crate::git;
+use crate::github::parse_github_pr_url;
 use crate::github::poller::{AuthSnapshot, GithubPoller};
 use crate::inprogress::InProgressWorkspaces;
 use crate::job::{JobEvent, JobTx};
@@ -23,8 +24,8 @@ use crate::registry::{self, starter_template, RegistryLoad, Repo};
 use crate::sessions::{SessionInfo, SessionSupervisor};
 use crate::setup;
 use crate::state::{
-    AppSettings, ClaudeSessionMeta, IdeChoice, RepoLink, SystemErrorEntry, Workspace, WorkspaceId,
-    WorkspaceStatus,
+    AppSettings, ClaudeSessionMeta, IdeChoice, ManualPr, RepoLink, SystemErrorEntry, Workspace,
+    WorkspaceId, WorkspaceStatus,
 };
 use crate::dev_orchestrator::{self, BeMode, OrchestratorConfig};
 use crate::dev_servers::{self, DevServerLocks, DevStateSnapshot};
@@ -72,6 +73,80 @@ pub async fn github_reprobe_auth(
 ) -> AppResult<AuthSnapshot> {
     poller.probe_login().await;
     Ok(poller.auth_snapshot().await)
+}
+
+/// Attach a PR (by its GitHub URL) to a workspace so it's tracked alongside
+/// the auto-detected branch PR. Used to follow PRs an agent opened on a
+/// different branch from the worktree's own. Idempotent: re-attaching the
+/// same PR is a no-op. Forces an immediate poll so the status squares appear
+/// without waiting for the next tick.
+#[tauri::command]
+pub async fn attach_manual_pr(
+    app: AppHandle,
+    store: State<'_, Arc<Store>>,
+    poller: State<'_, Arc<GithubPoller>>,
+    workspace_id: WorkspaceId,
+    url: String,
+) -> AppResult<Workspace> {
+    let (slug, number) = parse_github_pr_url(&url)
+        .ok_or_else(|| AppError::Other(format!("not a GitHub PR URL: {url}")))?;
+
+    let updated = store
+        .mutate(|s| {
+            let ws = s
+                .find_workspace_mut(&workspace_id)
+                .ok_or_else(|| AppError::WorkspaceNotFound(workspace_id.clone()))?;
+            let already = ws.manual_prs.iter().any(|p| {
+                p.owner == slug.owner && p.name == slug.name && p.number == number
+            });
+            if !already {
+                ws.manual_prs.push(ManualPr {
+                    owner: slug.owner.clone(),
+                    name: slug.name.clone(),
+                    number,
+                    github: None,
+                });
+            }
+            Ok(ws.clone())
+        })
+        .await?;
+
+    info!(
+        id = %workspace_id,
+        owner = %slug.owner,
+        name = %slug.name,
+        number = number,
+        "attached manual PR to workspace"
+    );
+    poller.request_tick().await;
+    emit_workspace_changed(&app, &workspace_id);
+    Ok(updated)
+}
+
+/// Detach a previously-attached manual PR from a workspace. No-op if it isn't
+/// attached. Does not touch the auto-detected branch PR.
+#[tauri::command]
+pub async fn detach_manual_pr(
+    app: AppHandle,
+    store: State<'_, Arc<Store>>,
+    workspace_id: WorkspaceId,
+    owner: String,
+    name: String,
+    number: u32,
+) -> AppResult<Workspace> {
+    let updated = store
+        .mutate(|s| {
+            let ws = s
+                .find_workspace_mut(&workspace_id)
+                .ok_or_else(|| AppError::WorkspaceNotFound(workspace_id.clone()))?;
+            ws.manual_prs
+                .retain(|p| !(p.owner == owner && p.name == name && p.number == number));
+            Ok(ws.clone())
+        })
+        .await?;
+
+    emit_workspace_changed(&app, &workspace_id);
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -428,6 +503,7 @@ pub async fn create_workspace(
         status: WorkspaceStatus::Creating,
         session_order: None,
         dev_servers: None,
+        manual_prs: Vec::new(),
     };
     store
         .mutate(|s| {

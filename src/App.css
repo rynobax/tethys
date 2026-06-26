@@ -1736,3 +1736,79 @@ li.is-dragging {
   margin: 6px 0 2px 24px;
   width: calc(100% - 24px);
 }
+
+/* Header "Add ▾" split button + popover */
+.add-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.add-menu-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 200;
+  min-width: 140px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.add-menu-popover button {
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--fg);
+  font: inherit;
+}
+
+.add-menu-popover button:hover:not(:disabled) {
+  background: rgba(125, 125, 125, 0.16);
+}
+
+.add-menu-popover button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Manual PR chip = GithubChip + a detach affordance, shown on hover */
+.manual-pr-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.manual-pr-detach {
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  opacity: 0;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+  padding: 0 2px;
+  margin-left: 1px;
+  transition: opacity 0.1s ease;
+}
+
+.manual-pr-chip:hover .manual-pr-detach {
+  opacity: 0.55;
+}
+
+.manual-pr-detach:hover {
+  opacity: 1 !important;
+  color: var(--danger);
+}
+
+.modal-error {
+  color: var(--danger);
+  margin: 8px 0 0;
+  font-size: 0.9em;
+}

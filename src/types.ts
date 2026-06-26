@@ -46,6 +46,16 @@ export interface RepoLink {
   github: GithubPrStatus | null;
 }
 
+/** A PR the user manually attached to a workspace (e.g. one an agent opened
+ *  on a different branch). Polled by number, so it carries the same status
+ *  as an auto-detected repo-link PR. `github` is null until the first poll. */
+export interface ManualPr {
+  owner: string;
+  name: string;
+  number: number;
+  github: GithubPrStatus | null;
+}
+
 export type SessionKind = "claude" | "frontend_build" | "backend_build";
 
 export interface ClaudeSessionMeta {
@@ -115,6 +125,9 @@ export interface Workspace {
    *  UI strip survives Tethys restarts (memory poller reconciles against
    *  actual container/process state on its next tick). */
   dev_servers: DevServersMeta | null;
+  /** PRs the user manually attached to this workspace. Empty for workspaces
+   *  created before the feature (the backend defaults the field). */
+  manual_prs: ManualPr[];
 }
 
 /** Which editor the workspace "Open in IDE" button launches. `custom`

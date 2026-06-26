@@ -39,6 +39,50 @@ pub fn parse_github_remote(url: &str) -> Option<GithubSlug> {
     })
 }
 
+/// Parse a GitHub pull-request URL into its repo slug and PR number.
+///
+/// Accepts the canonical web form `https://github.com/owner/name/pull/123`
+/// (with or without a trailing path like `/files`, and with or without a
+/// `?query`/`#fragment`). Returns `None` for non-GitHub hosts, non-PR paths,
+/// or malformed input.
+pub fn parse_github_pr_url(url: &str) -> Option<(GithubSlug, u32)> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let (host, path) = split_host_and_path(trimmed)?;
+    if !is_github_host(host) {
+        return None;
+    }
+
+    // Drop any query string / fragment before splitting path segments.
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    let mut segments = path.trim_start_matches('/').split('/');
+    let owner = segments.next()?.trim();
+    let name_raw = segments.next()?.trim();
+    // GitHub uses `/pull/` for the web UI; `/pulls/` is the list page, not a PR.
+    if segments.next()? != "pull" {
+        return None;
+    }
+    let number: u32 = segments.next()?.trim().parse().ok()?;
+    if owner.is_empty() || name_raw.is_empty() {
+        return None;
+    }
+    let name = name_raw.strip_suffix(".git").unwrap_or(name_raw);
+    if name.is_empty() {
+        return None;
+    }
+
+    Some((
+        GithubSlug {
+            owner: owner.to_string(),
+            name: name.to_string(),
+        },
+        number,
+    ))
+}
+
 fn is_github_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("github.com")
 }
@@ -201,5 +245,77 @@ mod tests {
             parse_github_remote("  git@github.com:ryan/tethys.git  "),
             Some(slug("ryan", "tethys"))
         );
+    }
+
+    #[test]
+    fn pr_url_canonical() {
+        assert_eq!(
+            parse_github_pr_url("https://github.com/ryan/tethys/pull/42"),
+            Some((slug("ryan", "tethys"), 42))
+        );
+    }
+
+    #[test]
+    fn pr_url_with_trailing_path() {
+        assert_eq!(
+            parse_github_pr_url("https://github.com/ryan/tethys/pull/42/files"),
+            Some((slug("ryan", "tethys"), 42))
+        );
+    }
+
+    #[test]
+    fn pr_url_with_query_and_fragment() {
+        assert_eq!(
+            parse_github_pr_url("https://github.com/ryan/tethys/pull/42?diff=split#discussion_r1"),
+            Some((slug("ryan", "tethys"), 42))
+        );
+    }
+
+    #[test]
+    fn pr_url_host_case_insensitive_and_trimmed() {
+        assert_eq!(
+            parse_github_pr_url("  https://GitHub.com/ryan/tethys/pull/7  "),
+            Some((slug("ryan", "tethys"), 7))
+        );
+    }
+
+    #[test]
+    fn pr_url_rejects_non_pr_paths() {
+        assert_eq!(parse_github_pr_url("https://github.com/ryan/tethys"), None);
+        assert_eq!(
+            parse_github_pr_url("https://github.com/ryan/tethys/issues/42"),
+            None
+        );
+        assert_eq!(
+            parse_github_pr_url("https://github.com/ryan/tethys/pulls"),
+            None
+        );
+    }
+
+    #[test]
+    fn pr_url_rejects_non_numeric_number() {
+        assert_eq!(
+            parse_github_pr_url("https://github.com/ryan/tethys/pull/abc"),
+            None
+        );
+        assert_eq!(
+            parse_github_pr_url("https://github.com/ryan/tethys/pull/"),
+            None
+        );
+    }
+
+    #[test]
+    fn pr_url_rejects_non_github_host() {
+        assert_eq!(
+            parse_github_pr_url("https://gitlab.com/ryan/tethys/pull/42"),
+            None
+        );
+    }
+
+    #[test]
+    fn pr_url_empty_and_garbage() {
+        assert_eq!(parse_github_pr_url(""), None);
+        assert_eq!(parse_github_pr_url("   "), None);
+        assert_eq!(parse_github_pr_url("not-a-url"), None);
     }
 }

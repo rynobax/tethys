@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -179,9 +179,24 @@ impl GithubPoller {
                 };
                 out.push(Target {
                     workspace_id: ws.id.clone(),
-                    repo_key: link.repo_key.clone(),
                     slug: slug.clone(),
-                    branch: ws.branch.clone(),
+                    kind: TargetKind::Branch {
+                        repo_key: link.repo_key.clone(),
+                        branch: ws.branch.clone(),
+                    },
+                });
+            }
+            // Manually-attached PRs carry their own owner/name (parsed from the
+            // URL at attach time), so they don't need a registry entry — an
+            // agent's PR can live in any repo.
+            for pr in &ws.manual_prs {
+                out.push(Target {
+                    workspace_id: ws.id.clone(),
+                    slug: GithubSlug {
+                        owner: pr.owner.clone(),
+                        name: pr.name.clone(),
+                    },
+                    kind: TargetKind::ManualPr { number: pr.number },
                 });
             }
         }
@@ -201,15 +216,31 @@ impl GithubPoller {
             .await
             .unwrap_or_default();
 
-        for (ws_id, repo_key, status) in &changed {
-            let _ = self.app.emit(
-                "github:status_changed",
-                json!({
-                    "workspace_id": ws_id,
-                    "repo_key": repo_key,
-                    "status": status,
-                }),
-            );
+        // Repo-link changes patch in place via a targeted event. Manual-PR
+        // changes don't map to a repo_key, so we coalesce them into a single
+        // `workspace:changed` per workspace and let the UI re-fetch.
+        let mut manual_dirty: BTreeSet<WorkspaceId> = BTreeSet::new();
+        for (ws_id, target, status) in &changed {
+            match target {
+                TargetRef::RepoLink { repo_key } => {
+                    let _ = self.app.emit(
+                        "github:status_changed",
+                        json!({
+                            "workspace_id": ws_id,
+                            "repo_key": repo_key,
+                            "status": status,
+                        }),
+                    );
+                }
+                TargetRef::ManualPr { .. } => {
+                    manual_dirty.insert(ws_id.clone());
+                }
+            }
+        }
+        for ws_id in manual_dirty {
+            let _ = self
+                .app
+                .emit("workspace:changed", json!({ "workspace_id": ws_id }));
         }
         Ok(changed.len())
     }
@@ -288,9 +319,47 @@ impl GithubPoller {
 #[derive(Debug, Clone)]
 struct Target {
     workspace_id: WorkspaceId,
-    repo_key: String,
     slug: GithubSlug,
-    branch: String,
+    kind: TargetKind,
+}
+
+/// What a poll target points at. Drives both the GraphQL query shape and,
+/// via [`Target::target_ref`], where the result is written back in state.
+#[derive(Debug, Clone)]
+enum TargetKind {
+    /// Auto-detected PR for a repo worktree, found via the workspace branch.
+    Branch { repo_key: String, branch: String },
+    /// User-attached PR, fetched directly by number.
+    ManualPr { number: u32 },
+}
+
+/// Identifies the state slot a poll result belongs to, so `apply_results`
+/// can route it back to the right `github` field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TargetRef {
+    RepoLink {
+        repo_key: String,
+    },
+    ManualPr {
+        owner: String,
+        name: String,
+        number: u32,
+    },
+}
+
+impl Target {
+    fn target_ref(&self) -> TargetRef {
+        match &self.kind {
+            TargetKind::Branch { repo_key, .. } => TargetRef::RepoLink {
+                repo_key: repo_key.clone(),
+            },
+            TargetKind::ManualPr { number } => TargetRef::ManualPr {
+                owner: self.slug.owner.clone(),
+                name: self.slug.name.clone(),
+                number: *number,
+            },
+        }
+    }
 }
 
 fn backoff_for(failures: u32) -> Duration {
@@ -350,20 +419,22 @@ fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
     for (i, t) in targets.iter().enumerate() {
         let ow = format!("q{i}_owner");
         let nm = format!("q{i}_name");
-        let br = format!("q{i}_branch");
-        let bn = format!("q{i}_branch_name");
         vars.insert(ow.clone(), t.slug.owner.clone());
         vars.insert(nm.clone(), t.slug.name.clone());
-        vars.insert(br.clone(), format!("refs/heads/{}", t.branch));
-        vars.insert(bn.clone(), t.branch.clone());
-        var_decls.push(format!(
-            "${ow}: String!, ${nm}: String!, ${br}: String!, ${bn}: String!"
-        ));
-        // `mergedPrs` is the fallback for when the branch has been deleted
-        // post-merge: GitHub nulls the `ref`, but the PR record persists and
-        // is queryable by headRefName.
-        body.push_str(&format!(
-            r#"q{i}: repository(owner: ${ow}, name: ${nm}) {{
+        match &t.kind {
+            TargetKind::Branch { branch, .. } => {
+                let br = format!("q{i}_branch");
+                let bn = format!("q{i}_branch_name");
+                vars.insert(br.clone(), format!("refs/heads/{branch}"));
+                vars.insert(bn.clone(), branch.clone());
+                var_decls.push(format!(
+                    "${ow}: String!, ${nm}: String!, ${br}: String!, ${bn}: String!"
+                ));
+                // `mergedPrs` is the fallback for when the branch has been
+                // deleted post-merge: GitHub nulls the `ref`, but the PR record
+                // persists and is queryable by headRefName.
+                body.push_str(&format!(
+                    r#"q{i}: repository(owner: ${ow}, name: ${nm}) {{
     ref(qualifiedName: ${br}) {{
       associatedPullRequests(first: 1, orderBy: {{field: UPDATED_AT, direction: DESC}}) {{
         nodes {{
@@ -378,7 +449,22 @@ fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
     }}
   }}
 "#
-        ));
+                ));
+            }
+            TargetKind::ManualPr { number } => {
+                var_decls.push(format!("${ow}: String!, ${nm}: String!"));
+                // `number` is a u32 we parsed and stored, so inlining it into
+                // the query is injection-safe (no untrusted string interpolated).
+                body.push_str(&format!(
+                    r#"q{i}: repository(owner: ${ow}, name: ${nm}) {{
+    pullRequest(number: {number}) {{
+      {PR_FIELDS}
+    }}
+  }}
+"#
+                ));
+            }
+        }
     }
 
     let decls = var_decls.join(", ");
@@ -386,34 +472,49 @@ fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
     (query, vars)
 }
 
-fn parse_response(targets: &[Target], data: &Value) -> Vec<(WorkspaceId, String, Option<GithubPrStatus>)> {
+fn parse_response(
+    targets: &[Target],
+    data: &Value,
+) -> Vec<(WorkspaceId, TargetRef, Option<GithubPrStatus>)> {
     let mut out = Vec::with_capacity(targets.len());
     for (i, t) in targets.iter().enumerate() {
         let alias = format!("q{i}");
         let node = data.get(&alias);
-        let status = node.and_then(parse_repo_node);
-        out.push((t.workspace_id.clone(), t.repo_key.clone(), status));
+        let status = node.and_then(|n| parse_repo_node(n, &t.kind));
+        out.push((t.workspace_id.clone(), t.target_ref(), status));
     }
     out
 }
 
-fn parse_repo_node(repo: &Value) -> Option<GithubPrStatus> {
-    // Prefer the PR associated with the live branch ref. If the branch was
-    // deleted on merge, `ref` will be null — fall back to the most recent
-    // merged/closed PR for that branch name.
-    let assoc = repo
-        .get("ref")
-        .and_then(|r| r.get("associatedPullRequests"))
-        .and_then(|a| a.get("nodes"))
-        .and_then(|n| n.as_array())
-        .and_then(|arr| arr.first());
-    let merged_fallback = repo
-        .get("mergedPrs")
-        .and_then(|m| m.get("nodes"))
-        .and_then(|n| n.as_array())
-        .and_then(|arr| arr.first());
-    let pr = assoc.or(merged_fallback)?;
+fn parse_repo_node(repo: &Value, kind: &TargetKind) -> Option<GithubPrStatus> {
+    let pr = match kind {
+        TargetKind::Branch { .. } => {
+            // Prefer the PR associated with the live branch ref. If the branch
+            // was deleted on merge, `ref` is null — fall back to the most recent
+            // merged/closed PR for that branch name.
+            let assoc = repo
+                .get("ref")
+                .and_then(|r| r.get("associatedPullRequests"))
+                .and_then(|a| a.get("nodes"))
+                .and_then(|n| n.as_array())
+                .and_then(|arr| arr.first());
+            let merged_fallback = repo
+                .get("mergedPrs")
+                .and_then(|m| m.get("nodes"))
+                .and_then(|n| n.as_array())
+                .and_then(|arr| arr.first());
+            assoc.or(merged_fallback)?
+        }
+        // Manual PRs are fetched directly by number, so the PR node sits right
+        // under the repo. `null` means the PR/repo doesn't exist or isn't visible.
+        TargetKind::ManualPr { .. } => repo.get("pullRequest").filter(|v| !v.is_null())?,
+    };
+    parse_pr_fields(pr)
+}
 
+/// Parse a single PR node (the shared `PR_FIELDS` selection) into a status,
+/// regardless of how it was located (branch ref, merged fallback, or by number).
+fn parse_pr_fields(pr: &Value) -> Option<GithubPrStatus> {
     let number = pr.get("number")?.as_u64()? as u32;
     let url = pr.get("url")?.as_str()?.to_string();
     let state = match pr.get("state")?.as_str()? {
@@ -640,19 +741,35 @@ fn aggregate_rollup(states: impl Iterator<Item = ChecksRollup>) -> ChecksRollup 
 /// Apply parsed results to `AppState`, returning the set of changes to emit.
 fn apply_results(
     state: &mut AppState,
-    results: &[(WorkspaceId, String, Option<GithubPrStatus>)],
-) -> Vec<(WorkspaceId, String, Option<GithubPrStatus>)> {
+    results: &[(WorkspaceId, TargetRef, Option<GithubPrStatus>)],
+) -> Vec<(WorkspaceId, TargetRef, Option<GithubPrStatus>)> {
     let mut changed = Vec::new();
-    for (ws_id, repo_key, new_status) in results {
+    for (ws_id, target, new_status) in results {
         let Some(ws) = state.find_workspace_mut(ws_id) else {
             continue;
         };
-        let Some(link) = ws.repo_links.iter_mut().find(|r| &r.repo_key == repo_key) else {
+        let slot: Option<&mut Option<GithubPrStatus>> = match target {
+            TargetRef::RepoLink { repo_key } => ws
+                .repo_links
+                .iter_mut()
+                .find(|r| &r.repo_key == repo_key)
+                .map(|r| &mut r.github),
+            TargetRef::ManualPr {
+                owner,
+                name,
+                number,
+            } => ws
+                .manual_prs
+                .iter_mut()
+                .find(|p| &p.owner == owner && &p.name == name && p.number == *number)
+                .map(|p| &mut p.github),
+        };
+        let Some(slot) = slot else {
             continue;
         };
-        if is_meaningful_change(link.github.as_ref(), new_status.as_ref()) {
-            link.github = new_status.clone();
-            changed.push((ws_id.clone(), repo_key.clone(), new_status.clone()));
+        if is_meaningful_change(slot.as_ref(), new_status.as_ref()) {
+            *slot = new_status.clone();
+            changed.push((ws_id.clone(), target.clone(), new_status.clone()));
         }
     }
     changed
@@ -688,12 +805,25 @@ mod tests {
     fn mk_target(i: usize) -> Target {
         Target {
             workspace_id: format!("ws-{i}"),
-            repo_key: "frontend".to_string(),
             slug: GithubSlug {
                 owner: "rynobax".to_string(),
                 name: "tethys".to_string(),
             },
-            branch: format!("feat/foo-{i}"),
+            kind: TargetKind::Branch {
+                repo_key: "frontend".to_string(),
+                branch: format!("feat/foo-{i}"),
+            },
+        }
+    }
+
+    fn mk_manual_target(i: usize, number: u32) -> Target {
+        Target {
+            workspace_id: format!("ws-{i}"),
+            slug: GithubSlug {
+                owner: "acme".to_string(),
+                name: "web".to_string(),
+            },
+            kind: TargetKind::ManualPr { number },
         }
     }
 
@@ -709,6 +839,111 @@ mod tests {
         assert_eq!(vars.get("q0_branch_name").unwrap(), "feat/foo-0");
         assert_eq!(vars.get("q1_branch").unwrap(), "refs/heads/feat/foo-1");
         assert_eq!(vars.get("q1_branch_name").unwrap(), "feat/foo-1");
+    }
+
+    #[test]
+    fn manual_target_query_uses_pull_request_by_number() {
+        let (q, vars) = build_query(&[mk_manual_target(0, 4321)]);
+        assert!(q.contains("q0: repository(owner: $q0_owner"));
+        // PR number is inlined (not a variable), and no branch ref is queried.
+        assert!(q.contains("pullRequest(number: 4321)"));
+        assert!(!q.contains("ref(qualifiedName"));
+        assert_eq!(vars.get("q0_owner").unwrap(), "acme");
+        assert_eq!(vars.get("q0_name").unwrap(), "web");
+        assert!(!vars.contains_key("q0_branch"));
+    }
+
+    #[test]
+    fn parse_manual_pull_request_node() {
+        let data = json!({
+            "q0": {
+                "pullRequest": {
+                    "number": 4321,
+                    "url": "https://github.com/acme/web/pull/4321",
+                    "state": "OPEN",
+                    "isDraft": false,
+                    "reviewThreads": {"nodes": []},
+                    "commits": {
+                        "nodes": [{"commit": {"oid": "deadbeef", "statusCheckRollup": {"state": "SUCCESS"}}}]
+                    }
+                }
+            }
+        });
+        let parsed = parse_response(&[mk_manual_target(0, 4321)], &data);
+        assert_eq!(
+            parsed[0].1,
+            TargetRef::ManualPr {
+                owner: "acme".into(),
+                name: "web".into(),
+                number: 4321,
+            }
+        );
+        let status = parsed[0].2.as_ref().expect("should parse");
+        assert_eq!(status.pr_number, 4321);
+        assert_eq!(status.checks, ChecksRollup::Success);
+    }
+
+    #[test]
+    fn parse_manual_null_pull_request_returns_none() {
+        let data = json!({ "q0": { "pullRequest": null } });
+        let parsed = parse_response(&[mk_manual_target(0, 4321)], &data);
+        assert!(parsed[0].2.is_none());
+    }
+
+    #[test]
+    fn apply_results_routes_manual_pr_to_its_slot() {
+        let mut state = AppState {
+            workspaces: vec![crate::state::Workspace {
+                id: "ws-0".into(),
+                branch: "feat/foo-0".into(),
+                created_at: Utc::now(),
+                repo_links: vec![],
+                sessions: vec![],
+                claude_binary: None,
+                deleted_at: None,
+                archived_at: None,
+                status: Default::default(),
+                session_order: None,
+                dev_servers: None,
+                manual_prs: vec![crate::state::ManualPr {
+                    owner: "acme".into(),
+                    name: "web".into(),
+                    number: 4321,
+                    github: None,
+                }],
+            }],
+            ..Default::default()
+        };
+        let status = GithubPrStatus {
+            pr_number: 4321,
+            url: "u".into(),
+            state: PrState::Open,
+            is_draft: false,
+            checks: ChecksRollup::Success,
+            bugbot: ChecksRollup::None,
+            has_merge_conflicts: false,
+            review_decision: ReviewDecision::None,
+            unresolved_threads: 0,
+            head_sha: "sha".into(),
+            fetched_at: Utc::now(),
+            last_error: None,
+        };
+        let results = vec![(
+            "ws-0".to_string(),
+            TargetRef::ManualPr {
+                owner: "acme".into(),
+                name: "web".into(),
+                number: 4321,
+            },
+            Some(status),
+        )];
+        let changed = apply_results(&mut state, &results);
+        assert_eq!(changed.len(), 1);
+        let stored = state.workspaces[0].manual_prs[0]
+            .github
+            .as_ref()
+            .expect("manual PR status should be set");
+        assert_eq!(stored.pr_number, 4321);
     }
 
     #[test]
