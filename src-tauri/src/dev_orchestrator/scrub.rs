@@ -27,11 +27,9 @@ pub fn scrub_orphan_overrides(cfg: &OrchestratorConfig) -> Vec<PathBuf> {
         if !override_file.exists() {
             continue;
         }
-        if is_orphan(&be_dir) {
-            if fs::remove_file(&override_file).is_ok() {
-                info!(path = %override_file.display(), "scrubbed orphan override");
-                removed.push(override_file);
-            }
+        if is_orphan(&be_dir) && fs::remove_file(&override_file).is_ok() {
+            info!(path = %override_file.display(), "scrubbed orphan override");
+            removed.push(override_file);
         }
     }
     removed

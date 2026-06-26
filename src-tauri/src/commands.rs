@@ -27,7 +27,7 @@ use crate::state::{
     AppSettings, ClaudeSessionMeta, IdeChoice, ManualPr, RepoLink, SystemErrorEntry, Workspace,
     WorkspaceId, WorkspaceStatus,
 };
-use crate::dev_orchestrator::{self, BeMode, OrchestratorConfig};
+use crate::dev_orchestrator::{BeMode, OrchestratorConfig};
 use crate::dev_servers::{self, DevServerLocks, DevStateSnapshot};
 use crate::store::Store;
 use crate::theme::Theme;

@@ -132,11 +132,9 @@ pub fn current() -> SystemMemory {
     // (AM shows them as "Cached Files" or reclaimable, not used).
     let used_mib = read_vm_stat_used().unwrap_or(0);
     let free_mib = total_mib.saturating_sub(used_mib);
-    let free_pct = if total_mib == 0 {
-        0
-    } else {
-        ((free_mib * 100) / total_mib).min(100) as u8
-    };
+    let free_pct = (free_mib * 100)
+        .checked_div(total_mib)
+        .map_or(0, |p| p.min(100) as u8);
     SystemMemory {
         level,
         free_pct,

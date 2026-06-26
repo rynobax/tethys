@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use chrono::Utc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::dev_orchestrator::{self, BeMode, OrchestratorConfig, PrepResult, ServicePrep};
 use crate::error::{AppError, AppResult};

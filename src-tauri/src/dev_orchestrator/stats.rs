@@ -19,8 +19,8 @@ pub struct WorkspaceMemory {
     pub be_mib: u64,
 }
 
-/// Per-workspace RAM. Caller passes the workspace ids it cares about
-/// + their FE worktree paths (used to scope the rspack pgrep) and the
+/// Per-workspace RAM. Caller passes the workspace ids it cares about,
+/// their FE worktree paths (used to scope the rspack pgrep), and the
 /// corresponding container names (computed from the `short` suffix).
 ///
 /// Single docker call collects RAM for all known BE containers in one
@@ -155,7 +155,8 @@ mod tests {
     fn parses_docker_mem_units() {
         assert_eq!(parse_mem_usage("1.0GiB / 15.6GiB"), Some(1024));
         assert_eq!(parse_mem_usage("245.5MiB / 15.6GiB"), Some(246));
-        assert_eq!(parse_mem_usage("512KiB / 15.6GiB"), Some(0));
+        // Sub-MiB containers round to 0 (0.25 MiB here).
+        assert_eq!(parse_mem_usage("256KiB / 15.6GiB"), Some(0));
         assert_eq!(parse_mem_usage("garbage"), None);
     }
 }

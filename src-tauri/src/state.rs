@@ -498,7 +498,7 @@ mod tests {
         let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
         let ws = &parsed.workspaces[0];
         assert_eq!(
-            ws.session_order.as_ref().map(|v| v.as_slice()),
+            ws.session_order.as_deref(),
             Some(&["sess-2".to_string(), "sess-1".to_string()][..])
         );
         assert_eq!(ws.sessions[0].display_name.as_deref(), Some("code review"));

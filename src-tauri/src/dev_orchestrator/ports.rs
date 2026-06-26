@@ -17,12 +17,8 @@ use std::net::TcpListener;
 /// First free port >= `start`. Returns `None` if no port in
 /// [start, start+200) is free (effectively never, in our usage).
 pub fn find_free_port_from(start: u16) -> Option<u16> {
-    for port in start..start.saturating_add(200) {
-        if TcpListener::bind(("0.0.0.0", port)).is_ok() {
-            return Some(port);
-        }
-    }
-    None
+    (start..start.saturating_add(200))
+        .find(|&port| TcpListener::bind(("0.0.0.0", port)).is_ok())
 }
 
 /// `true` if anything is listening on `port` (any interface). Returns

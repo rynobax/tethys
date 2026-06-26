@@ -35,7 +35,7 @@ use serde::Serialize;
 use tracing::{info, warn};
 
 pub use config::OrchestratorConfig;
-pub use pressure::{Pressure, SystemMemory};
+pub use pressure::SystemMemory;
 
 use crate::state::Workspace;
 
