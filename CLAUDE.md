@@ -4,6 +4,8 @@ Desktop app for managing multiple Claude Code CLI sessions in parallel across gi
 
 **This is a personal tool built for Ryan.** No multi-user, no cross-platform, no distribution plans. macOS-only for the foreseeable future — feel free to take macOS-specific paths, shell invocations, or Tauri features without guarding them.
 
+This repo has no branches — work directly on `main` and commit there. Don't create feature branches or PRs.
+
 ## Stack
 
 Tauri 2.x shell · Rust core (`src-tauri/`) · React + TypeScript frontend (`src/`) · xterm.js (DOM renderer) for terminal rendering · `portable-pty` for PTY spawning · JSON file persistence (no SQLite) · `tethys-hook` companion binary (`crates/tethys-hook/`) that forwards Claude Code hooks over a Unix socket.
