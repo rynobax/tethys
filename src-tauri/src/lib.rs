@@ -12,6 +12,7 @@ mod job;
 mod logging;
 mod paths;
 mod pending_permissions;
+mod probe;
 mod pty;
 mod purge;
 mod reconcile;
@@ -162,6 +163,10 @@ pub fn run() {
                     error!(error = %e, "hook listener failed to start");
                 }
             });
+
+            // Probe-file reconciler: backstop that corrects hook-derived turn
+            // state against Claude Code's own `~/.claude/sessions/*.json`.
+            probe::spawn(supervisor.clone());
 
             // --- github poller ---------------------------------------------
             let registry_for_poller: Arc<RegistryLoad> = app.state::<Arc<RegistryLoad>>().inner().clone();

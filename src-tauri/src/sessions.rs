@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -197,6 +197,150 @@ impl SessionSupervisor {
             .await;
         if let Err(e) = persist {
             warn!(error = %e, session_id, "persist turn state failed");
+        }
+    }
+
+    /// Reconcile hook-derived turn state against Claude's own status probe
+    /// files. For each probe correlated to a running Tethys session
+    /// (`sessionId` == `claude_session_id`), compare the probe-derived state
+    /// to what we're currently showing; on a mismatch, log it (the reason
+    /// this exists — instrumentation to judge whether probes beat hooks) and
+    /// apply the probe state as authoritative. The probe survives subagent
+    /// activity and dropped hooks, so it corrects drift the hook stream
+    /// can't see. Dormant sessions are left alone — a dead PTY is the exit
+    /// hook's job, and a lingering probe file must not resurrect one.
+    pub async fn reconcile_probes(&self, probes: &[crate::probe::Probe]) {
+        struct Parsed<'a> {
+            sid: &'a str,
+            cwd: Option<&'a str>,
+            state: SessionRuntimeState,
+        }
+        let parsed: Vec<Parsed> = probes
+            .iter()
+            .filter_map(|p| {
+                let sid = p.session_id.as_deref()?;
+                let state = crate::probe::state_from_status(p.status.as_deref()?)?;
+                Some(Parsed { sid, cwd: p.cwd.as_deref(), state })
+            })
+            .collect();
+        if parsed.is_empty() {
+            return;
+        }
+
+        // Every session id Claude currently reports. A stored
+        // `claude_session_id` absent from this set has rotated away
+        // (compaction/resume) — the trigger for cwd-based healing.
+        let live_sids: HashSet<&str> = parsed.iter().map(|p| p.sid).collect();
+
+        // Only running sessions are eligible; a lingering probe file must not
+        // resurrect a dead one, and Dormant is the exit hook's job.
+        let running: HashSet<SessionId> = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions
+                .iter()
+                .filter(|(_, h)| h.pty.is_running())
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+
+        // Correlate each probe to a running tracked session. Primary key is
+        // the session id; when that misses, fall back to a *single* running
+        // session in the same cwd whose stored id has gone stale, and carry
+        // the fresh id in `heal_to` so hook correlation is repaired too.
+        let actions = self
+            .store
+            .read(|s| {
+                let sessions = || {
+                    s.workspaces
+                        .iter()
+                        .flat_map(|ws| ws.sessions.iter().map(move |se| (ws, se)))
+                };
+                let mut out: Vec<(String, SessionId, SessionRuntimeState, Option<String>)> =
+                    Vec::new();
+                for p in &parsed {
+                    if let Some((ws, se)) = sessions()
+                        .find(|(_, se)| se.claude_session_id.as_deref() == Some(p.sid))
+                    {
+                        if running.contains(&se.id) {
+                            out.push((ws.id.clone(), se.id.clone(), p.state, None));
+                        }
+                        continue;
+                    }
+                    let Some(cwd) = p.cwd else { continue };
+                    let mut stale_in_cwd = sessions().filter(|(_, se)| {
+                        running.contains(&se.id)
+                            && se.cwd.to_str() == Some(cwd)
+                            && se
+                                .claude_session_id
+                                .as_deref()
+                                .is_none_or(|c| !live_sids.contains(c))
+                    });
+                    if let Some((ws, se)) = stale_in_cwd.next() {
+                        if stale_in_cwd.next().is_none() {
+                            out.push((
+                                ws.id.clone(),
+                                se.id.clone(),
+                                p.state,
+                                Some(p.sid.to_string()),
+                            ));
+                        }
+                    }
+                }
+                out
+            })
+            .await;
+
+        for (ws_id, sess_id, probe_state, heal_to) in actions {
+            if let Some(new_csid) = heal_to {
+                warn!(
+                    session_id = %sess_id,
+                    %new_csid,
+                    "healed stale claude_session_id — Claude rotated its session id (compaction/resume)"
+                );
+                let ws = ws_id.clone();
+                let sid = sess_id.clone();
+                let csid = new_csid.clone();
+                let healed = self
+                    .store
+                    .mutate(move |s| {
+                        if let Some(ws) = s.find_workspace_mut(&ws) {
+                            if let Some(m) = ws.sessions.iter_mut().find(|m| m.id == sid) {
+                                m.claude_session_id = Some(csid);
+                            }
+                        }
+                        Ok(())
+                    })
+                    .await;
+                if let Err(e) = healed {
+                    warn!(error = %e, session_id = %sess_id, "persist healed session id failed");
+                }
+            }
+
+            let (current, current_nt) = {
+                let map = self.turn.lock().unwrap();
+                match map.get(&sess_id) {
+                    Some(t) => (t.state, t.notification_type.clone()),
+                    None => (SessionRuntimeState::default(), None),
+                }
+            };
+            if current == probe_state {
+                continue;
+            }
+
+            warn!(
+                session_id = %sess_id,
+                hook_state = ?current,
+                probe_state = ?probe_state,
+                "probe/hook turn-state mismatch — applying probe (authoritative)"
+            );
+            // The probe can't distinguish permission_prompt from idle_prompt,
+            // so keep the hook's subtype when we're still waiting on input.
+            let nt = if probe_state == SessionRuntimeState::WaitingInput {
+                current_nt
+            } else {
+                None
+            };
+            self.set_turn(&sess_id, &ws_id, probe_state, nt).await;
         }
     }
 
