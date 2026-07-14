@@ -431,6 +431,7 @@ pub async fn create_workspace(
         archived_at: None,
         status: WorkspaceStatus::Creating,
         script_runs: Vec::new(),
+        notes: String::new(),
     };
     store
         .mutate(|s| {
@@ -1038,7 +1039,7 @@ pub async fn start_claude_session(
         &claude_bin,
         &tmux_bin,
         &args,
-        None,
+        SpawnOpts::default(),
     )
     .await
 }
@@ -1063,15 +1064,21 @@ pub async fn resume_claude_session(
     tmux_bin: State<'_, TmuxBin>,
     args: ResumeClaudeArgs,
 ) -> AppResult<SessionInfo> {
-    // Pull claude_session_id + cwd from the ClaudeSessionMeta we already
-    // persisted on the previous run.
-    let (claude_sid, cwd) = store
+    // Pull claude_session_id + cwd + binary override from the
+    // ClaudeSessionMeta we already persisted on the previous run.
+    let (claude_sid, cwd, session_binary) = store
         .read(|s| {
             s.find_workspace(&args.workspace_id).and_then(|w| {
                 w.sessions
                     .iter()
                     .find(|sess| sess.id == args.session_meta_id)
-                    .map(|sess| (sess.claude_session_id.clone(), sess.cwd.clone()))
+                    .map(|sess| {
+                        (
+                            sess.claude_session_id.clone(),
+                            sess.cwd.clone(),
+                            sess.claude_binary.clone(),
+                        )
+                    })
             })
         })
         .await
@@ -1120,9 +1127,121 @@ pub async fn resume_claude_session(
         &claude_bin,
         &tmux_bin,
         &start,
-        Some(&claude_sid),
+        SpawnOpts {
+            resume_claude_sid: Some(&claude_sid),
+            session_binary: session_binary.as_deref(),
+        },
     )
     .await
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SwitchClaudeBinaryArgs {
+    pub workspace_id: WorkspaceId,
+    /// The `id` field from an existing `ClaudeSessionMeta`.
+    pub session_meta_id: String,
+    /// Binary name to switch to (e.g. `claude`, `claude-hipaa`). Stored as a
+    /// per-session override and used to relaunch the conversation.
+    pub claude_binary: String,
+}
+
+/// Whether a claude conversation can be resumed via `--resume`. Claude reports
+/// a `claude_session_id` at startup but only writes the transcript to disk once
+/// there's actual conversation, so `--resume` on a brand-new (empty) session
+/// fails with "No conversation found". A non-empty transcript file on disk is
+/// the reliable signal that resume will succeed.
+fn transcript_is_resumable(path: Option<&Path>) -> bool {
+    path.and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
+}
+
+/// Switch the entry-point binary for a chat. Kills the running tmux session
+/// (so the resume path can't just reattach the old process) and relaunches
+/// claude under the new binary. If the conversation has been persisted to
+/// disk, it resumes via `--resume <claude_session_id>` to preserve history;
+/// otherwise (a fresh chat with no messages yet) it starts a new session under
+/// the new binary — there's nothing to resume.
+#[tauri::command]
+pub async fn switch_claude_binary(
+    app: AppHandle,
+    supervisor: State<'_, Arc<SessionSupervisor>>,
+    store: State<'_, Arc<Store>>,
+    claude_bin: State<'_, ClaudeBin>,
+    tmux_bin: State<'_, TmuxBin>,
+    args: SwitchClaudeBinaryArgs,
+) -> AppResult<SessionInfo> {
+    let binary = args.claude_binary.trim().to_string();
+    if binary.is_empty() {
+        return Err(AppError::Other("no claude binary name provided".into()));
+    }
+    // Fail fast if the binary isn't on the login-shell PATH, before we tear
+    // down the running session.
+    claude::resolve_named(&binary)?;
+
+    let (claude_sid, transcript_path, repo_key) = store
+        .read(|s| {
+            s.find_workspace(&args.workspace_id).and_then(|w| {
+                w.sessions
+                    .iter()
+                    .find(|sess| sess.id == args.session_meta_id)
+                    .map(|sess| {
+                        (
+                            sess.claude_session_id.clone(),
+                            sess.transcript_path.clone(),
+                            sess.repo_key.clone(),
+                        )
+                    })
+            })
+        })
+        .await
+        .ok_or_else(|| {
+            AppError::Other(format!(
+                "no session {} in workspace {}",
+                args.session_meta_id, args.workspace_id
+            ))
+        })?;
+
+    // Resume only when the conversation is actually on disk; otherwise the new
+    // binary starts a fresh session (an empty chat has nothing to resume).
+    let resume_sid = claude_sid
+        .as_deref()
+        .filter(|_| transcript_is_resumable(transcript_path.as_deref()));
+
+    // Kill the live tmux session so `spawn_claude` relaunches under the new
+    // binary instead of reattaching the old process. Harmless if it already
+    // exited.
+    if !tmux_bin.0.as_os_str().is_empty() {
+        tmux::kill_session(&tmux_bin.0, &args.session_meta_id);
+    }
+
+    let start = StartClaudeArgs {
+        workspace_id: args.workspace_id,
+        repo_key,
+    };
+    spawn_claude(
+        &app,
+        &supervisor,
+        &store,
+        &claude_bin,
+        &tmux_bin,
+        &start,
+        SpawnOpts {
+            resume_claude_sid: resume_sid,
+            session_binary: Some(&binary),
+        },
+    )
+    .await
+}
+
+/// Optional overrides applied when (re)spawning a claude session.
+#[derive(Default)]
+struct SpawnOpts<'a> {
+    /// Resume an existing conversation via `claude --resume <id>`.
+    resume_claude_sid: Option<&'a str>,
+    /// Per-session binary override to run under and persist onto the new meta.
+    /// Takes precedence over the workspace default; `None` falls back to it.
+    session_binary: Option<&'a str>,
 }
 
 async fn spawn_claude(
@@ -1132,7 +1251,7 @@ async fn spawn_claude(
     claude_bin: &ClaudeBin,
     tmux_bin: &TmuxBin,
     args: &StartClaudeArgs,
-    resume_claude_sid: Option<&str>,
+    opts: SpawnOpts<'_>,
 ) -> AppResult<SessionInfo> {
     if tmux_bin.0.as_os_str().is_empty() {
         return Err(AppError::Other(
@@ -1173,7 +1292,9 @@ async fn spawn_claude(
             })
         })?;
 
-    let resolved_bin = match ws_binary.as_deref() {
+    // Session override wins over the workspace default, which wins over the
+    // app-wide binary resolved at boot.
+    let resolved_bin = match opts.session_binary.or(ws_binary.as_deref()) {
         Some(bin) => claude::resolve_named(bin)?,
         None => claude_bin.0.clone(),
     };
@@ -1184,7 +1305,7 @@ async fn spawn_claude(
         &cwd,
         &tmux_bin.0,
         &resolved_bin,
-        resume_claude_sid,
+        opts.resume_claude_sid,
     )?;
 
     // Persist a ClaudeSessionMeta entry so resume works across restarts.
@@ -1197,6 +1318,7 @@ async fn spawn_claude(
         cwd: cwd.clone(),
         claude_session_id: None,
         transcript_path: None,
+        claude_binary: opts.session_binary.map(str::to_string),
         hidden: false,
         runtime_state: None,
         notification_type: None,
@@ -1211,7 +1333,7 @@ async fn spawn_claude(
             // Resuming? Drop the prior meta for this Claude conversation so
             // we don't accumulate dormant duplicates with the same
             // claude_session_id across runs.
-            if let Some(csid) = resume_claude_sid {
+            if let Some(csid) = opts.resume_claude_sid {
                 ws.sessions
                     .retain(|m| m.claude_session_id.as_deref() != Some(csid));
             }
@@ -1263,6 +1385,31 @@ pub async fn set_claude_session_hidden(
 
     emit_workspace_changed(&app, &args.workspace_id);
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetWorkspaceNotesArgs {
+    pub workspace_id: WorkspaceId,
+    pub notes: String,
+}
+
+/// Persist the freeform notes for a workspace. The frontend holds the
+/// authoritative text while editing and debounces calls here, so this does not
+/// emit `workspace:changed` (doing so would churn the pane on every keystroke).
+#[tauri::command]
+pub async fn set_workspace_notes(
+    store: State<'_, Arc<Store>>,
+    args: SetWorkspaceNotesArgs,
+) -> AppResult<()> {
+    store
+        .mutate(|s| {
+            let ws = s
+                .find_workspace_mut(&args.workspace_id)
+                .ok_or_else(|| AppError::WorkspaceNotFound(args.workspace_id.clone()))?;
+            ws.notes = args.notes;
+            Ok(())
+        })
+        .await
 }
 
 /// Newtype so `claude_bin` can be managed in Tauri state.
@@ -1613,4 +1760,41 @@ fn spawn_event_forwarder(channel: Channel<JobEvent>) -> JobTx {
         }
     });
     JobTx(tx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn transcript_none_is_not_resumable() {
+        assert!(!transcript_is_resumable(None));
+    }
+
+    #[test]
+    fn missing_transcript_is_not_resumable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.jsonl");
+        assert!(!transcript_is_resumable(Some(&path)));
+    }
+
+    #[test]
+    fn empty_transcript_is_not_resumable() {
+        // A fresh chat: claude reports a session id at startup but hasn't
+        // written any conversation yet — `--resume` would fail.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.jsonl");
+        std::fs::File::create(&path).unwrap();
+        assert!(!transcript_is_resumable(Some(&path)));
+    }
+
+    #[test]
+    fn nonempty_transcript_is_resumable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("convo.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, r#"{{"type":"user","message":"hi"}}"#).unwrap();
+        assert!(transcript_is_resumable(Some(&path)));
+    }
 }

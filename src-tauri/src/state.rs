@@ -54,6 +54,10 @@ pub struct Workspace {
     /// Removed when a script exits or the user stops it.
     #[serde(default)]
     pub script_runs: Vec<ScriptRunMeta>,
+    /// Freeform user notes for this workspace, edited via the notes overlay in
+    /// the detail pane. Empty string when unset.
+    #[serde(default)]
+    pub notes: String,
 }
 
 /// A live script process attached to a workspace+repo. The Tethys `id` is
@@ -130,6 +134,13 @@ pub struct ClaudeSessionMeta {
     pub cwd: PathBuf,
     pub claude_session_id: Option<String>,
     pub transcript_path: Option<PathBuf>,
+    /// Per-session override for the claude entry-point binary (e.g.
+    /// `claude-hipaa`). Set when the user switches the binary for an
+    /// in-progress chat; takes precedence over the workspace-level
+    /// `Workspace::claude_binary`. `None` (fresh sessions, or state.json from
+    /// before this field existed) falls back to the workspace default.
+    #[serde(default)]
+    pub claude_binary: Option<String>,
     /// User-set: when true, the session chip is filtered out of the
     /// default chip bar. The tmux session and supervisor handle stay
     /// live — hide is purely cosmetic.
@@ -243,6 +254,35 @@ mod tests {
         assert!(session.runtime_state.is_none());
         assert!(session.notification_type.is_none());
         assert!(!session.turn_acknowledged);
+        assert!(session.claude_binary.is_none());
+    }
+
+    #[test]
+    fn session_claude_binary_round_trips() {
+        let raw = r#"{
+            "workspaces": [
+                {
+                    "id": "abc-123",
+                    "branch": "feat/foo",
+                    "created_at": "2026-04-01T12:00:00Z",
+                    "repo_links": [],
+                    "sessions": [
+                        {
+                            "id": "sess-1",
+                            "cwd": "/tmp/wt/abc-123/frontend",
+                            "claude_session_id": "claude-sid",
+                            "transcript_path": null,
+                            "claude_binary": "claude-hipaa"
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
+        assert_eq!(
+            parsed.workspaces[0].sessions[0].claude_binary.as_deref(),
+            Some("claude-hipaa")
+        );
     }
 
     #[test]

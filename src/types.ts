@@ -53,6 +53,9 @@ export interface ClaudeSessionMeta {
   cwd: string;
   claude_session_id: string | null;
   transcript_path: string | null;
+  /** Per-session override for the claude entry-point binary. Takes precedence
+   *  over the workspace's `claude_binary`. `null` falls back to it. */
+  claude_binary: string | null;
   /** Cosmetic: when true the session is filtered out of the chip bar
    *  unless the user toggles "show hidden". The tmux session keeps running. */
   hidden: boolean;
@@ -82,6 +85,9 @@ export interface Workspace {
    *  and a JobLogPane in the detail; `creation_failed` rows render the
    *  failed log so the user can read the error before dismissing. */
   status: WorkspaceStatus;
+  /** Freeform user notes, edited via the notes overlay in the detail pane.
+   *  Empty string when unset. */
+  notes: string;
 }
 
 export interface SystemErrorEntry {

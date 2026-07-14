@@ -27,6 +27,10 @@ import { useTauriEvent } from "./useTauriEvent";
 import { isReadyToDelete } from "./workspaceDerived";
 import "./App.css";
 
+/** Selectable claude entry-point binaries, shared by the new-workspace form
+ *  and the per-session "run with" switcher. First entry is the default. */
+const CLAUDE_BINARIES = ["claude", "claude-hipaa", "claude-unsafe"] as const;
+
 /** Bracketed-paste markers: Claude Code treats the wrapped bytes as pasted
  *  text rather than typed keystrokes, so the draft lands in the prompt box
  *  without being submitted. Mirrors the drag-drop paste in SessionTerminal. */
@@ -833,6 +837,98 @@ function scriptTabKey(repoKey: string, scriptName: string): string {
   return `script:${repoKey}:${scriptName}`;
 }
 
+/** Collapsible freeform notes overlay anchored to the top-right of a
+ *  workspace's detail pane. Edits are debounced to `set_workspace_notes` and
+ *  flushed on collapse/unmount so nothing is lost when switching workspaces.
+ *  Keyed by workspace id at the call site so each workspace gets a fresh
+ *  editor seeded from its persisted notes. */
+function WorkspaceNotes({
+  workspaceId,
+  initialNotes,
+}: {
+  workspaceId: string;
+  initialNotes: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState(initialNotes);
+  const saveTimer = useRef<number | null>(null);
+  // Latest unsaved value, or null once it's been persisted. Lets the flush on
+  // unmount/collapse write the final keystrokes the debounce hasn't sent yet.
+  const pending = useRef<string | null>(null);
+
+  const save = useCallback(
+    (notes: string) => {
+      pending.current = null;
+      invoke("set_workspace_notes", {
+        args: { workspace_id: workspaceId, notes },
+      }).catch(() => {
+        // Best-effort persistence; the text stays in the editor regardless.
+      });
+    },
+    [workspaceId],
+  );
+
+  const flush = useCallback(() => {
+    if (saveTimer.current !== null) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    if (pending.current !== null) save(pending.current);
+  }, [save]);
+
+  // Flush any pending edit when the editor unmounts (e.g. switching workspace).
+  useEffect(() => flush, [flush]);
+
+  const onChange = (value: string) => {
+    setText(value);
+    pending.current = value;
+    if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      saveTimer.current = null;
+      save(value);
+    }, 500);
+  };
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="notes-toggle"
+        onClick={() => setOpen(true)}
+        title="Workspace notes"
+      >
+        {text.trim() ? "Notes •" : "Notes"}
+      </button>
+    );
+  }
+
+  return (
+    <div className="notes-panel" role="dialog" aria-label="Workspace notes">
+      <div className="notes-panel-header">
+        <span>Notes</span>
+        <button
+          type="button"
+          className="notes-collapse"
+          onClick={() => {
+            flush();
+            setOpen(false);
+          }}
+          title="Collapse notes"
+        >
+          ✕
+        </button>
+      </div>
+      <textarea
+        className="notes-textarea"
+        value={text}
+        placeholder="Jot down anything about this workspace…"
+        onChange={(e) => onChange(e.target.value)}
+        autoFocus
+      />
+    </div>
+  );
+}
+
 function WorkspaceDetail({
   workspace,
   sessions,
@@ -1001,6 +1097,27 @@ function WorkspaceDetail({
     }
   };
 
+  // Switch the entry-point binary for an in-progress chat. Restarts the
+  // session under the new binary via `claude --resume`, keeping history.
+  const switchBinary = async (metaId: string, binary: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await invoke<SessionInfo>("switch_claude_binary", {
+        args: {
+          workspace_id: workspace.id,
+          session_meta_id: metaId,
+          claude_binary: binary,
+        },
+      });
+      selectSession(res.id);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // Auto-resume the selected session when it's dormant but has a
   // claude_session_id. `autoResumedRef` prevents a retry loop if the
   // spawn fails — the user can still click Resume manually below.
@@ -1103,6 +1220,11 @@ function WorkspaceDetail({
           >
             Delete
           </button>
+          <WorkspaceNotes
+            key={workspace.id}
+            workspaceId={workspace.id}
+            initialNotes={workspace.notes}
+          />
         </div>
       </header>
       {!workspace.archived_at && isReadyToDelete(workspace) && (
@@ -1150,6 +1272,8 @@ function WorkspaceDetail({
           onStartInRepo={startInRepo}
           onSetHidden={setSessionHidden}
           onClearTurn={clearSessionTurn}
+          workspaceBinary={workspace.claude_binary}
+          onSwitchBinary={switchBinary}
           scriptChips={scriptChips}
           selectedScriptKey={
             selectedTab?.kind === "script"
@@ -1296,6 +1420,7 @@ type ChipMeta = {
   id: string;
   repo_key: string | null;
   claude_session_id: string | null;
+  claude_binary: string | null;
 };
 
 type ScriptChipData = {
@@ -1442,6 +1567,8 @@ function SessionBar({
   onStartInRepo,
   onSetHidden,
   onClearTurn,
+  workspaceBinary,
+  onSwitchBinary,
   scriptChips,
   selectedScriptKey,
   showRepoOnScript,
@@ -1461,6 +1588,10 @@ function SessionBar({
   onStartInRepo: (repoKey: string | null) => void;
   onSetHidden: (id: string, hidden: boolean) => void;
   onClearTurn: (id: string) => void;
+  /** Workspace-level binary default; the fallback when a session has no
+   *  per-session override. `null` => the app default `claude`. */
+  workspaceBinary: string | null;
+  onSwitchBinary: (id: string, binary: string) => void;
   scriptChips: ScriptChipData[];
   selectedScriptKey: string | null;
   /** Show the repo prefix on the script chip — only useful when the
@@ -1612,14 +1743,23 @@ function SessionBar({
           const isHidden = hiddenSessions.some(
             (m) => m.id === chipMenu.sessionId,
           );
+          const meta = [...visibleSessions, ...hiddenSessions].find(
+            (m) => m.id === chipMenu.sessionId,
+          );
+          const currentBinary =
+            meta?.claude_binary ?? workspaceBinary ?? "claude";
           return (
             <SessionChipMenu
               x={chipMenu.x}
               y={chipMenu.y}
               needsTurn={needsTurn}
               hidden={isHidden}
+              currentBinary={currentBinary}
               onClearTurn={() => onClearTurn(chipMenu.sessionId)}
               onSetHidden={() => onSetHidden(chipMenu.sessionId, !isHidden)}
+              onSwitchBinary={(binary) =>
+                onSwitchBinary(chipMenu.sessionId, binary)
+              }
               onClose={() => setChipMenu(null)}
             />
           );
@@ -1633,16 +1773,20 @@ function SessionChipMenu({
   y,
   needsTurn,
   hidden,
+  currentBinary,
   onClearTurn,
   onSetHidden,
+  onSwitchBinary,
   onClose,
 }: {
   x: number;
   y: number;
   needsTurn: boolean;
   hidden: boolean;
+  currentBinary: string;
   onClearTurn: () => void;
   onSetHidden: () => void;
+  onSwitchBinary: (binary: string) => void;
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -1663,8 +1807,8 @@ function SessionChipMenu({
   }, [onClose]);
 
   // Keep the menu inside the viewport.
-  const ESTIMATED_W = 180;
-  const ESTIMATED_H = 80;
+  const ESTIMATED_W = 200;
+  const ESTIMATED_H = 240;
   const left = Math.min(x, window.innerWidth - ESTIMATED_W - 4);
   const top = Math.min(y, window.innerHeight - ESTIMATED_H - 4);
 
@@ -1687,6 +1831,22 @@ function SessionChipMenu({
       <button type="button" role="menuitem" onClick={wrap(onSetHidden)}>
         {hidden ? "Show this chat" : "Hide this chat"}
       </button>
+      <div className="context-menu-sep" />
+      <div className="context-menu-label">Run with</div>
+      {CLAUDE_BINARIES.map((b) => {
+        const isCurrent = b === currentBinary;
+        return (
+          <button
+            key={b}
+            type="button"
+            role="menuitem"
+            disabled={isCurrent}
+            onClick={wrap(() => onSwitchBinary(b))}
+          >
+            {isCurrent ? `${b} ✓` : b}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -1966,9 +2126,11 @@ function CreateWorkspaceDialog({
             value={claudeBinary}
             onChange={(e) => setClaudeBinary(e.target.value)}
           >
-            <option value="claude">claude</option>
-            <option value="claude-hipaa">claude-hipaa</option>
-            <option value="claude-unsafe">claude-unsafe</option>
+            {CLAUDE_BINARIES.map((b) => (
+              <option key={b} value={b}>
+                {b}
+              </option>
+            ))}
           </select>
         </label>
         <div className="modal-actions">
