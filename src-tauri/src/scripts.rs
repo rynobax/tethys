@@ -222,6 +222,15 @@ impl ScriptSupervisor {
         Ok(handle.pty.attach(channel))
     }
 
+    /// Best-effort: drop a subscriber (by its channel id) when its pane
+    /// unmounts. Silently ignores an unknown script — it may already be gone,
+    /// and the only goal is to stop streaming to a dead terminal.
+    pub fn detach(&self, script_id: &str, channel_id: u32) {
+        if let Some(handle) = self.scripts.lock().unwrap().get(script_id) {
+            handle.pty.detach(channel_id);
+        }
+    }
+
     pub fn send_input(&self, script_id: &str, data: &[u8]) -> AppResult<()> {
         let scripts = self.scripts.lock().unwrap();
         scripts

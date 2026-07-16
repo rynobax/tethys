@@ -289,9 +289,18 @@ export function SessionTerminal({ sessionId }: Props) {
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
-      // Channel has no explicit close; dropping references is enough. The
-      // backend detects the dead channel on its next send and removes the
-      // subscriber.
+      // Stop the backend fanning bytes to this dead pane. Its retain-on-error
+      // path never fires on its own: the channel keeps succeeding as long as
+      // its JS callback is registered, so we must detach explicitly.
+      invoke("detach_session", { sessionId, channelId: channel.id }).catch(
+        () => {},
+      );
+      // Sever the channel's reference to `term`. Tauri registers the channel's
+      // callback in a global registry and only unregisters it on an end-of-
+      // stream message, which command-arg channels never send — so the closure
+      // would otherwise pin the whole disposed terminal (and its 50k-line
+      // scrollback) in the webview forever.
+      channel.onmessage = () => {};
     };
   }, [sessionId]);
 

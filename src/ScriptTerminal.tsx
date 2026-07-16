@@ -124,6 +124,14 @@ export function ScriptTerminal({ scriptId }: Props) {
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
+      // Stop backend fan-out to this dead pane, then sever the channel's
+      // reference to `term` so Tauri's registered callback stops pinning the
+      // disposed terminal in the webview. See SessionTerminal for the full
+      // rationale.
+      invoke("detach_script", { scriptId, channelId: channel.id }).catch(
+        () => {},
+      );
+      channel.onmessage = () => {};
     };
   }, [scriptId]);
 

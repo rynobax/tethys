@@ -141,6 +141,15 @@ impl PtyProcess {
         scrollback
     }
 
+    /// Drop the subscriber with the given channel id. Called when a frontend
+    /// pane unmounts. Without this the reader thread keeps fanning bytes to a
+    /// channel whose `onmessage` closure still pins the whole xterm instance
+    /// (and its scrollback) alive in the webview — the send never errors, so
+    /// the retain-on-error path never reclaims it.
+    pub fn detach(&self, channel_id: u32) {
+        remove_subscriber(&mut self.subscribers.lock().unwrap(), channel_id);
+    }
+
     pub fn send_input(&self, data: &[u8]) -> AppResult<()> {
         let writer = self.writer.clone();
         writer
@@ -182,6 +191,11 @@ pub fn append_to_ring(ring: &Ring, data: &[u8], capacity: usize) {
         ring.pop_front();
     }
     ring.extend(data.iter().copied());
+}
+
+/// Remove any subscriber whose channel id matches `channel_id`.
+fn remove_subscriber(subs: &mut Vec<Channel<InvokeResponseBody>>, channel_id: u32) {
+    subs.retain(|sub| sub.id() != channel_id);
 }
 
 fn spawn_reader_thread(
@@ -248,12 +262,36 @@ fn spawn_child_watcher(
 
 #[cfg(test)]
 mod tests {
-    use super::{append_to_ring, Ring};
+    use super::{append_to_ring, remove_subscriber, Ring};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
+    use tauri::ipc::{Channel, InvokeResponseBody};
 
     fn ring_bytes(ring: &Ring) -> Vec<u8> {
         ring.lock().unwrap().iter().copied().collect()
+    }
+
+    #[test]
+    fn remove_subscriber_drops_only_the_matching_channel() {
+        let a = Channel::<InvokeResponseBody>::new(|_| Ok(()));
+        let b = Channel::<InvokeResponseBody>::new(|_| Ok(()));
+        let (a_id, b_id) = (a.id(), b.id());
+        let mut subs = vec![a, b];
+
+        remove_subscriber(&mut subs, a_id);
+
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].id(), b_id);
+    }
+
+    #[test]
+    fn remove_subscriber_ignores_unknown_id() {
+        let a = Channel::<InvokeResponseBody>::new(|_| Ok(()));
+        let mut subs = vec![a];
+
+        remove_subscriber(&mut subs, u32::MAX);
+
+        assert_eq!(subs.len(), 1);
     }
 
     #[test]

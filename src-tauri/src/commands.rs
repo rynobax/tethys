@@ -1582,6 +1582,15 @@ pub fn attach_script(
 }
 
 #[tauri::command]
+pub fn detach_script(
+    supervisor: State<'_, Arc<ScriptSupervisor>>,
+    script_id: String,
+    channel_id: u32,
+) {
+    supervisor.detach(&script_id, channel_id);
+}
+
+#[tauri::command]
 pub fn send_input_script(
     supervisor: State<'_, Arc<ScriptSupervisor>>,
     script_id: String,
@@ -1610,6 +1619,15 @@ pub fn attach_session(
     on_bytes: tauri::ipc::Channel<InvokeResponseBody>,
 ) -> AppResult<Vec<u8>> {
     supervisor.attach(&session_id, on_bytes)
+}
+
+#[tauri::command]
+pub fn detach_session(
+    supervisor: State<'_, Arc<SessionSupervisor>>,
+    session_id: String,
+    channel_id: u32,
+) {
+    supervisor.detach(&session_id, channel_id);
 }
 
 #[tauri::command]

@@ -773,6 +773,15 @@ impl SessionSupervisor {
         Ok(handle.pty.attach(channel))
     }
 
+    /// Best-effort: drop a subscriber (by its channel id) when its pane
+    /// unmounts. Silently ignores an unknown session — it may already be gone,
+    /// and the only goal is to stop streaming to a dead terminal.
+    pub fn detach(&self, session_id: &str, channel_id: u32) {
+        if let Some(handle) = self.sessions.lock().unwrap().get(session_id) {
+            handle.pty.detach(channel_id);
+        }
+    }
+
     pub fn send_input(&self, session_id: &str, data: &[u8]) -> AppResult<()> {
         let sessions = self.sessions.lock().unwrap();
         sessions
