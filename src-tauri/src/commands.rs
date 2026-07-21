@@ -16,6 +16,7 @@ use crate::git;
 use crate::github::poller::{AuthSnapshot, GithubPoller};
 use crate::inprogress::InProgressWorkspaces;
 use crate::job::{JobEvent, JobTx};
+use crate::managed_docs;
 use crate::paths::Paths;
 use crate::purge::Purger;
 use crate::reconcile::{self, Discrepancies};
@@ -142,6 +143,7 @@ pub struct CreateWorkspaceArgs {
 
 struct RepoProvision<'a> {
     repo: &'a Repo,
+    workspace_id: &'a str,
     worktree_path: &'a Path,
     branch: &'a str,
     paths: &'a Paths,
@@ -200,7 +202,10 @@ async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLink> 
 
     // Everything past `worktree_add` leaves on-disk state behind, so on failure
     // we tear down this repo's own worktree (and its branch, only if we created
-    // it) before bubbling. Sibling repos are the caller's responsibility.
+    // it) before bubbling. Sibling repos are the caller's responsibility. The
+    // docs link is captured outside the block so a failure *after* docs were
+    // provisioned (e.g. the setup script) still tears the docs checkout down.
+    let mut docs_link: Option<crate::state::DocsLink> = None;
     let provisioned = async {
         git::worktree_add(
             &clone_path,
@@ -223,12 +228,23 @@ async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLink> 
         )
         .await?;
 
+        docs_link = managed_docs::provision(managed_docs::DocsProvision {
+            repo: ctx.repo,
+            workspace_id: ctx.workspace_id,
+            branch: ctx.branch,
+            worktree_path: ctx.worktree_path,
+            paths: ctx.paths,
+            tx: ctx.tx,
+        })
+        .await?;
+
         let mut link = RepoLink {
             repo_key: ctx.repo.key.clone(),
             worktree_path: ctx.worktree_path.to_path_buf(),
             setup_script_ran_at: None,
             github: None,
             created_branch,
+            docs: docs_link.clone(),
         };
 
         if let Some(script) = ctx
@@ -260,6 +276,7 @@ async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLink> 
                 worktree_path: ctx.worktree_path,
                 branch: ctx.branch,
                 created_branch,
+                docs: docs_link.as_ref(),
                 paths: ctx.paths,
                 tx: ctx.tx,
             })
@@ -324,30 +341,36 @@ struct RepoTeardown<'a> {
     /// branch checked out for local edits) is left intact — only the worktree
     /// is removed.
     created_branch: bool,
+    /// Managed Docs provisioned for this repo, if any. Its checkout + branch
+    /// are torn down alongside the worktree.
+    docs: Option<&'a crate::state::DocsLink>,
     paths: &'a Paths,
     tx: &'a JobTx,
 }
 
 /// Best-effort reverse of `provision_repo_worktree`: force-remove the
-/// worktree, prune stale registrations, and delete the branch when Tethys
-/// created it. Errors are streamed as status events but never bubbled —
-/// teardown is always best-effort.
+/// worktree, prune stale registrations, delete the branch when Tethys
+/// created it, and tear down any Managed Docs checkout + branch. Errors are
+/// streamed as status events but never bubbled — teardown is always
+/// best-effort.
 async fn teardown_repo_worktree(ctx: RepoTeardown<'_>) {
-    if !ctx.worktree_path.exists() {
-        return;
+    if ctx.worktree_path.exists() {
+        let clone_path = ctx.paths.repo_clone_path(ctx.repo_key);
+        if let Err(cleanup_err) =
+            git::worktree_remove(&clone_path, ctx.worktree_path, true, ctx.tx, ctx.repo_key).await
+        {
+            ctx.tx.status(
+                format!("cleanup failed for {}: {cleanup_err}", ctx.repo_key),
+                Some(ctx.repo_key),
+            );
+        }
+        git::worktree_prune_best_effort(&clone_path, ctx.tx, ctx.repo_key).await;
+        if ctx.created_branch {
+            git::branch_delete_best_effort(&clone_path, ctx.branch, ctx.tx, ctx.repo_key).await;
+        }
     }
-    let clone_path = ctx.paths.repo_clone_path(ctx.repo_key);
-    if let Err(cleanup_err) =
-        git::worktree_remove(&clone_path, ctx.worktree_path, true, ctx.tx, ctx.repo_key).await
-    {
-        ctx.tx.status(
-            format!("cleanup failed for {}: {cleanup_err}", ctx.repo_key),
-            Some(ctx.repo_key),
-        );
-    }
-    git::worktree_prune_best_effort(&clone_path, ctx.tx, ctx.repo_key).await;
-    if ctx.created_branch {
-        git::branch_delete_best_effort(&clone_path, ctx.branch, ctx.tx, ctx.repo_key).await;
+    if let Some(docs) = ctx.docs {
+        managed_docs::remove_checkout_and_branch(ctx.paths, ctx.repo_key, docs).await;
     }
 }
 
@@ -463,6 +486,7 @@ pub async fn create_workspace(
             let worktree_path = reg.plan_worktree_path(&workspace_dir, &repo.key);
             let link = provision_repo_worktree(RepoProvision {
                 repo,
+                workspace_id: &id,
                 worktree_path: &worktree_path,
                 branch: &branch,
                 paths: &paths,
@@ -509,6 +533,7 @@ pub async fn create_workspace(
                     worktree_path: &link.worktree_path,
                     branch: &branch,
                     created_branch: link.created_branch,
+                    docs: link.docs.as_ref(),
                     paths: &paths,
                     tx: &tx,
                 })
@@ -615,6 +640,7 @@ pub async fn add_repo_to_workspace(
 
     let provision = provision_repo_worktree(RepoProvision {
         repo: &repo,
+        workspace_id: &args.workspace_id,
         worktree_path: &worktree_path,
         branch: &branch,
         paths: &paths,
@@ -672,6 +698,7 @@ pub async fn add_repo_to_workspace(
                 worktree_path: &worktree_path,
                 branch: &branch,
                 created_branch: false,
+                docs: None,
                 paths: &paths,
                 tx: &tx,
             })
@@ -909,6 +936,47 @@ pub async fn dismiss_pending_permission(
     crate::pending_permissions::dismiss_pending(&paths, &id).await?;
     let _ = app.emit("pending_permissions:changed", &());
     Ok(())
+}
+
+#[tauri::command]
+pub async fn list_pending_docs_merges(
+    paths: State<'_, Paths>,
+) -> AppResult<Vec<crate::managed_docs::PendingDocsMerge>> {
+    let file = crate::managed_docs::load_file(&paths.pending_docs_merges_file()).await?;
+    Ok(file.entries)
+}
+
+/// Approve a Pending Docs Merge: merge the parked docs branch into docs `main`.
+/// Emits `pending_docs_merges:changed` on both success and the conflicted-Err
+/// path (the entry is flagged `conflicted` and retained, so the UI must
+/// refresh either way).
+#[tauri::command]
+pub async fn approve_pending_docs_merge(
+    app: AppHandle,
+    paths: State<'_, Paths>,
+    id: String,
+) -> AppResult<()> {
+    let result = crate::managed_docs::approve(&paths, &id).await;
+    let _ = app.emit("pending_docs_merges:changed", &());
+    result
+}
+
+#[tauri::command]
+pub async fn decline_pending_docs_merge(
+    app: AppHandle,
+    paths: State<'_, Paths>,
+    id: String,
+) -> AppResult<()> {
+    crate::managed_docs::decline(&paths, &id).await?;
+    let _ = app.emit("pending_docs_merges:changed", &());
+    Ok(())
+}
+
+/// Open a repo's Docs Repo in the editor — used for manual conflict
+/// resolution after a conflicted approve.
+#[tauri::command]
+pub fn open_docs_repo(paths: State<'_, Paths>, repo_key: String) -> AppResult<()> {
+    open_in_editor(&paths.docs_repo_path(&repo_key))
 }
 
 #[tauri::command]

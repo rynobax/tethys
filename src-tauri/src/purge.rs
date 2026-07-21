@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::git;
+use crate::managed_docs;
 use crate::paths::Paths;
 use crate::pending_permissions;
 use crate::reconcile;
@@ -47,6 +48,15 @@ pub async fn purge_workspace(
             "failed to capture pending permissions before purge"
         );
     }
+
+    // Snapshot Managed Docs before any worktree removal. Unlike the permission
+    // capture above, a failure here MUST abort the purge: removing the
+    // worktrees after a failed snapshot would silently destroy the user's docs
+    // edits. The purger records a SystemErrorEntry and retries hourly, so the
+    // snapshot is idempotent across retries. A broken registry (`require`
+    // errors) still snapshots provisioned links; it only disables
+    // retro-adoption of pre-feature links, which needs the repo config.
+    managed_docs::snapshot_for_purge(workspace, paths, registry.require().ok()).await?;
 
     for link in &workspace.repo_links {
         let clone_path = paths.repo_clone_path(&link.repo_key);
@@ -200,6 +210,8 @@ impl Purger {
             // pending_permissions.json. The capture may have appended new
             // entries, so nudge any open modal to refresh.
             let _ = self.app.emit("pending_permissions:changed", &());
+            // The docs Snapshot may have parked new Pending Docs Merges.
+            let _ = self.app.emit("pending_docs_merges:changed", &());
         }
     }
 }

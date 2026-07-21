@@ -118,10 +118,27 @@ pub struct RepoLink {
     /// by Tethys under the old branch pre-check.
     #[serde(default = "default_created_branch")]
     pub created_branch: bool,
+    /// Managed Docs provisioning state for this repo link. `None` means docs
+    /// were skipped (opt-out, Team-Adopted, or pre-feature state).
+    #[serde(default)]
+    pub docs: Option<DocsLink>,
 }
 
 fn default_created_branch() -> bool {
     true
+}
+
+/// Managed Docs provisioning state for one repo link. `None` on the link
+/// means docs were skipped (opt-out, Team-Adopted, or pre-feature state).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsLink {
+    /// Branch in the Docs Repo, e.g. `ws/feat-foo-1a2b3c4d`.
+    pub branch: String,
+    pub checkout_path: PathBuf,
+    /// Repo-relative paths symlinked into the user worktree at provision
+    /// ("CONTEXT.md", "docs/adr"). Paths absent here either didn't exist in
+    /// the Docs Repo yet (lazy) or were Team-Adopted.
+    pub linked_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,6 +238,8 @@ mod tests {
         assert_eq!(ws.branch, "feat/foo");
         assert_eq!(ws.repo_links.len(), 1);
         assert!(ws.repo_links[0].github.is_none());
+        // Old RepoLink JSON without `docs` deserializes to None.
+        assert!(ws.repo_links[0].docs.is_none());
         assert!(ws.claude_binary.is_none());
         assert!(ws.deleted_at.is_none());
         assert!(ws.archived_at.is_none());
@@ -337,6 +356,38 @@ mod tests {
         }"#;
         let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
         assert!(parsed.workspaces[0].script_runs.is_empty());
+    }
+
+    #[test]
+    fn repo_link_docs_round_trips() {
+        let raw = r#"{
+            "workspaces": [
+                {
+                    "id": "abc-123",
+                    "branch": "feat/foo",
+                    "created_at": "2026-04-01T12:00:00Z",
+                    "repo_links": [
+                        {
+                            "repo_key": "frontend",
+                            "worktree_path": "/tmp/wt/abc-123/frontend",
+                            "setup_script_ran_at": null,
+                            "docs": {
+                                "branch": "ws/feat-foo-abc12345",
+                                "checkout_path": "/tmp/docs-wt/feat-foo/frontend",
+                                "linked_paths": ["CONTEXT.md"]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
+        let docs = parsed.workspaces[0].repo_links[0]
+            .docs
+            .as_ref()
+            .expect("docs present");
+        assert_eq!(docs.branch, "ws/feat-foo-abc12345");
+        assert_eq!(docs.linked_paths, vec!["CONTEXT.md".to_string()]);
     }
 
     #[test]

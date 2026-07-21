@@ -44,6 +44,7 @@ export interface RepoLink {
   worktree_path: string;
   setup_script_ran_at: string | null;
   github: GithubPrStatus | null;
+  docs?: { branch: string; checkout_path: string; linked_paths: string[] } | null;
 }
 
 export interface ClaudeSessionMeta {
@@ -111,6 +112,19 @@ export interface PendingPermission {
   raw_entry: string;
   suggested_repo_key: string | null;
   stripped_entry: string | null;
+}
+
+export interface PendingDocsMerge {
+  id: string;
+  repo_key: string;
+  workspace_id: string;
+  workspace_branch: string;
+  docs_branch: string;
+  captured_at: string;
+  /** Unified diff captured at purge (merge-base → branch). */
+  diff: string;
+  conflicted: boolean;
+  conflict_files: string[];
 }
 
 export interface CreateWorkspaceArgs {

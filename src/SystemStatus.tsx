@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   Discrepancies,
+  PendingDocsMerge,
   PendingPermission,
   RegistryStatus,
   SystemErrorEntry,
@@ -24,7 +25,7 @@ type Props = {
 };
 
 const HOUR_MS = 60 * 60 * 1000;
-type TabId = "status" | "pending_permissions";
+type TabId = "status" | "pending_permissions" | "docs_merges";
 
 export function SystemStatus({
   allWorkspaces,
@@ -34,6 +35,7 @@ export function SystemStatus({
 }: Props) {
   const [errors, setErrors] = useState<SystemErrorEntry[]>([]);
   const [pending, setPending] = useState<PendingPermission[]>([]);
+  const [docsMerges, setDocsMerges] = useState<PendingDocsMerge[]>([]);
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<TabId>("status");
 
@@ -55,23 +57,36 @@ export function SystemStatus({
     }
   }, []);
 
+  const refreshDocsMerges = useCallback(async () => {
+    try {
+      const list = await invoke<PendingDocsMerge[]>("list_pending_docs_merges");
+      setDocsMerges(list);
+    } catch (e) {
+      console.error("list_pending_docs_merges:", e);
+    }
+  }, []);
+
   useEffect(() => {
     refreshErrors();
     refreshPending();
-  }, [refreshErrors, refreshPending]);
+    refreshDocsMerges();
+  }, [refreshErrors, refreshPending, refreshDocsMerges]);
 
   useTauriEvent("system_status:changed", () => refreshErrors());
   useTauriEvent("pending_permissions:changed", () => refreshPending());
+  useTauriEvent("pending_docs_merges:changed", () => refreshDocsMerges());
 
   const pendingDeletes = allWorkspaces.filter((w) => w.deleted_at !== null);
   const hasErrors = errors.length > 0;
   const hasPending = pending.length > 0;
+  const hasDocsMerges = docsMerges.length > 0;
   const hasDiscrepancies =
     (discrepancies?.orphaned_dirs.length ?? 0) > 0 ||
     (discrepancies?.missing_worktrees.length ?? 0) > 0;
-  // Yellow only signals something actionable: pending permission grants or a
-  // state/disk mismatch. Pending deletions are routine and don't warrant it.
-  const hasWarnings = hasPending || hasDiscrepancies;
+  // Yellow only signals something actionable: pending permission grants,
+  // pending docs merges, or a state/disk mismatch. Pending deletions are
+  // routine and don't warrant it.
+  const hasWarnings = hasPending || hasDocsMerges || hasDiscrepancies;
 
   return (
     <>
@@ -95,11 +110,13 @@ export function SystemStatus({
           errors={errors}
           pendingDeletes={pendingDeletes}
           pendingPermissions={pending}
+          docsMerges={docsMerges}
           discrepancies={discrepancies}
           registry={registry}
           onClose={() => setOpen(false)}
           onRefreshErrors={refreshErrors}
           onRefreshPending={refreshPending}
+          onRefreshDocsMerges={refreshDocsMerges}
           onDiscrepancyChange={onDiscrepancyChange}
         />
       )}
@@ -113,11 +130,13 @@ function SystemStatusModal({
   errors,
   pendingDeletes,
   pendingPermissions,
+  docsMerges,
   discrepancies,
   registry,
   onClose,
   onRefreshErrors,
   onRefreshPending,
+  onRefreshDocsMerges,
   onDiscrepancyChange,
 }: {
   tab: TabId;
@@ -125,11 +144,13 @@ function SystemStatusModal({
   errors: SystemErrorEntry[];
   pendingDeletes: Workspace[];
   pendingPermissions: PendingPermission[];
+  docsMerges: PendingDocsMerge[];
   discrepancies: Discrepancies | null;
   registry: RegistryStatus | null;
   onClose: () => void;
   onRefreshErrors: () => void;
   onRefreshPending: () => void;
+  onRefreshDocsMerges: () => void;
   onDiscrepancyChange: () => void;
 }) {
   return (
@@ -158,6 +179,16 @@ function SystemStatusModal({
               <span className="tab-badge">{pendingPermissions.length}</span>
             )}
           </button>
+          <button
+            type="button"
+            className={`modal-tab${tab === "docs_merges" ? " active" : ""}`}
+            onClick={() => onTabChange("docs_merges")}
+          >
+            Docs
+            {docsMerges.length > 0 && (
+              <span className="tab-badge">{docsMerges.length}</span>
+            )}
+          </button>
         </div>
 
         {tab === "status" ? (
@@ -169,10 +200,15 @@ function SystemStatusModal({
             onRefresh={onRefreshErrors}
             onDiscrepancyChange={onDiscrepancyChange}
           />
-        ) : (
+        ) : tab === "pending_permissions" ? (
           <PendingPermissionsTab
             entries={pendingPermissions}
             onRefresh={onRefreshPending}
+          />
+        ) : (
+          <DocsMergesTab
+            entries={docsMerges}
+            onRefresh={onRefreshDocsMerges}
           />
         )}
 
@@ -495,6 +531,115 @@ function PendingPermissionRow({
         <button type="button" onClick={dismiss} disabled={busy}>
           Dismiss
         </button>
+      </div>
+    </li>
+  );
+}
+
+function DocsMergesTab({
+  entries,
+  onRefresh,
+}: {
+  entries: PendingDocsMerge[];
+  onRefresh: () => void;
+}) {
+  return (
+    <section>
+      <div className="section-header">
+        <h4>Pending docs merges</h4>
+      </div>
+      {entries.length === 0 ? (
+        <p className="muted">
+          No pending entries. When a purged workspace changed its managed docs,
+          the changes are committed to a per-workspace branch and parked here for
+          you to merge into docs main or decline.
+        </p>
+      ) : (
+        <ul className="status-list docs-merges-list">
+          {entries.map((entry) => (
+            <DocsMergeRow key={entry.id} entry={entry} onChanged={onRefresh} />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function DocsMergeRow({
+  entry,
+  onChanged,
+}: {
+  entry: PendingDocsMerge;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  const approve = async () => {
+    setBusy(true);
+    try {
+      await invoke("approve_pending_docs_merge", { id: entry.id });
+      onChanged();
+    } catch (e) {
+      alert(String(e));
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const decline = async () => {
+    setBusy(true);
+    try {
+      await invoke("decline_pending_docs_merge", { id: entry.id });
+      onChanged();
+    } catch (e) {
+      alert(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openDocsRepo = async () => {
+    try {
+      await invoke("open_docs_repo", { repoKey: entry.repo_key });
+    } catch (e) {
+      alert(String(e));
+    }
+  };
+
+  return (
+    <li className="docs-merge-row">
+      <div className="status-row">
+        <code className="docs-repo-key">{entry.repo_key}</code>
+        <code>{entry.workspace_branch}</code>
+        {entry.conflicted && (
+          <span className="docs-conflicted">conflicted</span>
+        )}
+      </div>
+      <div className="muted docs-merge-meta">
+        {new Date(entry.captured_at).toLocaleString()}
+      </div>
+      {entry.conflicted && entry.conflict_files.length > 0 && (
+        <div className="muted docs-conflict-files">
+          Conflicts in: {entry.conflict_files.join(", ")}
+        </div>
+      )}
+      <details className="docs-diff">
+        <summary>View diff</summary>
+        <pre className="docs-diff-body">{entry.diff}</pre>
+      </details>
+      <div className="docs-merge-actions">
+        <button type="button" onClick={approve} disabled={busy}>
+          Approve
+        </button>
+        <button type="button" onClick={decline} disabled={busy}>
+          Decline
+        </button>
+        {entry.conflicted && (
+          <button type="button" onClick={openDocsRepo} disabled={busy}>
+            Open docs repo
+          </button>
+        )}
       </div>
     </li>
   );

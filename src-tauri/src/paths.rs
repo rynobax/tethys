@@ -85,6 +85,29 @@ impl Paths {
     pub fn pending_permissions_file(&self) -> PathBuf {
         self.data_dir.join("pending_permissions.json")
     }
+
+    /// The Docs Repo for a repo — a Tethys-owned, non-bare git repository
+    /// (`main` checked out) holding that repo's Managed Docs (`CONTEXT.md` +
+    /// `docs/adr`). Lives at `<data_dir>/docs/<repo_key>`.
+    pub fn docs_repo_path(&self, repo_key: &str) -> PathBuf {
+        self.data_dir.join("docs").join(repo_key)
+    }
+
+    /// A workspace's private Docs Checkout — the per-workspace git worktree of
+    /// a Docs Repo, at `<data_dir>/docs-worktrees/<workspace_dir>/<repo_key>`.
+    /// Its files are symlinked into the user-repo worktree.
+    pub fn docs_checkout_path(&self, workspace_dir: &str, repo_key: &str) -> PathBuf {
+        self.data_dir
+            .join("docs-worktrees")
+            .join(workspace_dir)
+            .join(repo_key)
+    }
+
+    /// JSON file of Pending Docs Merges captured at Snapshot time, waiting for
+    /// the user to approve (merge into docs main) or decline (archive).
+    pub fn pending_docs_merges_file(&self) -> PathBuf {
+        self.data_dir.join("pending_docs_merges.json")
+    }
 }
 
 /// `~/.claude/settings.json` — user-level Claude Code settings.
