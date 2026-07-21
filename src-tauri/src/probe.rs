@@ -36,6 +36,12 @@ pub struct Probe {
     /// Claude does on compaction/resume, so it's the correlation key we fall
     /// back to when the stored `claude_session_id` has gone stale.
     pub cwd: Option<String>,
+    /// Epoch-ms of the last status transition. Not a heartbeat (see module
+    /// docs), so it can't detect a stuck session — but it does order two
+    /// probes for the same cwd, telling the live session from the ghost file
+    /// Claude leaves behind when it rotates its session id.
+    #[serde(rename = "statusUpdatedAt")]
+    pub status_updated_at: Option<i64>,
 }
 
 /// `~/.claude/sessions/` — where Claude Code drops one probe file per live
@@ -46,12 +52,19 @@ fn sessions_dir() -> Option<PathBuf> {
 }
 
 /// Map Claude's raw probe status onto a Tethys runtime state. Returns `None`
-/// for anything unrecognised, so a novel status value never clobbers a good
-/// hook-derived state. `shell` (Claude running a bang-command) counts as
-/// working.
+/// for anything we don't want to treat as authoritative, so it never clobbers
+/// a good hook-derived state.
+///
+/// `shell` is deliberately *not* mapped: it reports that a shell process is
+/// alive, which is true both while the agent runs a foreground bang-command
+/// and while a backgrounded shell lingers as the agent sits idle waiting on
+/// the user. It can't distinguish the two, so treating it as `Working` pins
+/// idle sessions green forever. Deferring to the hooks (which know the turn
+/// ended) is correct; a genuine foreground command is covered by the hook
+/// stream anyway.
 pub fn state_from_status(status: &str) -> Option<SessionRuntimeState> {
     match status {
-        "busy" | "shell" => Some(SessionRuntimeState::Working),
+        "busy" => Some(SessionRuntimeState::Working),
         "waiting" => Some(SessionRuntimeState::WaitingInput),
         "idle" => Some(SessionRuntimeState::Idle),
         _ => None,
@@ -101,4 +114,39 @@ pub fn spawn(supervisor: Arc<SessionSupervisor>) {
             tokio::time::sleep(POLL_INTERVAL).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::state_from_status;
+    use crate::state::SessionRuntimeState;
+
+    #[test]
+    fn busy_maps_to_working() {
+        assert_eq!(state_from_status("busy"), Some(SessionRuntimeState::Working));
+    }
+
+    #[test]
+    fn waiting_and_idle_map_through() {
+        assert_eq!(
+            state_from_status("waiting"),
+            Some(SessionRuntimeState::WaitingInput)
+        );
+        assert_eq!(state_from_status("idle"), Some(SessionRuntimeState::Idle));
+    }
+
+    /// `shell` means a shell process is alive, which happens both when the
+    /// agent runs a foreground bang-command *and* when a backgrounded shell
+    /// lingers while the agent sits idle waiting on the user. It can't tell
+    /// those apart, so it must not be authoritative — deferring to the hooks
+    /// (which do know the turn ended) instead of pinning the row green.
+    #[test]
+    fn shell_is_not_authoritative() {
+        assert_eq!(state_from_status("shell"), None);
+    }
+
+    #[test]
+    fn unknown_status_is_ignored() {
+        assert_eq!(state_from_status("teapot"), None);
+    }
 }

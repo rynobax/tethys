@@ -210,27 +210,22 @@ impl SessionSupervisor {
     /// can't see. Dormant sessions are left alone — a dead PTY is the exit
     /// hook's job, and a lingering probe file must not resurrect one.
     pub async fn reconcile_probes(&self, probes: &[crate::probe::Probe]) {
-        struct Parsed<'a> {
-            sid: &'a str,
-            cwd: Option<&'a str>,
-            state: SessionRuntimeState,
-        }
-        let parsed: Vec<Parsed> = probes
+        let parsed: Vec<ProbeView> = probes
             .iter()
             .filter_map(|p| {
                 let sid = p.session_id.as_deref()?;
                 let state = crate::probe::state_from_status(p.status.as_deref()?)?;
-                Some(Parsed { sid, cwd: p.cwd.as_deref(), state })
+                Some(ProbeView {
+                    sid,
+                    cwd: p.cwd.as_deref(),
+                    state,
+                    status_updated_at: p.status_updated_at,
+                })
             })
             .collect();
         if parsed.is_empty() {
             return;
         }
-
-        // Every session id Claude currently reports. A stored
-        // `claude_session_id` absent from this set has rotated away
-        // (compaction/resume) — the trigger for cwd-based healing.
-        let live_sids: HashSet<&str> = parsed.iter().map(|p| p.sid).collect();
 
         // Only running sessions are eligible; a lingering probe file must not
         // resurrect a dead one, and Dormant is the exit hook's job.
@@ -243,54 +238,30 @@ impl SessionSupervisor {
                 .collect()
         };
 
-        // Correlate each probe to a running tracked session. Primary key is
-        // the session id; when that misses, fall back to a *single* running
-        // session in the same cwd whose stored id has gone stale, and carry
-        // the fresh id in `heal_to` so hook correlation is repaired too.
         let actions = self
             .store
             .read(|s| {
-                let sessions = || {
-                    s.workspaces
-                        .iter()
-                        .flat_map(|ws| ws.sessions.iter().map(move |se| (ws, se)))
-                };
-                let mut out: Vec<(String, SessionId, SessionRuntimeState, Option<String>)> =
-                    Vec::new();
-                for p in &parsed {
-                    if let Some((ws, se)) = sessions()
-                        .find(|(_, se)| se.claude_session_id.as_deref() == Some(p.sid))
-                    {
-                        if running.contains(&se.id) {
-                            out.push((ws.id.clone(), se.id.clone(), p.state, None));
-                        }
-                        continue;
-                    }
-                    let Some(cwd) = p.cwd else { continue };
-                    let mut stale_in_cwd = sessions().filter(|(_, se)| {
-                        running.contains(&se.id)
-                            && se.cwd.to_str() == Some(cwd)
-                            && se
-                                .claude_session_id
-                                .as_deref()
-                                .is_none_or(|c| !live_sids.contains(c))
-                    });
-                    if let Some((ws, se)) = stale_in_cwd.next() {
-                        if stale_in_cwd.next().is_none() {
-                            out.push((
-                                ws.id.clone(),
-                                se.id.clone(),
-                                p.state,
-                                Some(p.sid.to_string()),
-                            ));
-                        }
-                    }
-                }
-                out
+                let running = &running;
+                let tracked: Vec<TrackedSession> = s
+                    .workspaces
+                    .iter()
+                    .flat_map(|ws| {
+                        ws.sessions.iter().map(move |se| TrackedSession {
+                            workspace_id: ws.id.as_str(),
+                            session_id: &se.id,
+                            cwd: se.cwd.to_str(),
+                            claude_session_id: se.claude_session_id.as_deref(),
+                            running: running.contains(&se.id),
+                        })
+                    })
+                    .collect();
+                plan_probe_reconciliation(&parsed, &tracked)
             })
             .await;
 
-        for (ws_id, sess_id, probe_state, heal_to) in actions {
+        for ProbeAction { workspace_id: ws_id, session_id: sess_id, state: probe_state, heal_to } in
+            actions
+        {
             if let Some(new_csid) = heal_to {
                 warn!(
                     session_id = %sess_id,
@@ -907,11 +878,223 @@ fn trim_detach_epilogue(ring: &Ring) {
     ring.truncate(cut_from);
 }
 
+/// A probe reduced to the fields the reconciler correlates on.
+struct ProbeView<'a> {
+    sid: &'a str,
+    cwd: Option<&'a str>,
+    state: SessionRuntimeState,
+    status_updated_at: Option<i64>,
+}
+
+/// A tracked Tethys session a probe can be correlated to.
+struct TrackedSession<'a> {
+    workspace_id: &'a str,
+    session_id: &'a SessionId,
+    cwd: Option<&'a str>,
+    claude_session_id: Option<&'a str>,
+    running: bool,
+}
+
+/// One reconciliation decision: apply `state` to `session_id`, first
+/// rewriting its stored `claude_session_id` when `heal_to` is set.
+#[derive(Debug, PartialEq)]
+struct ProbeAction {
+    workspace_id: String,
+    session_id: SessionId,
+    state: SessionRuntimeState,
+    heal_to: Option<String>,
+}
+
+/// Keep, per cwd, only the probe with the newest `status_updated_at`.
+///
+/// Claude leaves a session's old probe file behind when it rotates its
+/// session id (compaction/resume), so one cwd can show several probes at
+/// once — but Tethys runs a single live Claude per worktree cwd, so only the
+/// freshest is current. Dropping the stale ones up front stops a ghost probe
+/// from winning primary correlation *and* from keeping a rotated-away id in
+/// `live_sids`, which would otherwise suppress the very heal meant to repair
+/// it. A missing timestamp sorts oldest so a stamped live probe always wins;
+/// probes without a cwd can't be deduped this way and pass through untouched.
+fn freshest_probe_per_cwd<'a>(probes: &'a [ProbeView<'a>]) -> Vec<&'a ProbeView<'a>> {
+    let mut freshest: HashMap<&str, &ProbeView> = HashMap::new();
+    let mut out: Vec<&ProbeView> = Vec::new();
+    for p in probes {
+        let Some(cwd) = p.cwd else {
+            out.push(p);
+            continue;
+        };
+        match freshest.get(cwd) {
+            Some(cur)
+                if cur.status_updated_at.unwrap_or(i64::MIN)
+                    >= p.status_updated_at.unwrap_or(i64::MIN) => {}
+            _ => {
+                freshest.insert(cwd, p);
+            }
+        }
+    }
+    out.extend(freshest.into_values());
+    out
+}
+
+/// Pure correlation core of `reconcile_probes`, extracted so the drift/heal
+/// decisions are unit-testable without a live supervisor. Correlates each
+/// probe to a running tracked session: first by session id, then — when that
+/// misses because Claude rotated the id (compaction/resume) — by a *single*
+/// running session in the same cwd whose stored id has gone stale, carrying
+/// the fresh id in `heal_to` so hook correlation is repaired too.
+fn plan_probe_reconciliation(
+    probes: &[ProbeView],
+    sessions: &[TrackedSession],
+) -> Vec<ProbeAction> {
+    let probes = freshest_probe_per_cwd(probes);
+    // Every session id Claude currently reports. A stored `claude_session_id`
+    // absent from this set has rotated away — the trigger for cwd healing.
+    let live_sids: HashSet<&str> = probes.iter().map(|p| p.sid).collect();
+    let mut out = Vec::new();
+    for p in probes {
+        if let Some(s) =
+            sessions.iter().find(|s| s.claude_session_id == Some(p.sid))
+        {
+            if s.running {
+                out.push(ProbeAction {
+                    workspace_id: s.workspace_id.to_string(),
+                    session_id: s.session_id.clone(),
+                    state: p.state,
+                    heal_to: None,
+                });
+            }
+            continue;
+        }
+        let Some(cwd) = p.cwd else { continue };
+        let mut stale_in_cwd = sessions.iter().filter(|s| {
+            s.running
+                && s.cwd == Some(cwd)
+                && s.claude_session_id.is_none_or(|c| !live_sids.contains(c))
+        });
+        if let Some(s) = stale_in_cwd.next() {
+            if stale_in_cwd.next().is_none() {
+                out.push(ProbeAction {
+                    workspace_id: s.workspace_id.to_string(),
+                    session_id: s.session_id.clone(),
+                    state: p.state,
+                    heal_to: Some(p.sid.to_string()),
+                });
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::parent_session_from_subagent_path;
-    use super::TurnState;
+    use super::{
+        plan_probe_reconciliation, ProbeAction, ProbeView, TrackedSession, TurnState,
+    };
     use crate::state::SessionRuntimeState;
+
+    /// Claude rotated its session id and left the old probe file behind, so
+    /// the cwd shows two probes: a stale one still bearing the id Tethys
+    /// stored, and the fresh live one. The reconciler must ignore the ghost,
+    /// heal the stored id to the live one, and apply the live probe's state —
+    /// not freeze on the stale probe forever.
+    #[test]
+    fn stale_ghost_probe_does_not_block_healing() {
+        let stored_id = "b6a26662".to_string();
+        let sess_id = "tethys-sess".to_string();
+        let ws_id = "ws".to_string();
+        let cwd = "/wt/custom-fill-in-field/nl-ai";
+        let probes = [
+            // Ghost: old id (== stored), stale timestamp, still "working".
+            ProbeView {
+                sid: "b6a26662",
+                cwd: Some(cwd),
+                state: SessionRuntimeState::Working,
+                status_updated_at: Some(1_784_158_540_640),
+            },
+            // Live: rotated id, fresh timestamp, now idle.
+            ProbeView {
+                sid: "14a3fff4",
+                cwd: Some(cwd),
+                state: SessionRuntimeState::Idle,
+                status_updated_at: Some(1_784_573_092_544),
+            },
+        ];
+        let sessions = [TrackedSession {
+            workspace_id: &ws_id,
+            session_id: &sess_id,
+            cwd: Some(cwd),
+            claude_session_id: Some(&stored_id),
+            running: true,
+        }];
+
+        let actions = plan_probe_reconciliation(&probes, &sessions);
+
+        assert_eq!(
+            actions,
+            vec![ProbeAction {
+                workspace_id: ws_id,
+                session_id: sess_id,
+                state: SessionRuntimeState::Idle,
+                heal_to: Some("14a3fff4".to_string()),
+            }]
+        );
+    }
+
+    /// A single live probe whose id already matches the stored id needs no
+    /// healing — apply its state straight through.
+    #[test]
+    fn matching_probe_applies_state_without_healing() {
+        let stored_id = "sid-1".to_string();
+        let sess_id = "sess".to_string();
+        let ws_id = "ws".to_string();
+        let probes = [ProbeView {
+            sid: "sid-1",
+            cwd: Some("/wt/a"),
+            state: SessionRuntimeState::WaitingInput,
+            status_updated_at: Some(10),
+        }];
+        let sessions = [TrackedSession {
+            workspace_id: &ws_id,
+            session_id: &sess_id,
+            cwd: Some("/wt/a"),
+            claude_session_id: Some(&stored_id),
+            running: true,
+        }];
+        let actions = plan_probe_reconciliation(&probes, &sessions);
+        assert_eq!(
+            actions,
+            vec![ProbeAction {
+                workspace_id: ws_id,
+                session_id: sess_id,
+                state: SessionRuntimeState::WaitingInput,
+                heal_to: None,
+            }]
+        );
+    }
+
+    /// A probe for a non-running session must never produce an action — a
+    /// lingering probe file can't resurrect a dead PTY.
+    #[test]
+    fn probe_never_resurrects_a_dead_session() {
+        let stored_id = "sid-1".to_string();
+        let sess_id = "sess".to_string();
+        let ws_id = "ws".to_string();
+        let probes = [ProbeView {
+            sid: "sid-1",
+            cwd: Some("/wt/a"),
+            state: SessionRuntimeState::Working,
+            status_updated_at: Some(10),
+        }];
+        let sessions = [TrackedSession {
+            workspace_id: &ws_id,
+            session_id: &sess_id,
+            cwd: Some("/wt/a"),
+            claude_session_id: Some(&stored_id),
+            running: false,
+        }];
+        assert!(plan_probe_reconciliation(&probes, &sessions).is_empty());
+    }
 
     #[test]
     fn apply_reports_change_on_state_transition() {
