@@ -2008,7 +2008,6 @@ function AttachedPrChips({
           <GithubChip
             key={attached.number}
             status={attached.status}
-            showBranch
             onDetach={() => onDetach(link.repo_key, attached.number)}
           />
         ) : (

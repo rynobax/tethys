@@ -185,15 +185,11 @@ function bugbotTitle(bugbot: ChecksRollup): string {
 export function GithubChip({
   status,
   linkable = true,
-  showBranch = false,
   onDetach,
 }: {
   status: GithubPrStatus;
   /** When false, the chip is informational only — no click-to-open, no hover. */
   linkable?: boolean;
-  /** Show the PR's head branch. Worth it for manually-attached PRs, where the
-   *  number alone doesn't say which branch it belongs to. */
-  showBranch?: boolean;
   /** When set, renders a detach button. Only for manually-attached PRs. */
   onDetach?: () => void;
 }) {
@@ -232,9 +228,6 @@ export function GithubChip({
   return (
     <span className={classes} title={baseTitle} onClick={onClick}>
       <span className="gh-pr">#{status.pr_number}</span>
-      {showBranch && status.head_branch && (
-        <span className="gh-branch">{status.head_branch}</span>
-      )}
       {isOpen && (
         <span className="gh-squares">
           <Square

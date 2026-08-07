@@ -306,18 +306,6 @@ html,
   font-weight: 600;
 }
 
-/* Branch label on manually-attached PR chips — the number alone doesn't say
-   which of the workspace's branches the PR belongs to. */
-.gh-branch {
-  font-family: "SF Mono", ui-monospace, monospace;
-  font-size: 9px;
-  color: var(--muted);
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* Keeps a repo's branch PR and its attached PRs together when the header wraps —
    and lets the group itself wrap once it has more chips than fit on one row. */
 .gh-chip-group {
@@ -440,6 +428,7 @@ html,
   display: flex;
   justify-content: space-between;
   align-items: baseline;
+  gap: 16px;
   border-bottom: 1px solid var(--border);
   padding: 0 16px 10px;
 }
@@ -449,7 +438,12 @@ html,
   display: flex;
   align-items: center;
   gap: 10px;
+  row-gap: 6px;
   flex-wrap: wrap;
+  /* Takes the leftover width and wraps its own chips, rather than pushing on
+     the action buttons and forcing their labels to wrap. */
+  flex: 1;
+  min-width: 0;
 }
 
 .workspace-detail h2 .gh-chip {
@@ -465,6 +459,11 @@ html,
 .actions {
   display: flex;
   gap: 8px;
+  flex-shrink: 0;
+}
+
+.actions button {
+  white-space: nowrap;
 }
 
 .workspace-fields {
