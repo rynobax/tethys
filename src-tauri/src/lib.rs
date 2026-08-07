@@ -10,7 +10,6 @@ mod hook_listener;
 mod inprogress;
 mod job;
 mod logging;
-mod managed_docs;
 mod paths;
 mod pending_permissions;
 mod probe;
@@ -242,14 +241,12 @@ pub fn run() {
             commands::list_pending_permissions,
             commands::apply_pending_permission,
             commands::dismiss_pending_permission,
-            commands::list_pending_docs_merges,
-            commands::approve_pending_docs_merge,
-            commands::decline_pending_docs_merge,
-            commands::open_docs_repo,
             commands::list_repos,
             commands::registry_status,
             commands::github_auth_status,
             commands::github_reprobe_auth,
+            commands::attach_pr,
+            commands::detach_pr,
             commands::open_repos_config,
             commands::open_in_vscode,
             commands::list_discrepancies,

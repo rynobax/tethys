@@ -67,32 +67,46 @@ pub fn has_session(tmux_bin: &Path, session_id: &str) -> bool {
 ///   client this matches the terminal exactly.
 /// - `status off` hides tmux's status bar — Tethys' UI already shows
 ///   session info, so the bar is just a wasted row of screen.
-/// - `mouse on` — without it tmux forwards wheel events as arrow keys
-///   when the pane is on the alternate screen. With it, wheel-up enters
-///   copy-mode and scrolls tmux's scrollback.
+/// - `mouse on` — required by Claude Code's fullscreen renderer. It draws
+///   on the pane's alternate screen and requests SGR mouse tracking, so it
+///   owns scrolling. With `mouse off` tmux never enables mouse reporting on
+///   xterm.js, the wheel is handled locally by xterm.js against its own
+///   (now stale) buffer, and Claude's viewport never moves. tmux only
+///   grabs the wheel for copy-mode when the pane app hasn't asked for
+///   mouse tracking; when it has, tmux forwards the events through.
 pub fn server_init_args() -> Vec<String> {
     // Each inner slice is one tmux command; `;` in between is tmux's
     // command-chain separator. Tmux is purely a process keeper here —
-    // xterm.js owns scrollback, selection, and mouse handling. Keeping
-    // tmux's `mouse` at the default (off) lets wheel events pass through
-    // to xterm.js for native scrolling of its own buffer.
+    // xterm.js is a display surface, and the pane app decides who handles
+    // the mouse.
     let commands: &[&[&str]] = &[
         &["set-option", "-g", "window-size", "latest"],
         &["set-option", "-g", "status", "off"],
-        // Explicitly off — a previous run may have turned it on, and the
+        // Explicitly set — a previous run may have flipped it, and the
         // tmux server survives across Tethys restarts.
-        &["set-option", "-g", "mouse", "off"],
+        &["set-option", "-g", "mouse", "on"],
         // `capture-pane -S -` is bounded by history-limit; bump it so
         // cross-restart reattach has plenty of history to replay into
         // xterm.js.
         &["set-option", "-g", "history-limit", "50000"],
         // Strip alt-screen (smcup/rmcup) from every terminal's terminfo.
-        // Without this, tmux-the-client enters alt-screen on xterm.js,
-        // which flips xterm.js into its alternate buffer — and xterm's
-        // default wheel behavior in alt-buffer is "send arrow keys," not
-        // scroll the main-buffer scrollback. Neutering alt-screen keeps
-        // everything in the main buffer so wheel events scroll natively.
-        &["set-option", "-ga", "terminal-overrides", ",*:smcup@:rmcup@"],
+        // Without this, tmux-the-client enters alt-screen on xterm.js the
+        // moment it attaches, flipping xterm.js into its alternate buffer
+        // for the whole session — which has no scrollback, so panes that
+        // don't capture the mouse themselves (a plain shell, Claude's
+        // classic renderer) lose wheel scrolling entirely. Keeping
+        // everything in the main buffer leaves xterm's own scrollback as
+        // the fallback for those.
+        //
+        // `-g` (not `-ga`) with the default `linux*:AX@` spelled out:
+        // `server_init_args()` runs on every spawn and the tmux server
+        // outlives Tethys, so appending grew this array without bound.
+        &[
+            "set-option",
+            "-g",
+            "terminal-overrides",
+            "linux*:AX@,*:smcup@:rmcup@",
+        ],
     ];
     commands
         .iter()

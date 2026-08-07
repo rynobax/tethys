@@ -181,8 +181,16 @@ impl GithubPoller {
                     workspace_id: ws.id.clone(),
                     repo_key: link.repo_key.clone(),
                     slug: slug.clone(),
-                    branch: ws.branch.clone(),
+                    kind: TargetKind::Branch(ws.branch.clone()),
                 });
+                for attached in &link.attached_prs {
+                    out.push(Target {
+                        workspace_id: ws.id.clone(),
+                        repo_key: link.repo_key.clone(),
+                        slug: slug.clone(),
+                        kind: TargetKind::Pr(attached.number),
+                    });
+                }
             }
         }
         out
@@ -201,15 +209,8 @@ impl GithubPoller {
             .await
             .unwrap_or_default();
 
-        for (ws_id, repo_key, status) in &changed {
-            let _ = self.app.emit(
-                "github:status_changed",
-                json!({
-                    "workspace_id": ws_id,
-                    "repo_key": repo_key,
-                    "status": status,
-                }),
-            );
+        for result in &changed {
+            let _ = self.app.emit("github:status_changed", result.event());
         }
         Ok(changed.len())
     }
@@ -285,12 +286,70 @@ impl GithubPoller {
     }
 }
 
+/// Fetch a single PR's status outside the poll loop. Used by `attach_pr` so
+/// the chip shows up immediately (and so attaching a bogus number fails loudly
+/// instead of silently sitting there empty until the next tick).
+pub async fn fetch_pr_status(
+    slug: &GithubSlug,
+    number: u32,
+) -> Result<Option<GithubPrStatus>, GhError> {
+    // The workspace/repo fields only matter for routing poll results back into
+    // state, which this path doesn't do.
+    let target = Target {
+        workspace_id: String::new(),
+        repo_key: String::new(),
+        slug: slug.clone(),
+        kind: TargetKind::Pr(number),
+    };
+    let targets = std::slice::from_ref(&target);
+    let (query, variables) = build_query(targets);
+    let data = run_graphql(&query, &variables).await?;
+    Ok(parse_response(targets, &data)
+        .into_iter()
+        .next()
+        .and_then(|r| r.status))
+}
+
 #[derive(Debug, Clone)]
 struct Target {
     workspace_id: WorkspaceId,
     repo_key: String,
     slug: GithubSlug,
-    branch: String,
+    kind: TargetKind,
+}
+
+/// Which PR of a repo link a target (and its result) refers to: the one for
+/// the workspace's own branch, or a specific manually-attached number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TargetKind {
+    Branch(String),
+    Pr(u32),
+}
+
+#[derive(Debug, Clone)]
+struct PollResult {
+    workspace_id: WorkspaceId,
+    repo_key: String,
+    kind: TargetKind,
+    status: Option<GithubPrStatus>,
+}
+
+impl PollResult {
+    /// Payload for `github:status_changed`. `pr_number` is null for the
+    /// branch-derived PR and set for a manually-attached one, which is how the
+    /// frontend knows which slot to update.
+    fn event(&self) -> Value {
+        let pr_number = match self.kind {
+            TargetKind::Branch(_) => None,
+            TargetKind::Pr(n) => Some(n),
+        };
+        json!({
+            "workspace_id": self.workspace_id,
+            "repo_key": self.repo_key,
+            "pr_number": pr_number,
+            "status": self.status,
+        })
+    }
 }
 
 fn backoff_for(failures: u32) -> Duration {
@@ -313,6 +372,7 @@ fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
           state
           isDraft
           mergeable
+          headRefName
           reviewDecision
           reviewThreads(first: 50) {
             nodes {
@@ -350,20 +410,23 @@ fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
     for (i, t) in targets.iter().enumerate() {
         let ow = format!("q{i}_owner");
         let nm = format!("q{i}_name");
-        let br = format!("q{i}_branch");
-        let bn = format!("q{i}_branch_name");
         vars.insert(ow.clone(), t.slug.owner.clone());
         vars.insert(nm.clone(), t.slug.name.clone());
-        vars.insert(br.clone(), format!("refs/heads/{}", t.branch));
-        vars.insert(bn.clone(), t.branch.clone());
-        var_decls.push(format!(
-            "${ow}: String!, ${nm}: String!, ${br}: String!, ${bn}: String!"
-        ));
-        // `mergedPrs` is the fallback for when the branch has been deleted
-        // post-merge: GitHub nulls the `ref`, but the PR record persists and
-        // is queryable by headRefName.
-        body.push_str(&format!(
-            r#"q{i}: repository(owner: ${ow}, name: ${nm}) {{
+
+        match &t.kind {
+            TargetKind::Branch(branch) => {
+                let br = format!("q{i}_branch");
+                let bn = format!("q{i}_branch_name");
+                vars.insert(br.clone(), format!("refs/heads/{branch}"));
+                vars.insert(bn.clone(), branch.clone());
+                var_decls.push(format!(
+                    "${ow}: String!, ${nm}: String!, ${br}: String!, ${bn}: String!"
+                ));
+                // `mergedPrs` is the fallback for when the branch has been
+                // deleted post-merge: GitHub nulls the `ref`, but the PR record
+                // persists and is queryable by headRefName.
+                body.push_str(&format!(
+                    r#"q{i}: repository(owner: ${ow}, name: ${nm}) {{
     ref(qualifiedName: ${br}) {{
       associatedPullRequests(first: 1, orderBy: {{field: UPDATED_AT, direction: DESC}}) {{
         nodes {{
@@ -378,7 +441,24 @@ fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
     }}
   }}
 "#
-        ));
+                ));
+            }
+            // The number is inlined rather than passed as a variable: `gh api
+            // graphql -f` only sends strings, and GitHub's `number` argument is
+            // an `Int!`. It's a `u32` we parsed ourselves, so there's nothing
+            // to inject.
+            TargetKind::Pr(number) => {
+                var_decls.push(format!("${ow}: String!, ${nm}: String!"));
+                body.push_str(&format!(
+                    r#"q{i}: repository(owner: ${ow}, name: ${nm}) {{
+    pullRequest(number: {number}) {{
+      {PR_FIELDS}
+    }}
+  }}
+"#
+                ));
+            }
+        }
     }
 
     let decls = var_decls.join(", ");
@@ -386,18 +466,28 @@ fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
     (query, vars)
 }
 
-fn parse_response(targets: &[Target], data: &Value) -> Vec<(WorkspaceId, String, Option<GithubPrStatus>)> {
+fn parse_response(targets: &[Target], data: &Value) -> Vec<PollResult> {
     let mut out = Vec::with_capacity(targets.len());
     for (i, t) in targets.iter().enumerate() {
         let alias = format!("q{i}");
         let node = data.get(&alias);
-        let status = node.and_then(parse_repo_node);
-        out.push((t.workspace_id.clone(), t.repo_key.clone(), status));
+        let status = match t.kind {
+            TargetKind::Branch(_) => node.and_then(parse_branch_repo_node),
+            TargetKind::Pr(_) => node
+                .and_then(|repo| repo.get("pullRequest"))
+                .and_then(parse_pr_node),
+        };
+        out.push(PollResult {
+            workspace_id: t.workspace_id.clone(),
+            repo_key: t.repo_key.clone(),
+            kind: t.kind.clone(),
+            status,
+        });
     }
     out
 }
 
-fn parse_repo_node(repo: &Value) -> Option<GithubPrStatus> {
+fn parse_branch_repo_node(repo: &Value) -> Option<GithubPrStatus> {
     // Prefer the PR associated with the live branch ref. If the branch was
     // deleted on merge, `ref` will be null — fall back to the most recent
     // merged/closed PR for that branch name.
@@ -412,8 +502,10 @@ fn parse_repo_node(repo: &Value) -> Option<GithubPrStatus> {
         .and_then(|m| m.get("nodes"))
         .and_then(|n| n.as_array())
         .and_then(|arr| arr.first());
-    let pr = assoc.or(merged_fallback)?;
+    parse_pr_node(assoc.or(merged_fallback)?)
+}
 
+fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
     let number = pr.get("number")?.as_u64()? as u32;
     let url = pr.get("url")?.as_str()?.to_string();
     let state = match pr.get("state")?.as_str()? {
@@ -543,6 +635,10 @@ fn parse_repo_node(repo: &Value) -> Option<GithubPrStatus> {
         has_merge_conflicts,
         review_decision,
         unresolved_threads,
+        head_branch: pr
+            .get("headRefName")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         head_sha,
         fetched_at: Utc::now(),
         last_error: None,
@@ -638,21 +734,32 @@ fn aggregate_rollup(states: impl Iterator<Item = ChecksRollup>) -> ChecksRollup 
 }
 
 /// Apply parsed results to `AppState`, returning the set of changes to emit.
-fn apply_results(
-    state: &mut AppState,
-    results: &[(WorkspaceId, String, Option<GithubPrStatus>)],
-) -> Vec<(WorkspaceId, String, Option<GithubPrStatus>)> {
+fn apply_results(state: &mut AppState, results: &[PollResult]) -> Vec<PollResult> {
     let mut changed = Vec::new();
-    for (ws_id, repo_key, new_status) in results {
-        let Some(ws) = state.find_workspace_mut(ws_id) else {
+    for result in results {
+        let Some(ws) = state.find_workspace_mut(&result.workspace_id) else {
             continue;
         };
-        let Some(link) = ws.repo_links.iter_mut().find(|r| &r.repo_key == repo_key) else {
+        let Some(link) = ws
+            .repo_links
+            .iter_mut()
+            .find(|r| r.repo_key == result.repo_key)
+        else {
             continue;
         };
-        if is_meaningful_change(link.github.as_ref(), new_status.as_ref()) {
-            link.github = new_status.clone();
-            changed.push((ws_id.clone(), repo_key.clone(), new_status.clone()));
+        let slot = match result.kind {
+            TargetKind::Branch(_) => &mut link.github,
+            // A PR the user detached mid-tick has no slot left to write to.
+            TargetKind::Pr(number) => {
+                match link.attached_prs.iter_mut().find(|a| a.number == number) {
+                    Some(attached) => &mut attached.status,
+                    None => continue,
+                }
+            }
+        };
+        if is_meaningful_change(slot.as_ref(), result.status.as_ref()) {
+            *slot = result.status.clone();
+            changed.push(result.clone());
         }
     }
     changed
@@ -675,6 +782,7 @@ fn is_meaningful_change(old: Option<&GithubPrStatus>, new: Option<&GithubPrStatu
                 || a.has_merge_conflicts != b.has_merge_conflicts
                 || a.review_decision != b.review_decision
                 || a.unresolved_threads != b.unresolved_threads
+                || a.head_branch != b.head_branch
                 || a.head_sha != b.head_sha
                 || a.last_error != b.last_error
         }
@@ -686,6 +794,10 @@ mod tests {
     use super::*;
 
     fn mk_target(i: usize) -> Target {
+        mk_target_kind(i, TargetKind::Branch(format!("feat/foo-{i}")))
+    }
+
+    fn mk_target_kind(i: usize, kind: TargetKind) -> Target {
         Target {
             workspace_id: format!("ws-{i}"),
             repo_key: "frontend".to_string(),
@@ -693,8 +805,17 @@ mod tests {
                 owner: "rynobax".to_string(),
                 name: "tethys".to_string(),
             },
-            branch: format!("feat/foo-{i}"),
+            kind,
         }
+    }
+
+    /// Parse a single-branch-target response and hand back just the status.
+    fn parse_one(data: &Value) -> Option<GithubPrStatus> {
+        parse_response(&[mk_target(0)], data)
+            .into_iter()
+            .next()
+            .expect("one result per target")
+            .status
     }
 
     #[test]
@@ -716,7 +837,7 @@ mod tests {
         let data = json!({ "q0": { "ref": null } });
         let parsed = parse_response(&[mk_target(0)], &data);
         assert_eq!(parsed.len(), 1);
-        assert!(parsed[0].2.is_none());
+        assert!(parsed[0].status.is_none());
     }
 
     #[test]
@@ -726,8 +847,7 @@ mod tests {
                 "ref": { "associatedPullRequests": { "nodes": [] } }
             }
         });
-        let parsed = parse_response(&[mk_target(0)], &data);
-        assert!(parsed[0].2.is_none());
+        assert!(parse_one(&data).is_none());
     }
 
     #[test]
@@ -759,8 +879,7 @@ mod tests {
                 }
             }
         });
-        let parsed = parse_response(&[mk_target(0)], &data);
-        let status = parsed[0].2.as_ref().expect("should parse");
+        let status = parse_one(&data).expect("should parse");
         assert_eq!(status.pr_number, 42);
         assert_eq!(status.state, PrState::Open);
         assert_eq!(status.checks, ChecksRollup::Failure);
@@ -789,10 +908,7 @@ mod tests {
                 }
             }
         });
-        let status = parse_response(&[mk_target(0)], &data)[0]
-            .2
-            .clone()
-            .expect("should fall back to mergedPrs");
+        let status = parse_one(&data).expect("should fall back to mergedPrs");
         assert_eq!(status.pr_number, 99);
         assert_eq!(status.state, PrState::Merged);
     }
@@ -831,7 +947,7 @@ mod tests {
                 }
             }
         });
-        let status = parse_response(&[mk_target(0)], &data)[0].2.clone().unwrap();
+        let status = parse_one(&data).unwrap();
         assert_eq!(status.pr_number, 5);
         assert_eq!(status.state, PrState::Open);
     }
@@ -858,10 +974,7 @@ mod tests {
                 }
             }
         });
-        let status = parse_response(&[mk_target(0)], &data)[0]
-            .2
-            .clone()
-            .expect("parse");
+        let status = parse_one(&data).expect("parse");
         assert_eq!(status.state, PrState::Merged);
         assert_eq!(status.unresolved_threads, 0);
         assert_eq!(status.checks, ChecksRollup::None);
@@ -887,10 +1000,7 @@ mod tests {
                 }
             }
         });
-        let status = parse_response(&[mk_target(0)], &data)[0]
-            .2
-            .clone()
-            .expect("parse");
+        let status = parse_one(&data).expect("parse");
         assert_eq!(status.checks, ChecksRollup::None);
         assert!(status.is_draft);
     }
@@ -916,7 +1026,7 @@ mod tests {
                 }
             }
         });
-        let s = parse_response(&[mk_target(0)], &data)[0].2.clone().unwrap();
+        let s = parse_one(&data).unwrap();
         assert!(s.has_merge_conflicts);
     }
 
@@ -943,7 +1053,7 @@ mod tests {
                 }
             }
         });
-        let s = parse_response(&[mk_target(0)], &data)[0].2.clone().unwrap();
+        let s = parse_one(&data).unwrap();
         assert!(!s.has_merge_conflicts);
     }
 
@@ -968,7 +1078,7 @@ mod tests {
                 }
             }
         });
-        let s = parse_response(&[mk_target(0)], &data)[0].2.clone().unwrap();
+        let s = parse_one(&data).unwrap();
         assert!(!s.has_merge_conflicts);
     }
 
@@ -984,6 +1094,7 @@ mod tests {
             has_merge_conflicts: false,
             review_decision: ReviewDecision::None,
             unresolved_threads: 0,
+            head_branch: Some("feat/foo".into()),
             head_sha: "sha".into(),
             fetched_at: Utc::now(),
             last_error: None,
@@ -1033,7 +1144,7 @@ mod tests {
                 }
             }
         });
-        let s = parse_response(&[mk_target(0)], &data)[0].2.clone().unwrap();
+        let s = parse_one(&data).unwrap();
         assert_eq!(s.checks, ChecksRollup::Success);
         assert_eq!(s.bugbot, ChecksRollup::Failure);
     }
@@ -1066,7 +1177,7 @@ mod tests {
                 }
             }
         });
-        let s = parse_response(&[mk_target(0)], &data)[0].2.clone().unwrap();
+        let s = parse_one(&data).unwrap();
         assert_eq!(s.bugbot, ChecksRollup::Pending);
         assert_eq!(s.checks, ChecksRollup::None);
     }
@@ -1106,7 +1217,7 @@ mod tests {
                 }
             }
         });
-        let s = parse_response(&[mk_target(0)], &data)[0].2.clone().unwrap();
+        let s = parse_one(&data).unwrap();
         assert_eq!(s.bugbot, ChecksRollup::Failure);
     }
 
@@ -1145,7 +1256,7 @@ mod tests {
                 }
             }
         });
-        let s = parse_response(&[mk_target(0)], &data)[0].2.clone().unwrap();
+        let s = parse_one(&data).unwrap();
         assert_eq!(s.bugbot, ChecksRollup::Neutral);
     }
 
@@ -1181,7 +1292,7 @@ mod tests {
                 }
             }
         });
-        let s = parse_response(&[mk_target(0)], &data)[0].2.clone().unwrap();
+        let s = parse_one(&data).unwrap();
         assert_eq!(s.unresolved_threads, 1);
     }
 
@@ -1207,7 +1318,7 @@ mod tests {
                 }
             }
         });
-        let s = parse_response(&[mk_target(0)], &data)[0].2.clone().unwrap();
+        let s = parse_one(&data).unwrap();
         assert_eq!(s.checks, ChecksRollup::Success);
         assert_eq!(s.bugbot, ChecksRollup::None);
     }
@@ -1233,7 +1344,7 @@ mod tests {
                 }
             }
         });
-        let s = parse_response(&[mk_target(0)], &data)[0].2.clone().unwrap();
+        let s = parse_one(&data).unwrap();
         assert_eq!(s.review_decision, ReviewDecision::Approved);
     }
 
@@ -1258,7 +1369,7 @@ mod tests {
                 }
             }
         });
-        let s = parse_response(&[mk_target(0)], &data)[0].2.clone().unwrap();
+        let s = parse_one(&data).unwrap();
         assert_eq!(s.review_decision, ReviewDecision::None);
     }
 
@@ -1283,8 +1394,191 @@ mod tests {
                 }
             }
         });
-        let s = parse_response(&[mk_target(0)], &data)[0].2.clone().unwrap();
+        let s = parse_one(&data).unwrap();
         assert_eq!(s.review_decision, ReviewDecision::None);
+    }
+
+    #[test]
+    fn parse_captures_head_branch() {
+        let data = json!({
+            "q0": {
+                "ref": {
+                    "associatedPullRequests": {
+                        "nodes": [{
+                            "number": 1,
+                            "url": "u",
+                            "state": "OPEN",
+                            "isDraft": false,
+                            "headRefName": "feat/foo-0",
+                            "reviewThreads": {"nodes": []},
+                            "commits": {
+                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
+                            }
+                        }]
+                    }
+                }
+            }
+        });
+        let s = parse_one(&data).unwrap();
+        assert_eq!(s.head_branch.as_deref(), Some("feat/foo-0"));
+    }
+
+    #[test]
+    fn pr_target_query_uses_pull_request_by_number() {
+        let targets = vec![mk_target_kind(0, TargetKind::Pr(512))];
+        let (q, vars) = build_query(&targets);
+        assert!(q.contains("q0: repository(owner: $q0_owner, name: $q0_name)"));
+        assert!(q.contains("pullRequest(number: 512)"));
+        // A number-targeted query has no branch to look up.
+        assert!(!q.contains("$q0_branch"));
+        assert!(!vars.contains_key("q0_branch"));
+        assert_eq!(vars.get("q0_name").unwrap(), "tethys");
+    }
+
+    #[test]
+    fn parse_pr_target_reads_pull_request_node() {
+        let data = json!({
+            "q0": {
+                "pullRequest": {
+                    "number": 512,
+                    "url": "https://github.com/rynobax/tethys/pull/512",
+                    "state": "OPEN",
+                    "isDraft": false,
+                    "headRefName": "feat/second-branch",
+                    "reviewThreads": {"nodes": [{"isResolved": false}]},
+                    "commits": {
+                        "nodes": [{"commit": {
+                            "oid": "sha512",
+                            "statusCheckRollup": {"state": "SUCCESS"}
+                        }}]
+                    }
+                }
+            }
+        });
+        let target = mk_target_kind(0, TargetKind::Pr(512));
+        let result = parse_response(&[target], &data).remove(0);
+        let status = result.status.expect("should parse");
+        assert_eq!(status.pr_number, 512);
+        assert_eq!(status.head_branch.as_deref(), Some("feat/second-branch"));
+        assert_eq!(status.checks, ChecksRollup::Success);
+        assert_eq!(status.unresolved_threads, 1);
+    }
+
+    #[test]
+    fn parse_missing_pr_target_returns_none() {
+        // A detached-or-bogus number comes back as `pullRequest: null`.
+        let data = json!({ "q0": { "pullRequest": null } });
+        let target = mk_target_kind(0, TargetKind::Pr(999));
+        let result = parse_response(&[target], &data).remove(0);
+        assert!(result.status.is_none());
+    }
+
+    fn mk_status(number: u32) -> GithubPrStatus {
+        GithubPrStatus {
+            pr_number: number,
+            url: format!("https://github.com/rynobax/tethys/pull/{number}"),
+            state: PrState::Open,
+            is_draft: false,
+            checks: ChecksRollup::Success,
+            bugbot: ChecksRollup::None,
+            has_merge_conflicts: false,
+            review_decision: ReviewDecision::None,
+            unresolved_threads: 0,
+            head_branch: None,
+            head_sha: "sha".into(),
+            fetched_at: Utc::now(),
+            last_error: None,
+        }
+    }
+
+    fn mk_state_with_attached(number: u32) -> AppState {
+        AppState {
+            workspaces: vec![crate::state::Workspace {
+                id: "ws-0".into(),
+                branch: "feat/foo-0".into(),
+                created_at: Utc::now(),
+                repo_links: vec![crate::state::RepoLink {
+                    repo_key: "frontend".into(),
+                    worktree_path: "/tmp/wt/frontend".into(),
+                    setup_script_ran_at: None,
+                    github: None,
+                    attached_prs: vec![crate::state::AttachedPr {
+                        number,
+                        attached_at: Utc::now(),
+                        status: None,
+                    }],
+                    created_branch: true,
+                }],
+                sessions: Vec::new(),
+                claude_binary: None,
+                deleted_at: None,
+                archived_at: None,
+                status: Default::default(),
+                script_runs: Vec::new(),
+                notes: String::new(),
+            }],
+            system_errors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn apply_writes_pr_result_to_the_attached_slot() {
+        let mut state = mk_state_with_attached(512);
+        let results = vec![
+            PollResult {
+                workspace_id: "ws-0".into(),
+                repo_key: "frontend".into(),
+                kind: TargetKind::Branch("feat/foo-0".into()),
+                status: Some(mk_status(10)),
+            },
+            PollResult {
+                workspace_id: "ws-0".into(),
+                repo_key: "frontend".into(),
+                kind: TargetKind::Pr(512),
+                status: Some(mk_status(512)),
+            },
+        ];
+        let changed = apply_results(&mut state, &results);
+        assert_eq!(changed.len(), 2);
+
+        let link = &state.workspaces[0].repo_links[0];
+        // The branch PR and the attached PR land in separate slots.
+        assert_eq!(link.github.as_ref().unwrap().pr_number, 10);
+        assert_eq!(link.attached_prs[0].status.as_ref().unwrap().pr_number, 512);
+    }
+
+    #[test]
+    fn apply_ignores_pr_result_with_no_matching_attachment() {
+        // The user detached the PR between building the query and applying it.
+        let mut state = mk_state_with_attached(512);
+        let results = vec![PollResult {
+            workspace_id: "ws-0".into(),
+            repo_key: "frontend".into(),
+            kind: TargetKind::Pr(777),
+            status: Some(mk_status(777)),
+        }];
+        let changed = apply_results(&mut state, &results);
+        assert!(changed.is_empty());
+        assert!(state.workspaces[0].repo_links[0].attached_prs[0]
+            .status
+            .is_none());
+    }
+
+    #[test]
+    fn pr_result_event_carries_the_number() {
+        let result = PollResult {
+            workspace_id: "ws-0".into(),
+            repo_key: "frontend".into(),
+            kind: TargetKind::Pr(512),
+            status: None,
+        };
+        assert_eq!(result.event()["pr_number"], json!(512));
+
+        let branch = PollResult {
+            kind: TargetKind::Branch("feat/foo-0".into()),
+            ..result
+        };
+        assert_eq!(branch.event()["pr_number"], Value::Null);
     }
 
     #[test]

@@ -185,6 +185,15 @@ html,
   align-items: center;
   gap: 6px;
   padding-left: 0;
+  /* A repo can carry several PRs (branch PR + manually attached ones) — they
+     wrap onto extra rows rather than overflowing the sidebar. */
+  flex-wrap: wrap;
+  row-gap: 3px;
+  min-width: 0;
+}
+
+.repo-gh-footer .gh-chip {
+  min-width: 0;
 }
 
 .gh-chip {
@@ -297,6 +306,54 @@ html,
   font-weight: 600;
 }
 
+/* Branch label on manually-attached PR chips — the number alone doesn't say
+   which of the workspace's branches the PR belongs to. */
+.gh-branch {
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-size: 9px;
+  color: var(--muted);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Keeps a repo's branch PR and its attached PRs together when the header wraps —
+   and lets the group itself wrap once it has more chips than fit on one row. */
+.gh-chip-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.gh-chip-missing {
+  opacity: 0.7;
+}
+
+.gh-detach {
+  background: none;
+  border: none;
+  padding: 0 0 0 2px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.gh-detach:hover {
+  color: #e5534b;
+}
+
+.gh-attach {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 12px;
+  color: var(--muted);
+}
+
 .detail {
   overflow-y: auto;
   padding: 24px 2px;
@@ -327,7 +384,7 @@ html,
    header, so it never shrinks the terminal area. */
 .notes-panel {
   position: absolute;
-  top: 52px;
+  top: 42px;
   right: 16px;
   z-index: 50;
   width: 320px;
@@ -384,8 +441,7 @@ html,
   justify-content: space-between;
   align-items: baseline;
   border-bottom: 1px solid var(--border);
-  padding: 0 16px 12px;
-  margin-bottom: 8px;
+  padding: 0 16px 10px;
 }
 
 .workspace-detail h2 {
@@ -992,9 +1048,8 @@ button.danger.primary:hover:not(:disabled) {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 4px 16px 8px;
+  padding: 6px 16px;
   border-bottom: 1px solid var(--border);
-  margin-bottom: 8px;
 }
 
 .session-chip {
@@ -1771,63 +1826,6 @@ li.is-dragging {
 }
 
 .permission-actions {
-  display: flex;
-  gap: 6px;
-}
-
-.docs-merges-list .docs-merge-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.docs-repo-key {
-  font-family: "SF Mono", ui-monospace, monospace;
-  font-size: 11px;
-  background: rgba(125, 125, 125, 0.18);
-  padding: 1px 6px;
-  border-radius: 8px;
-}
-
-.docs-conflicted {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  padding: 1px 6px;
-  border-radius: 8px;
-  background: rgba(214, 82, 82, 0.22);
-  color: var(--fg);
-}
-
-.docs-merge-meta {
-  font-size: 11px;
-}
-
-.docs-conflict-files {
-  font-size: 11px;
-  word-break: break-word;
-}
-
-.docs-diff > summary {
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.docs-diff-body {
-  margin: 6px 0 0;
-  font-size: 11px;
-  font-family: "SF Mono", ui-monospace, monospace;
-  white-space: pre;
-  color: var(--fg);
-  background: rgba(0, 0, 0, 0.2);
-  padding: 6px 8px;
-  border-radius: 3px;
-  max-height: 240px;
-  overflow: auto;
-}
-
-.docs-merge-actions {
   display: flex;
   gap: 6px;
 }

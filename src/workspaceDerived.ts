@@ -1,4 +1,4 @@
-import type { ChecksRollup, RepoLink, Workspace } from "./types";
+import type { ChecksRollup, GithubPrStatus, RepoLink, Workspace } from "./types";
 
 /** Five minutes — matches the poller's stale threshold. */
 const STALE_MS = 5 * 60 * 1000;
@@ -10,15 +10,33 @@ export function isStale(fetchedAt: string, nowMs: number = Date.now()): boolean 
 }
 
 /**
- * True when every GitHub-linked repo in the workspace has a merged PR.
- * Non-GitHub repos (no `github` field) are ignored — they don't block
- * deletion. A workspace with no GitHub-linked repos at all returns false
+ * Every PR tracked on a repo link: the branch-derived one plus any the user
+ * attached by hand. Attached PRs with no status yet (first fetch failed) are
+ * skipped — there's nothing to roll up.
+ */
+export function linkPrs(link: RepoLink): GithubPrStatus[] {
+  const out: GithubPrStatus[] = [];
+  if (link.github) out.push(link.github);
+  for (const attached of link.attached_prs) {
+    if (attached.status) out.push(attached.status);
+  }
+  return out;
+}
+
+/** Every PR tracked anywhere in the workspace. */
+export function workspacePrs(ws: Workspace): GithubPrStatus[] {
+  return ws.repo_links.flatMap(linkPrs);
+}
+
+/**
+ * True when every PR tracked by the workspace — branch-derived and manually
+ * attached — is merged. A workspace with no tracked PRs at all returns false
  * so we don't suggest deleting an unsynced workspace.
  */
 export function isReadyToDelete(ws: Workspace): boolean {
-  const linked = ws.repo_links.filter((r) => r.github !== null);
-  if (linked.length === 0) return false;
-  return linked.every((r) => r.github!.state === "merged");
+  const prs = workspacePrs(ws);
+  if (prs.length === 0) return false;
+  return prs.every((pr) => pr.state === "merged");
 }
 
 /**
@@ -27,10 +45,10 @@ export function isReadyToDelete(ws: Workspace): boolean {
  */
 export function checksSummary(ws: Workspace): ChecksRollup | null {
   let worst: ChecksRollup | null = null;
-  for (const r of ws.repo_links) {
-    if (!r.github || r.github.state !== "open") continue;
-    if (r.github.has_merge_conflicts) return "failure";
-    const c = r.github.checks;
+  for (const pr of workspacePrs(ws)) {
+    if (pr.state !== "open") continue;
+    if (pr.has_merge_conflicts) return "failure";
+    const c = pr.checks;
     if (c === "failure") return "failure";
     if (c === "pending") worst = "pending";
     else if (c === "success" && worst === null) worst = "success";
@@ -41,8 +59,8 @@ export function checksSummary(ws: Workspace): ChecksRollup | null {
 /** Sum of unresolved review threads across all open PRs. */
 export function unresolvedTotal(ws: Workspace): number {
   let sum = 0;
-  for (const r of ws.repo_links) {
-    if (r.github && r.github.state === "open") sum += r.github.unresolved_threads;
+  for (const pr of workspacePrs(ws)) {
+    if (pr.state === "open") sum += pr.unresolved_threads;
   }
   return sum;
 }

@@ -34,16 +34,30 @@ export interface GithubPrStatus {
   has_merge_conflicts: boolean;
   review_decision: ReviewDecision;
   unresolved_threads: number;
+  /** The PR's head branch. Tells manually-attached PRs on the same repo apart.
+   *  `null` for statuses persisted before this field existed. */
+  head_branch: string | null;
   head_sha: string;
   fetched_at: string;
   last_error: string | null;
+}
+
+/** A PR the user attached by hand, for a branch other than the workspace's own. */
+export interface AttachedPr {
+  number: number;
+  attached_at: string;
+  /** `null` until the first successful fetch, or if the PR became unreachable. */
+  status: GithubPrStatus | null;
 }
 
 export interface RepoLink {
   repo_key: string;
   worktree_path: string;
   setup_script_ran_at: string | null;
+  /** PR for the workspace's own branch, discovered by the poller. */
   github: GithubPrStatus | null;
+  /** Extra PRs the user attached manually (see `attach_pr`). */
+  attached_prs: AttachedPr[];
   docs?: { branch: string; checkout_path: string; linked_paths: string[] } | null;
 }
 
@@ -112,19 +126,6 @@ export interface PendingPermission {
   raw_entry: string;
   suggested_repo_key: string | null;
   stripped_entry: string | null;
-}
-
-export interface PendingDocsMerge {
-  id: string;
-  repo_key: string;
-  workspace_id: string;
-  workspace_branch: string;
-  docs_branch: string;
-  captured_at: string;
-  /** Unified diff captured at purge (merge-base → branch). */
-  diff: string;
-  conflicted: boolean;
-  conflict_files: string[];
 }
 
 export interface CreateWorkspaceArgs {
@@ -210,6 +211,9 @@ export interface TurnChangedEvent {
 export interface GithubStatusChangedEvent {
   workspace_id: string;
   repo_key: string;
+  /** Set when the update is for a manually-attached PR; null for the
+   *  branch-derived one. */
+  pr_number: number | null;
   /** null when the PR no longer exists (branch unpushed or deleted). */
   status: GithubPrStatus | null;
 }

@@ -3,9 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   CreateWorkspaceArgs,
   Discrepancies,
+  GithubPrStatus,
   GithubStatusChangedEvent,
   RegistryStatus,
   Repo,
+  RepoLink,
   ScriptInfo,
   SessionInfo,
   SessionRuntimeState,
@@ -15,7 +17,7 @@ import type {
   WorkspaceId,
 } from "./types";
 import { GithubAuthFooter } from "./GithubAuthFooter";
-import { GithubChip } from "./GithubChip";
+import { GithubChip, PrDetachButton } from "./GithubChip";
 import { JobLogPane } from "./JobLogPane";
 import { ScriptTerminal } from "./ScriptTerminal";
 import { SessionTerminal } from "./SessionTerminal";
@@ -104,6 +106,18 @@ function App() {
     new Map(),
   );
   /**
+   * Live notes text per workspace, keyed by workspace_id. The notes editor
+   * remounts on every workspace switch, and `workspaces[].notes` can't seed it
+   * on the way back in: `set_workspace_notes` deliberately doesn't emit
+   * `workspace:changed` (that would churn the pane on every keystroke), so the
+   * copy in `workspaces` stays at whatever the last `refresh()` read — stale
+   * the moment the user types. This map is the authoritative text while the app
+   * is running; the backend still gets debounced writes for restarts.
+   */
+  const [noteDrafts, setNoteDrafts] = useState<Map<WorkspaceId, string>>(
+    new Map(),
+  );
+  /**
    * Workspaces whose draft prompt has already been pasted (or is mid-paste),
    * so the flush effect doesn't double-send on repeated `workspace:changed`.
    */
@@ -170,15 +184,24 @@ function App() {
   });
 
   useTauriEvent<GithubStatusChangedEvent>("github:status_changed", (event) => {
-    const { workspace_id, repo_key, status } = event.payload;
+    const { workspace_id, repo_key, pr_number, status } = event.payload;
     setWorkspaces((prev) =>
       prev.map((w) => {
         if (w.id !== workspace_id) return w;
         return {
           ...w,
-          repo_links: w.repo_links.map((r) =>
-            r.repo_key === repo_key ? { ...r, github: status } : r,
-          ),
+          repo_links: w.repo_links.map((r) => {
+            if (r.repo_key !== repo_key) return r;
+            // A pr_number means the update is for a manually-attached PR,
+            // which lives in its own slot alongside the branch PR.
+            if (pr_number === null) return { ...r, github: status };
+            return {
+              ...r,
+              attached_prs: r.attached_prs.map((a) =>
+                a.number === pr_number ? { ...a, status } : a,
+              ),
+            };
+          }),
         };
       }),
     );
@@ -679,6 +702,14 @@ function App() {
                   )
                 : []
             }
+            notes={noteDrafts.get(selected.id) ?? selected.notes}
+            onNotesChange={(value) =>
+              setNoteDrafts((prev) => {
+                const next = new Map(prev);
+                next.set(selected.id, value);
+                return next;
+              })
+            }
             onRequestDelete={() => handleDelete(selected)}
             onRequestArchive={() => handleArchiveToggle(selected)}
             onRepoAdded={refresh}
@@ -841,16 +872,24 @@ function scriptTabKey(repoKey: string, scriptName: string): string {
  *  workspace's detail pane. Edits are debounced to `set_workspace_notes` and
  *  flushed on collapse/unmount so nothing is lost when switching workspaces.
  *  Keyed by workspace id at the call site so each workspace gets a fresh
- *  editor seeded from its persisted notes. */
+ *  editor; the text itself lives in App's `noteDrafts` so it survives that
+ *  remount (see the state's doc comment). */
 function WorkspaceNotes({
   workspaceId,
-  initialNotes,
+  notes,
+  onNotesChange,
 }: {
   workspaceId: string;
-  initialNotes: string;
+  notes: string;
+  onNotesChange: (notes: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [text, setText] = useState(initialNotes);
+  // Auto-open for any workspace that already has notes, so switching in
+  // surfaces them without a click. Collapsing sticks until the next switch
+  // (the remount re-evaluates this seed).
+  const [open, setOpen] = useState(() => notes.trim().length > 0);
+  // Only steal focus when the user opened the panel themselves — an auto-open
+  // on workspace switch must leave the keyboard with the terminal.
+  const openedByUser = useRef(false);
   const saveTimer = useRef<number | null>(null);
   // Latest unsaved value, or null once it's been persisted. Lets the flush on
   // unmount/collapse write the final keystrokes the debounce hasn't sent yet.
@@ -880,7 +919,7 @@ function WorkspaceNotes({
   useEffect(() => flush, [flush]);
 
   const onChange = (value: string) => {
-    setText(value);
+    onNotesChange(value);
     pending.current = value;
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
@@ -894,10 +933,13 @@ function WorkspaceNotes({
       <button
         type="button"
         className="notes-toggle"
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          openedByUser.current = true;
+          setOpen(true);
+        }}
         title="Workspace notes"
       >
-        {text.trim() ? "Notes •" : "Notes"}
+        {notes.trim() ? "Notes •" : "Notes"}
       </button>
     );
   }
@@ -920,10 +962,10 @@ function WorkspaceNotes({
       </div>
       <textarea
         className="notes-textarea"
-        value={text}
+        value={notes}
         placeholder="Jot down anything about this workspace…"
         onChange={(e) => onChange(e.target.value)}
-        autoFocus
+        autoFocus={openedByUser.current}
       />
     </div>
   );
@@ -935,6 +977,8 @@ function WorkspaceDetail({
   scripts,
   registryRepos,
   availableRepos,
+  notes,
+  onNotesChange,
   onRequestDelete,
   onRequestArchive,
   onRepoAdded,
@@ -946,6 +990,10 @@ function WorkspaceDetail({
    *  workspace's linked repos. */
   registryRepos: Repo[];
   availableRepos: Repo[];
+  /** Live notes text for this workspace — the App-level draft when there is
+   *  one, else the persisted `workspace.notes`. */
+  notes: string;
+  onNotesChange: (notes: string) => void;
   onRequestDelete: () => void;
   onRequestArchive: () => void;
   onRepoAdded: () => void;
@@ -953,6 +1001,7 @@ function WorkspaceDetail({
   const [busy, setBusy] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
   const [addingRepo, setAddingRepo] = useState(false);
+  const [attachingPr, setAttachingPr] = useState(false);
   // Per-workspace selection. Derived on render (no effect), so switching
   // back to a workspace paints the remembered pick immediately.
   const [selectedByWorkspace, setSelectedByWorkspace] = useState<
@@ -1160,6 +1209,22 @@ function WorkspaceDetail({
     }
   };
 
+  // The backend emits `workspace:changed`, which refreshes the chip row.
+  const detachPr = async (repoKey: string, prNumber: number) => {
+    setError(null);
+    try {
+      await invoke("detach_pr", {
+        args: {
+          workspace_id: workspace.id,
+          repo_key: repoKey,
+          pr_number: prNumber,
+        },
+      });
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const handleScriptChipClick = (chip: ScriptChipData) => {
     if (!chip.run) {
       void startScript(chip.repoKey, chip.scriptName);
@@ -1173,9 +1238,25 @@ function WorkspaceDetail({
       <header>
         <h2>
           <code>{workspace.branch}</code>
-          {workspace.repo_links.map(
-            (r) => r.github && <GithubChip key={r.repo_key} status={r.github} />,
+          {workspace.repo_links.map((r) =>
+            // Skipped entirely for repos with no PRs, so the header's gap
+            // doesn't double up around an empty group.
+            r.github || r.attached_prs.length > 0 ? (
+              <span className="gh-chip-group" key={r.repo_key}>
+                {r.github && <GithubChip status={r.github} />}
+                <AttachedPrChips link={r} onDetach={detachPr} />
+              </span>
+            ) : null,
           )}
+          <button
+            type="button"
+            className="gh-attach"
+            onClick={() => setAttachingPr(true)}
+            disabled={workspace.repo_links.length === 0}
+            title="Track another PR in this workspace (for a second branch you opened here)"
+          >
+            + PR
+          </button>
         </h2>
         <div className="actions">
           <button type="button" onClick={() => setShowInfo(true)}>
@@ -1223,7 +1304,8 @@ function WorkspaceDetail({
           <WorkspaceNotes
             key={workspace.id}
             workspaceId={workspace.id}
-            initialNotes={workspace.notes}
+            notes={notes}
+            onNotesChange={onNotesChange}
           />
         </div>
       </header>
@@ -1256,6 +1338,12 @@ function WorkspaceDetail({
           availableRepos={availableRepos}
           onClose={() => setAddingRepo(false)}
           onSuccess={onRepoAdded}
+        />
+      )}
+      {attachingPr && (
+        <AttachPrDialog
+          workspace={workspace}
+          onClose={() => setAttachingPr(false)}
         />
       )}
 
@@ -1900,6 +1988,154 @@ function WorkspaceInfoDialog({
             Close
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** Chips for the PRs manually attached to one repo link. */
+function AttachedPrChips({
+  link,
+  onDetach,
+}: {
+  link: RepoLink;
+  onDetach: (repoKey: string, prNumber: number) => void;
+}) {
+  return (
+    <>
+      {link.attached_prs.map((attached) =>
+        attached.status ? (
+          <GithubChip
+            key={attached.number}
+            status={attached.status}
+            showBranch
+            onDetach={() => onDetach(link.repo_key, attached.number)}
+          />
+        ) : (
+          // Attaching fetches the PR up front, so this only shows up if the PR
+          // later became unreachable (deleted, or GitHub is down).
+          <span
+            key={attached.number}
+            className="gh-chip gh-chip-missing"
+            title={`PR #${attached.number} in ${link.repo_key} couldn't be fetched`}
+          >
+            <span className="gh-pr">#{attached.number}</span>
+            <span className="gh-draft-badge">no data</span>
+            <PrDetachButton
+              prNumber={attached.number}
+              onDetach={() => onDetach(link.repo_key, attached.number)}
+            />
+          </span>
+        ),
+      )}
+    </>
+  );
+}
+
+/**
+ * Attach a PR that the poller can't find on its own — anything on a branch
+ * other than the workspace's. Accepts a PR URL or a bare number.
+ */
+function AttachPrDialog({
+  workspace,
+  onClose,
+}: {
+  workspace: Workspace;
+  onClose: () => void;
+}) {
+  const [reference, setReference] = useState("");
+  // `null` = let the backend infer the repo (from the URL, or because there's
+  // only one candidate).
+  const [repoKey, setRepoKey] = useState<string | null>(
+    workspace.repo_links.length === 1 ? workspace.repo_links[0].repo_key : null,
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!reference.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      // Backend fetches the PR before persisting, so a bad number errors here.
+      // Its `workspace:changed` event repaints the chip row.
+      await invoke<GithubPrStatus>("attach_pr", {
+        args: {
+          workspace_id: workspace.id,
+          repo_key: repoKey,
+          reference: reference.trim(),
+        },
+      });
+      onClose();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
+      <div
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+      >
+        <form onSubmit={submit}>
+          <h3>
+            Attach a PR to <code>{workspace.branch}</code>
+          </h3>
+          <p className="muted">
+            Tethys tracks the PR for this workspace's own branch automatically.
+            Attach anything you opened from a second branch here.
+          </p>
+          <label>
+            PR
+            <input
+              value={reference}
+              onChange={(e) => setReference(e.target.value)}
+              placeholder="https://github.com/owner/repo/pull/123 or 123"
+              autoFocus
+            />
+          </label>
+          {workspace.repo_links.length > 1 && (
+            <label>
+              Repo
+              <select
+                value={repoKey ?? ""}
+                onChange={(e) => setRepoKey(e.target.value || null)}
+              >
+                <option value="">Infer from PR URL</option>
+                {workspace.repo_links.map((r) => (
+                  <option key={r.repo_key} value={r.repo_key}>
+                    {r.repo_key}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {error && <div className="error-banner">{error}</div>}
+          <div className="modal-actions">
+            <button type="button" onClick={onClose} disabled={busy}>
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="primary"
+              disabled={busy || !reference.trim()}
+            >
+              {busy ? (
+                <>
+                  <Spinner /> Attaching…
+                </>
+              ) : (
+                "Attach"
+              )}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );

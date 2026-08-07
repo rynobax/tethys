@@ -45,7 +45,7 @@ export function ScriptTerminal({ scriptId }: Props) {
       : DEFAULT_XTERM_THEME;
     const term = new Terminal({
       fontFamily: '"SF Mono", ui-monospace, Menlo, monospace',
-      fontSize: 13,
+      fontSize: 16,
       theme: initialTheme,
       cursorBlink: true,
       scrollback: 50000,

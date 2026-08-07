@@ -110,6 +110,12 @@ pub struct RepoLink {
     pub setup_script_ran_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub github: Option<GithubPrStatus>,
+    /// PRs the user manually attached to this repo link. The `github` field
+    /// above only ever tracks the PR for the workspace's own branch; anything
+    /// else opened from this worktree (a second branch, a stacked PR) has to
+    /// be attached by hand. Polled alongside the branch PR.
+    #[serde(default)]
+    pub attached_prs: Vec<AttachedPr>,
     /// Whether Tethys created this branch (branched off HEAD or off a remote
     /// tracking ref) versus checked out a branch that already existed locally.
     /// Teardown only deletes branches Tethys created, so checking out a
@@ -118,27 +124,21 @@ pub struct RepoLink {
     /// by Tethys under the old branch pre-check.
     #[serde(default = "default_created_branch")]
     pub created_branch: bool,
-    /// Managed Docs provisioning state for this repo link. `None` means docs
-    /// were skipped (opt-out, Team-Adopted, or pre-feature state).
-    #[serde(default)]
-    pub docs: Option<DocsLink>,
 }
 
 fn default_created_branch() -> bool {
     true
 }
 
-/// Managed Docs provisioning state for one repo link. `None` on the link
-/// means docs were skipped (opt-out, Team-Adopted, or pre-feature state).
+/// A manually-attached pull request on a repo link. The number is the user's
+/// intent and persists even when a poll fails; `status` is the last successful
+/// fetch (`None` until the first one lands, or if the PR became unreachable).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DocsLink {
-    /// Branch in the Docs Repo, e.g. `ws/feat-foo-1a2b3c4d`.
-    pub branch: String,
-    pub checkout_path: PathBuf,
-    /// Repo-relative paths symlinked into the user worktree at provision
-    /// ("CONTEXT.md", "docs/adr"). Paths absent here either didn't exist in
-    /// the Docs Repo yet (lazy) or were Team-Adopted.
-    pub linked_paths: Vec<String>,
+pub struct AttachedPr {
+    pub number: u32,
+    pub attached_at: DateTime<Utc>,
+    #[serde(default)]
+    pub status: Option<GithubPrStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,8 +238,8 @@ mod tests {
         assert_eq!(ws.branch, "feat/foo");
         assert_eq!(ws.repo_links.len(), 1);
         assert!(ws.repo_links[0].github.is_none());
-        // Old RepoLink JSON without `docs` deserializes to None.
-        assert!(ws.repo_links[0].docs.is_none());
+        // Old RepoLink JSON without `attached_prs` deserializes to an empty list.
+        assert!(ws.repo_links[0].attached_prs.is_empty());
         assert!(ws.claude_binary.is_none());
         assert!(ws.deleted_at.is_none());
         assert!(ws.archived_at.is_none());
@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn repo_link_docs_round_trips() {
+    fn attached_prs_round_trip() {
         let raw = r#"{
             "workspaces": [
                 {
@@ -371,23 +371,23 @@ mod tests {
                             "repo_key": "frontend",
                             "worktree_path": "/tmp/wt/abc-123/frontend",
                             "setup_script_ran_at": null,
-                            "docs": {
-                                "branch": "ws/feat-foo-abc12345",
-                                "checkout_path": "/tmp/docs-wt/feat-foo/frontend",
-                                "linked_paths": ["CONTEXT.md"]
-                            }
+                            "attached_prs": [
+                                {
+                                    "number": 512,
+                                    "attached_at": "2026-04-02T09:00:00Z",
+                                    "status": null
+                                }
+                            ]
                         }
                     ]
                 }
             ]
         }"#;
         let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
-        let docs = parsed.workspaces[0].repo_links[0]
-            .docs
-            .as_ref()
-            .expect("docs present");
-        assert_eq!(docs.branch, "ws/feat-foo-abc12345");
-        assert_eq!(docs.linked_paths, vec!["CONTEXT.md".to_string()]);
+        let attached = &parsed.workspaces[0].repo_links[0].attached_prs;
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].number, 512);
+        assert!(attached[0].status.is_none());
     }
 
     #[test]

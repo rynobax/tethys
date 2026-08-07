@@ -185,10 +185,17 @@ function bugbotTitle(bugbot: ChecksRollup): string {
 export function GithubChip({
   status,
   linkable = true,
+  showBranch = false,
+  onDetach,
 }: {
   status: GithubPrStatus;
   /** When false, the chip is informational only — no click-to-open, no hover. */
   linkable?: boolean;
+  /** Show the PR's head branch. Worth it for manually-attached PRs, where the
+   *  number alone doesn't say which branch it belongs to. */
+  showBranch?: boolean;
+  /** When set, renders a detach button. Only for manually-attached PRs. */
+  onDetach?: () => void;
 }) {
   const stale = isStale(status.fetched_at);
   const isOpen = status.state === "open";
@@ -214,6 +221,7 @@ export function GithubChip({
 
   const baseTitle = [
     `PR #${status.pr_number}`,
+    status.head_branch,
     `state: ${status.state}${status.is_draft ? " (draft)" : ""}`,
     status.last_error ? `error: ${status.last_error}` : null,
     stale ? `stale since ${new Date(status.fetched_at).toLocaleTimeString()}` : null,
@@ -224,6 +232,9 @@ export function GithubChip({
   return (
     <span className={classes} title={baseTitle} onClick={onClick}>
       <span className="gh-pr">#{status.pr_number}</span>
+      {showBranch && status.head_branch && (
+        <span className="gh-branch">{status.head_branch}</span>
+      )}
       {isOpen && (
         <span className="gh-squares">
           <Square
@@ -252,6 +263,34 @@ export function GithubChip({
         <span className="gh-merged-badge gh-closed-badge">closed</span>
       )}
       {status.is_draft && <span className="gh-draft-badge">draft</span>}
+      {onDetach && (
+        <PrDetachButton prNumber={status.pr_number} onDetach={onDetach} />
+      )}
     </span>
+  );
+}
+
+/** Removes a manually-attached PR from the workspace. Nothing on GitHub changes. */
+export function PrDetachButton({
+  prNumber,
+  onDetach,
+}: {
+  prNumber: number;
+  onDetach: () => void;
+}) {
+  const label = `Stop tracking PR #${prNumber}`;
+  return (
+    <button
+      type="button"
+      className="gh-detach"
+      title={label}
+      aria-label={label}
+      onClick={(e) => {
+        e.stopPropagation();
+        onDetach();
+      }}
+    >
+      ×
+    </button>
   );
 }

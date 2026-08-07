@@ -61,14 +61,20 @@ export function SessionTerminal({ sessionId }: Props) {
       : DEFAULT_XTERM_THEME;
     const term = new Terminal({
       fontFamily: '"SF Mono", ui-monospace, Menlo, monospace',
-      fontSize: 13,
+      fontSize: 16,
       theme: initialTheme,
       cursorBlink: true,
-      // xterm.js owns scrollback end-to-end. Tmux is only a process
-      // keeper (mouse off, no copy-mode) — wheel events fall through to
-      // xterm.js and scroll its buffer natively. Claude writes to the
-      // main buffer, so the stream naturally populates this scrollback.
+      // Fallback scrollback for panes that don't capture the mouse (plain
+      // shell, Claude's classic renderer). Claude's fullscreen renderer
+      // requests SGR mouse tracking, so there the wheel is forwarded to
+      // the app and Claude scrolls its own transcript instead.
       scrollback: 50000,
+      // With mouse tracking active, xterm.js hands drags to the app rather
+      // than selecting. Option+drag forces a native xterm selection —
+      // matches iTerm2, and gives an escape hatch when Claude owns the
+      // mouse (it does its own selection + pbcopy, but this covers the
+      // cases its selection can't reach).
+      macOptionClickForcesSelection: true,
       allowProposedApi: true,
       // OSC 8 escape-sequence hyperlinks (Claude Code emits these for PR
       // URLs etc.) default to `window.open` which Tauri's WKWebView blocks

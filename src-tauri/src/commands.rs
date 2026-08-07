@@ -13,10 +13,10 @@ use crate::claude;
 use crate::claude_local;
 use crate::error::{AppError, AppResult};
 use crate::git;
-use crate::github::poller::{AuthSnapshot, GithubPoller};
+use crate::github::poller::{fetch_pr_status, AuthSnapshot, GithubPoller};
+use crate::github::{parse_pr_reference, GithubPrStatus, GithubSlug};
 use crate::inprogress::InProgressWorkspaces;
 use crate::job::{JobEvent, JobTx};
-use crate::managed_docs;
 use crate::paths::Paths;
 use crate::purge::Purger;
 use crate::reconcile::{self, Discrepancies};
@@ -25,8 +25,8 @@ use crate::scripts::{ScriptInfo, ScriptSupervisor};
 use crate::sessions::{SessionInfo, SessionSupervisor};
 use crate::setup;
 use crate::state::{
-    ClaudeSessionMeta, RepoLink, ScriptRunMeta, SystemErrorEntry, Workspace, WorkspaceId,
-    WorkspaceStatus,
+    AttachedPr, ClaudeSessionMeta, RepoLink, ScriptRunMeta, SystemErrorEntry, Workspace,
+    WorkspaceId, WorkspaceStatus,
 };
 use crate::store::Store;
 use crate::theme::Theme;
@@ -72,6 +72,177 @@ pub async fn github_reprobe_auth(
 ) -> AppResult<AuthSnapshot> {
     poller.probe_login().await;
     Ok(poller.auth_snapshot().await)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AttachPrArgs {
+    pub workspace_id: WorkspaceId,
+    /// `null` => infer the repo from the reference's `owner/repo`, or from the
+    /// workspace's only GitHub-linked repo.
+    #[serde(default)]
+    pub repo_key: Option<String>,
+    /// `123`, `#123`, `owner/repo#123`, or a full GitHub PR URL.
+    pub reference: String,
+}
+
+/// Manually track an extra PR on a workspace's repo link.
+///
+/// The poller only ever discovers the PR for the workspace's own branch, so a
+/// second branch cut inside the same worktree needs its PR attached by hand.
+/// The status is fetched here rather than left to the next tick, so a typo'd
+/// number fails loudly instead of parking an empty chip in the UI.
+#[tauri::command]
+pub async fn attach_pr(
+    app: AppHandle,
+    store: State<'_, Arc<Store>>,
+    registry: State<'_, Arc<RegistryLoad>>,
+    args: AttachPrArgs,
+) -> AppResult<GithubPrStatus> {
+    let pr = parse_pr_reference(&args.reference).ok_or_else(|| {
+        AppError::Other(format!(
+            "couldn't read a PR number from \"{}\" — paste a PR URL or a number",
+            args.reference.trim()
+        ))
+    })?;
+    let reg = registry.require()?;
+
+    let repo_keys: Vec<String> = store
+        .read(|s| {
+            s.find_workspace(&args.workspace_id)
+                .map(|w| w.repo_links.iter().map(|r| r.repo_key.clone()).collect())
+        })
+        .await
+        .ok_or_else(|| AppError::WorkspaceNotFound(args.workspace_id.clone()))?;
+    // Only GitHub-backed repos are attachable — the rest have no slug to query.
+    let mut candidates: Vec<(String, GithubSlug)> = Vec::new();
+    for key in repo_keys {
+        if let Some(slug) = reg.find_repo(&key).and_then(|r| r.github_slug.clone()) {
+            candidates.push((key, slug));
+        }
+    }
+
+    let (repo_key, slug) = match (&args.repo_key, &pr.slug) {
+        (Some(key), _) => candidates
+            .into_iter()
+            .find(|(k, _)| k == key)
+            .ok_or_else(|| {
+                AppError::Other(format!("{key} isn't a GitHub-linked repo in this workspace"))
+            })?,
+        (None, Some(want)) => candidates
+            .into_iter()
+            .find(|(_, slug)| slug == want)
+            .ok_or_else(|| {
+                AppError::Other(format!(
+                    "no repo in this workspace points at {}/{}",
+                    want.owner, want.name
+                ))
+            })?,
+        (None, None) if candidates.len() == 1 => candidates.remove(0),
+        (None, None) => {
+            return Err(AppError::Other(
+                "this workspace has more than one GitHub repo — pick which one the PR belongs to"
+                    .to_string(),
+            ))
+        }
+    };
+    // An explicit repo_key plus a URL for a different repo is a mistake worth
+    // reporting rather than silently trusting one over the other.
+    if let Some(want) = &pr.slug {
+        if want != &slug {
+            return Err(AppError::Other(format!(
+                "PR #{} is in {}/{}, but repo {repo_key} points at {}/{}",
+                pr.number, want.owner, want.name, slug.owner, slug.name
+            )));
+        }
+    }
+
+    let status = fetch_pr_status(&slug, pr.number)
+        .await
+        .map_err(|e| {
+            AppError::Other(format!(
+                "couldn't fetch PR #{} from {}/{}: {e}",
+                pr.number, slug.owner, slug.name
+            ))
+        })?
+        .ok_or_else(|| {
+            AppError::Other(format!(
+                "{}/{} has no PR #{}",
+                slug.owner, slug.name, pr.number
+            ))
+        })?;
+
+    let stored = status.clone();
+    let workspace_id = args.workspace_id.clone();
+    store
+        .mutate(move |s| {
+            let ws = s
+                .find_workspace_mut(&workspace_id)
+                .ok_or_else(|| AppError::WorkspaceNotFound(workspace_id.clone()))?;
+            let link = ws
+                .repo_links
+                .iter_mut()
+                .find(|r| r.repo_key == repo_key)
+                .ok_or_else(|| {
+                    AppError::Other(format!("workspace has no worktree for {repo_key}"))
+                })?;
+            if link.github.as_ref().is_some_and(|g| g.pr_number == pr.number) {
+                return Err(AppError::Other(format!(
+                    "PR #{} is already tracked as this workspace's branch PR",
+                    pr.number
+                )));
+            }
+            if link.attached_prs.iter().any(|a| a.number == pr.number) {
+                return Err(AppError::Other(format!(
+                    "PR #{} is already attached to {repo_key}",
+                    pr.number
+                )));
+            }
+            link.attached_prs.push(AttachedPr {
+                number: pr.number,
+                attached_at: Utc::now(),
+                status: Some(stored),
+            });
+            Ok(())
+        })
+        .await?;
+
+    emit_workspace_changed(&app, &args.workspace_id);
+    Ok(status)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DetachPrArgs {
+    pub workspace_id: WorkspaceId,
+    pub repo_key: String,
+    pub pr_number: u32,
+}
+
+/// Stop tracking a manually-attached PR. Nothing on GitHub is touched.
+#[tauri::command]
+pub async fn detach_pr(
+    app: AppHandle,
+    store: State<'_, Arc<Store>>,
+    args: DetachPrArgs,
+) -> AppResult<()> {
+    store
+        .mutate(|s| {
+            let ws = s
+                .find_workspace_mut(&args.workspace_id)
+                .ok_or_else(|| AppError::WorkspaceNotFound(args.workspace_id.clone()))?;
+            let link = ws
+                .repo_links
+                .iter_mut()
+                .find(|r| r.repo_key == args.repo_key)
+                .ok_or_else(|| {
+                    AppError::Other(format!("workspace has no worktree for {}", args.repo_key))
+                })?;
+            link.attached_prs.retain(|a| a.number != args.pr_number);
+            Ok(())
+        })
+        .await?;
+
+    emit_workspace_changed(&app, &args.workspace_id);
+    Ok(())
 }
 
 /// The editor Tethys opens files and worktrees in. Centralized so switching
@@ -143,7 +314,6 @@ pub struct CreateWorkspaceArgs {
 
 struct RepoProvision<'a> {
     repo: &'a Repo,
-    workspace_id: &'a str,
     worktree_path: &'a Path,
     branch: &'a str,
     paths: &'a Paths,
@@ -202,10 +372,7 @@ async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLink> 
 
     // Everything past `worktree_add` leaves on-disk state behind, so on failure
     // we tear down this repo's own worktree (and its branch, only if we created
-    // it) before bubbling. Sibling repos are the caller's responsibility. The
-    // docs link is captured outside the block so a failure *after* docs were
-    // provisioned (e.g. the setup script) still tears the docs checkout down.
-    let mut docs_link: Option<crate::state::DocsLink> = None;
+    // it) before bubbling. Sibling repos are the caller's responsibility.
     let provisioned = async {
         git::worktree_add(
             &clone_path,
@@ -228,23 +395,13 @@ async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLink> 
         )
         .await?;
 
-        docs_link = managed_docs::provision(managed_docs::DocsProvision {
-            repo: ctx.repo,
-            workspace_id: ctx.workspace_id,
-            branch: ctx.branch,
-            worktree_path: ctx.worktree_path,
-            paths: ctx.paths,
-            tx: ctx.tx,
-        })
-        .await?;
-
         let mut link = RepoLink {
             repo_key: ctx.repo.key.clone(),
             worktree_path: ctx.worktree_path.to_path_buf(),
             setup_script_ran_at: None,
             github: None,
+            attached_prs: Vec::new(),
             created_branch,
-            docs: docs_link.clone(),
         };
 
         if let Some(script) = ctx
@@ -276,7 +433,6 @@ async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLink> 
                 worktree_path: ctx.worktree_path,
                 branch: ctx.branch,
                 created_branch,
-                docs: docs_link.as_ref(),
                 paths: ctx.paths,
                 tx: ctx.tx,
             })
@@ -341,18 +497,14 @@ struct RepoTeardown<'a> {
     /// branch checked out for local edits) is left intact — only the worktree
     /// is removed.
     created_branch: bool,
-    /// Managed Docs provisioned for this repo, if any. Its checkout + branch
-    /// are torn down alongside the worktree.
-    docs: Option<&'a crate::state::DocsLink>,
     paths: &'a Paths,
     tx: &'a JobTx,
 }
 
 /// Best-effort reverse of `provision_repo_worktree`: force-remove the
-/// worktree, prune stale registrations, delete the branch when Tethys
-/// created it, and tear down any Managed Docs checkout + branch. Errors are
-/// streamed as status events but never bubbled — teardown is always
-/// best-effort.
+/// worktree, prune stale registrations, and delete the branch when Tethys
+/// created it. Errors are streamed as status events but never bubbled —
+/// teardown is always best-effort.
 async fn teardown_repo_worktree(ctx: RepoTeardown<'_>) {
     if ctx.worktree_path.exists() {
         let clone_path = ctx.paths.repo_clone_path(ctx.repo_key);
@@ -368,9 +520,6 @@ async fn teardown_repo_worktree(ctx: RepoTeardown<'_>) {
         if ctx.created_branch {
             git::branch_delete_best_effort(&clone_path, ctx.branch, ctx.tx, ctx.repo_key).await;
         }
-    }
-    if let Some(docs) = ctx.docs {
-        managed_docs::remove_checkout_and_branch(ctx.paths, ctx.repo_key, docs).await;
     }
 }
 
@@ -486,7 +635,6 @@ pub async fn create_workspace(
             let worktree_path = reg.plan_worktree_path(&workspace_dir, &repo.key);
             let link = provision_repo_worktree(RepoProvision {
                 repo,
-                workspace_id: &id,
                 worktree_path: &worktree_path,
                 branch: &branch,
                 paths: &paths,
@@ -533,7 +681,6 @@ pub async fn create_workspace(
                     worktree_path: &link.worktree_path,
                     branch: &branch,
                     created_branch: link.created_branch,
-                    docs: link.docs.as_ref(),
                     paths: &paths,
                     tx: &tx,
                 })
@@ -640,7 +787,6 @@ pub async fn add_repo_to_workspace(
 
     let provision = provision_repo_worktree(RepoProvision {
         repo: &repo,
-        workspace_id: &args.workspace_id,
         worktree_path: &worktree_path,
         branch: &branch,
         paths: &paths,
@@ -698,7 +844,6 @@ pub async fn add_repo_to_workspace(
                 worktree_path: &worktree_path,
                 branch: &branch,
                 created_branch: false,
-                docs: None,
                 paths: &paths,
                 tx: &tx,
             })
@@ -936,47 +1081,6 @@ pub async fn dismiss_pending_permission(
     crate::pending_permissions::dismiss_pending(&paths, &id).await?;
     let _ = app.emit("pending_permissions:changed", &());
     Ok(())
-}
-
-#[tauri::command]
-pub async fn list_pending_docs_merges(
-    paths: State<'_, Paths>,
-) -> AppResult<Vec<crate::managed_docs::PendingDocsMerge>> {
-    let file = crate::managed_docs::load_file(&paths.pending_docs_merges_file()).await?;
-    Ok(file.entries)
-}
-
-/// Approve a Pending Docs Merge: merge the parked docs branch into docs `main`.
-/// Emits `pending_docs_merges:changed` on both success and the conflicted-Err
-/// path (the entry is flagged `conflicted` and retained, so the UI must
-/// refresh either way).
-#[tauri::command]
-pub async fn approve_pending_docs_merge(
-    app: AppHandle,
-    paths: State<'_, Paths>,
-    id: String,
-) -> AppResult<()> {
-    let result = crate::managed_docs::approve(&paths, &id).await;
-    let _ = app.emit("pending_docs_merges:changed", &());
-    result
-}
-
-#[tauri::command]
-pub async fn decline_pending_docs_merge(
-    app: AppHandle,
-    paths: State<'_, Paths>,
-    id: String,
-) -> AppResult<()> {
-    crate::managed_docs::decline(&paths, &id).await?;
-    let _ = app.emit("pending_docs_merges:changed", &());
-    Ok(())
-}
-
-/// Open a repo's Docs Repo in the editor — used for manual conflict
-/// resolution after a conflicted approve.
-#[tauri::command]
-pub fn open_docs_repo(paths: State<'_, Paths>, repo_key: String) -> AppResult<()> {
-    open_in_editor(&paths.docs_repo_path(&repo_key))
 }
 
 #[tauri::command]

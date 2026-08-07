@@ -69,11 +69,6 @@ pub struct Repo {
     #[serde(default)]
     pub scripts: BTreeMap<String, String>,
 
-    /// Whether Tethys maintains Managed Docs (CONTEXT.md + docs/adr) for this
-    /// repo. On by default; set false to opt out.
-    #[serde(default = "default_managed_docs")]
-    pub managed_docs: bool,
-
     /// Populated at registry load time by parsing `remote_url`. `None` means
     /// the remote isn't on github.com and GitHub sync should skip this repo.
     #[serde(skip, default)]
@@ -176,10 +171,6 @@ pub fn sanitize_branch_for_dir(branch: &str) -> String {
     branch.replace('/', "-")
 }
 
-fn default_managed_docs() -> bool {
-    true
-}
-
 /// Parse each repo's remote URL into an `owner/name` slug, logging a single
 /// info line per non-GitHub repo so the user knows why they won't see PR data.
 fn populate_github_slugs(registry: &mut RepoRegistry) {
@@ -254,7 +245,6 @@ worktree_root = "CHANGE_ME_TO_AN_ABSOLUTE_PATH"
 # default_setup_script = "pnpm install"
 # setup_timeout_secs = 600
 # copy_files = [".env", "apps/web/.env.local"]
-# managed_docs = true              # Tethys-managed CONTEXT.md + docs/adr; set false to opt out
 #
 # [repo.scripts]
 # dev = "pnpm dev"

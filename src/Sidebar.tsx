@@ -341,9 +341,19 @@ function WorkspaceRow({
           {workspace.repo_links.map((r) => (
             <li key={r.repo_key}>
               <span className="repo-key">{r.repo_key}</span>
-              {r.github && (
+              {(r.github || r.attached_prs.length > 0) && (
                 <div className="repo-gh-footer">
-                  <GithubChip status={r.github} linkable={false} />
+                  {r.github && <GithubChip status={r.github} linkable={false} />}
+                  {r.attached_prs.map(
+                    (a) =>
+                      a.status && (
+                        <GithubChip
+                          key={a.number}
+                          status={a.status}
+                          linkable={false}
+                        />
+                      ),
+                  )}
                 </div>
               )}
             </li>
