@@ -25,6 +25,7 @@ mod state;
 mod store;
 mod theme;
 mod tmux;
+mod workspace_doc;
 
 use std::sync::Arc;
 
@@ -197,6 +198,15 @@ pub fn run() {
             app.manage(purger.clone());
             tauri::async_runtime::spawn(purger.clone().run());
 
+            // --- workspace CLAUDE.md refresh -------------------------------
+            let registry_for_docs: Arc<RegistryLoad> =
+                app.state::<Arc<RegistryLoad>>().inner().clone();
+            let store_for_docs = store.clone();
+            let paths_for_docs = paths.clone();
+            tauri::async_runtime::spawn(async move {
+                refresh_workspace_docs(&store_for_docs, &registry_for_docs, &paths_for_docs).await;
+            });
+
             app.manage(paths);
             app.manage(inprogress::InProgressWorkspaces::new());
 
@@ -278,6 +288,27 @@ pub fn run() {
 }
 
 struct LoggingGuard(#[allow(dead_code)] tracing_appender::non_blocking::WorkerGuard);
+
+/// Rewrite the generated `CLAUDE.md` at every live workspace's root. Runs once
+/// per boot, which is how workspaces created before the file existed get one and
+/// how edits to `claude_notes` in `repos.toml` reach workspaces already on disk.
+async fn refresh_workspace_docs(store: &Arc<Store>, registry: &RegistryLoad, paths: &Paths) {
+    let Ok(reg) = registry.require() else { return };
+    let workspaces = store.read(|s| s.workspaces.clone()).await;
+    let mut written = 0usize;
+    for ws in workspaces.iter().filter(|w| w.deleted_at.is_none()) {
+        match workspace_doc::regenerate(ws, reg, paths).await {
+            Ok(Some(_)) => written += 1,
+            Ok(None) => {}
+            Err(e) => {
+                warn!(workspace = %ws.id, error = %e, "failed to refresh workspace CLAUDE.md")
+            }
+        }
+    }
+    if written > 0 {
+        info!(count = written, "refreshed workspace CLAUDE.md files");
+    }
+}
 
 /// For every persisted `ClaudeSessionMeta` whose tmux pane is still
 /// alive, spawn a reattach client now. This means `list_sessions` will

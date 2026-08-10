@@ -20,7 +20,7 @@ use crate::job::{JobEvent, JobTx};
 use crate::paths::Paths;
 use crate::purge::Purger;
 use crate::reconcile::{self, Discrepancies};
-use crate::registry::{self, starter_template, RegistryLoad, Repo};
+use crate::registry::{self, starter_template, RegistryLoad, Repo, RepoRegistry};
 use crate::scripts::{ScriptInfo, ScriptSupervisor};
 use crate::sessions::{SessionInfo, SessionSupervisor};
 use crate::setup;
@@ -31,6 +31,7 @@ use crate::state::{
 use crate::store::Store;
 use crate::theme::Theme;
 use crate::tmux::{self, TmuxBin};
+use crate::workspace_doc;
 
 #[tauri::command]
 pub async fn list_workspaces(store: State<'_, Arc<Store>>) -> AppResult<Vec<Workspace>> {
@@ -661,6 +662,7 @@ pub async fn create_workspace(
                 .await?;
 
             regen_workspace_root_settings(&stored, &paths, &tx).await;
+            regen_workspace_claude_md(&stored, reg, &paths, &tx).await;
 
             info!(id = %stored.id, branch = %stored.branch, repos = stored.repo_links.len(), "created workspace");
             let _ = tx.0.send(JobEvent::Success);
@@ -821,6 +823,9 @@ pub async fn add_repo_to_workspace(
                 &tx,
             )
             .await;
+            // The new repo changes both the "checked out here" list and the
+            // "available to add" list, so the whole doc is rewritten.
+            regen_workspace_claude_md(&updated, reg, &paths, &tx).await;
 
             info!(
                 id = %args.workspace_id,
@@ -1927,6 +1932,30 @@ async fn append_repo_to_workspace_root_settings(
             format!("workspace-root settings extend failed: {e}"),
             None,
         );
+    }
+}
+
+/// Rewrite `<workspace_root>/CLAUDE.md` from the workspace's repo links plus
+/// the registry, so sessions know which repos are here, which aren't, and what
+/// each one needs. Best-effort: a failure is a status event, never a failed
+/// command.
+async fn regen_workspace_claude_md(
+    workspace: &Workspace,
+    registry: &RepoRegistry,
+    paths: &Paths,
+    tx: &JobTx,
+) {
+    match workspace_doc::regenerate(workspace, registry, paths).await {
+        Ok(Some(path)) => tx.status(format!("wrote {}", path.display()), None),
+        Ok(None) => {}
+        Err(e) => {
+            warn!(
+                workspace = %workspace.id,
+                error = %e,
+                "failed to write workspace-root CLAUDE.md"
+            );
+            tx.status(format!("workspace CLAUDE.md write failed: {e}"), None);
+        }
     }
 }
 

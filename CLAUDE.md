@@ -20,6 +20,10 @@ State lives at `~/Library/Application Support/app.tethys.dev/` (`state.json`, `l
 
 Tethys writes its hook entries into `~/.claude/settings.json` on every boot (keyed by `description: "Tethys session monitor"`). They're idempotent — safe to leave across reinstalls.
 
+It also generates a `CLAUDE.md` at each workspace root (`workspace_doc.rs`) explaining the worktree layout and telling sessions to ask for a missing repo rather than reading some other checkout. Rewritten on create, on repo-add, and at every boot. Claude Code reads CLAUDE.md from every parent dir, so the root file also applies to per-repo sessions.
+
+The prose lives in `repos.toml`, not in Rust: `[workspace_doc].body` (with `{branch}` / `{repo_list}` / `{available_repos}` / `{workspace_root}` / `{clone_dir}` placeholders) falling back to `DEFAULT_BODY`, plus per-repo `claude_notes`. Rust owns only the marker line and the "Repo notes" section.
+
 ## Rust
 
 Use idiomatic rust. After a set of changes are finished, run clippy and clean up the issues it reports
