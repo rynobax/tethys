@@ -3,6 +3,8 @@ import react from "@vitejs/plugin-react";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
+// @ts-expect-error process is a nodejs global
+const noHmr = !!process.env.TETHYS_NO_HMR;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
@@ -17,15 +19,18 @@ export default defineConfig(async () => ({
     port: 1420,
     strictPort: true,
     host: host || false,
-    hmr: host
-      ? {
-          protocol: "ws",
-          host,
-          port: 1421,
-        }
-      : undefined,
+    // 3. `pnpm dev:frozen` sets TETHYS_NO_HMR so edits never reach a running window
+    hmr: noHmr
+      ? false
+      : host
+        ? {
+            protocol: "ws",
+            host,
+            port: 1421,
+          }
+        : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
+      // 4. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
   },
