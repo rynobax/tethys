@@ -1,6 +1,10 @@
 import type { ChecksRollup, GithubPrStatus, RepoLink, Workspace } from "./types";
 
-/** Five minutes — matches the poller's stale threshold. */
+/**
+ * Five minutes — several missed ticks at the poller's 45s base interval. Past
+ * this we stop trusting the numbers and fade the chip: polling is wedged, or
+ * backed off far enough that it may as well be.
+ */
 const STALE_MS = 5 * 60 * 1000;
 
 export function isStale(fetchedAt: string, nowMs: number = Date.now()): boolean {

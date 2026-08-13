@@ -374,6 +374,12 @@ fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
           mergeable
           headRefName
           reviewDecision
+          latestOpinionatedReviews(first: 20) {
+            nodes {
+              state
+              author { login }
+            }
+          }
           reviewThreads(first: 50) {
             nodes {
               isResolved
@@ -531,7 +537,11 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
             Some("APPROVED") => ReviewDecision::Approved,
             Some("CHANGES_REQUESTED") => ReviewDecision::ChangesRequested,
             Some("REVIEW_REQUIRED") => ReviewDecision::ReviewRequired,
-            _ => ReviewDecision::None,
+            // Null whenever the base branch doesn't require reviews — GitHub
+            // has no verdict to report, but approvals still exist. Without
+            // this fallback the review square stays gray forever on every PR
+            // in an unprotected repo.
+            _ => review_decision_from_reviews(pr),
         }
     } else {
         ReviewDecision::None
@@ -666,6 +676,46 @@ fn context_is_bugbot(node: &Value) -> bool {
 /// GitHub login used by Cursor Bugbot to post reviews and threads.
 const BUGBOT_LOGIN: &str = "cursor";
 
+/// Derive a verdict from the reviews themselves, for when GitHub declines to
+/// compute a `reviewDecision`. `latestOpinionatedReviews` is already one
+/// APPROVED/CHANGES_REQUESTED per reviewer, so this only has to pick a winner:
+/// a block outranks an approval. Bugbot is skipped — it drives its own square,
+/// and a bot shouldn't read as a human blocking the PR.
+fn review_decision_from_reviews(pr: &Value) -> ReviewDecision {
+    let Some(nodes) = pr
+        .get("latestOpinionatedReviews")
+        .and_then(|r| r.get("nodes"))
+        .and_then(|n| n.as_array())
+    else {
+        return ReviewDecision::None;
+    };
+
+    let mut approved = false;
+    for node in nodes {
+        if review_author(node) == Some(BUGBOT_LOGIN) {
+            continue;
+        }
+        match node.get("state").and_then(|s| s.as_str()) {
+            Some("CHANGES_REQUESTED") => return ReviewDecision::ChangesRequested,
+            Some("APPROVED") => approved = true,
+            _ => {}
+        }
+    }
+
+    if approved {
+        ReviewDecision::Approved
+    } else {
+        ReviewDecision::None
+    }
+}
+
+fn review_author(review: &Value) -> Option<&str> {
+    review
+        .get("author")
+        .and_then(|a| a.get("login"))
+        .and_then(|l| l.as_str())
+}
+
 fn thread_first_author(thread: &Value) -> Option<&str> {
     thread
         .get("comments")
@@ -757,8 +807,13 @@ fn apply_results(state: &mut AppState, results: &[PollResult]) -> Vec<PollResult
                 }
             }
         };
-        if is_meaningful_change(slot.as_ref(), result.status.as_ref()) {
-            *slot = result.status.clone();
+        let meaningful = is_meaningful_change(slot.as_ref(), result.status.as_ref());
+        // Store every poll, even a no-op one, so `fetched_at` tracks when we
+        // last heard from GitHub rather than when the PR last changed. The
+        // UI fades a status once it goes stale — that's meant to flag a
+        // wedged poller, not a PR nobody has touched in a day.
+        *slot = result.status.clone();
+        if meaningful {
             changed.push(result.clone());
         }
     }
@@ -1373,6 +1428,81 @@ mod tests {
         assert_eq!(s.review_decision, ReviewDecision::None);
     }
 
+    /// An open PR whose `reviewDecision` is `decision`, carrying `reviews` as
+    /// its latest opinionated reviews.
+    fn reviewed_pr(decision: Value, reviews: Value) -> Value {
+        json!({
+            "q0": {
+                "ref": {
+                    "associatedPullRequests": {
+                        "nodes": [{
+                            "number": 1,
+                            "url": "u",
+                            "state": "OPEN",
+                            "isDraft": false,
+                            "reviewDecision": decision,
+                            "latestOpinionatedReviews": {"nodes": reviews},
+                            "reviewThreads": {"nodes": []},
+                            "commits": {
+                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
+                            }
+                        }]
+                    }
+                }
+            }
+        })
+    }
+
+    fn review(state: &str, login: &str) -> Value {
+        json!({"state": state, "author": {"login": login}})
+    }
+
+    /// Repos without required reviews get a null `reviewDecision` from GitHub
+    /// no matter how many approvals land, so the approval has to come from the
+    /// reviews themselves.
+    #[test]
+    fn parse_review_decision_falls_back_to_approval_when_null() {
+        let data = reviewed_pr(Value::Null, json!([review("APPROVED", "christianbundy")]));
+        let s = parse_one(&data).unwrap();
+        assert_eq!(s.review_decision, ReviewDecision::Approved);
+    }
+
+    #[test]
+    fn parse_review_decision_fallback_blocks_over_approval() {
+        let data = reviewed_pr(
+            Value::Null,
+            json!([
+                review("APPROVED", "alice"),
+                review("CHANGES_REQUESTED", "bob"),
+            ]),
+        );
+        let s = parse_one(&data).unwrap();
+        assert_eq!(s.review_decision, ReviewDecision::ChangesRequested);
+    }
+
+    /// Bugbot has its own square — its verdict must not move the human one.
+    #[test]
+    fn parse_review_decision_fallback_ignores_bugbot() {
+        let data = reviewed_pr(
+            Value::Null,
+            json!([review("CHANGES_REQUESTED", BUGBOT_LOGIN)]),
+        );
+        let s = parse_one(&data).unwrap();
+        assert_eq!(s.review_decision, ReviewDecision::None);
+    }
+
+    /// When GitHub does compute a decision it accounts for CODEOWNERS and
+    /// required-approval counts, so it outranks anything we'd infer.
+    #[test]
+    fn parse_review_decision_prefers_github_verdict() {
+        let data = reviewed_pr(
+            json!("REVIEW_REQUIRED"),
+            json!([review("APPROVED", "alice")]),
+        );
+        let s = parse_one(&data).unwrap();
+        assert_eq!(s.review_decision, ReviewDecision::ReviewRequired);
+    }
+
     #[test]
     fn parse_review_decision_zero_on_merged() {
         let data = json!({
@@ -1562,6 +1692,36 @@ mod tests {
         assert!(state.workspaces[0].repo_links[0].attached_prs[0]
             .status
             .is_none());
+    }
+
+    /// A PR nobody has touched still has to look freshly polled, or the UI
+    /// fades it as stale while the poller is working perfectly.
+    #[test]
+    fn apply_advances_fetched_at_without_emitting() {
+        let mut state = mk_state_with_attached(512);
+        let mut first = mk_status(512);
+        first.fetched_at = Utc::now() - chrono::Duration::hours(6);
+        state.workspaces[0].repo_links[0].attached_prs[0].status = Some(first.clone());
+
+        let mut polled = first.clone();
+        polled.fetched_at = Utc::now();
+        let results = vec![PollResult {
+            workspace_id: "ws-0".into(),
+            repo_key: "frontend".into(),
+            kind: TargetKind::Pr(512),
+            status: Some(polled.clone()),
+        }];
+
+        // Nothing about the PR changed, so the frontend hears nothing...
+        let changed = apply_results(&mut state, &results);
+        assert!(changed.is_empty());
+        // ...but the timestamp still moves.
+        let stored = state.workspaces[0].repo_links[0].attached_prs[0]
+            .status
+            .as_ref()
+            .unwrap();
+        assert_eq!(stored.fetched_at, polled.fetched_at);
+        assert!(stored.fetched_at > first.fetched_at);
     }
 
     #[test]
