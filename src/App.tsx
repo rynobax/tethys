@@ -1282,7 +1282,7 @@ function WorkspaceDetail({
               )
             }
             disabled={workspace.repo_links.length === 0}
-            title="Open every worktree in VS Code"
+            title="Open this workspace in VS Code, reusing the existing window"
           >
             Open in VS Code
           </button>

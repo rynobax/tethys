@@ -265,6 +265,50 @@ fn open_in_editor(path: &Path) -> AppResult<()> {
     Ok(())
 }
 
+/// The VS Code CLI shipped inside the app bundle. Preferred over `code` on
+/// `PATH` because a bundled Tethys launched from Finder inherits a minimal
+/// `PATH` that won't include the `/usr/local/bin/code` symlink.
+const VSCODE_CLI_BUNDLED: &str =
+    "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
+
+fn vscode_cli() -> &'static str {
+    if Path::new(VSCODE_CLI_BUNDLED).exists() {
+        VSCODE_CLI_BUNDLED
+    } else {
+        "code"
+    }
+}
+
+/// Open a workspace root in VS Code, reusing the last active window instead of
+/// spawning a new one.
+///
+/// `open -a` hands the path to VS Code as a document, which opens a fresh
+/// window every time. That gets expensive fast: each worktree is a full
+/// checkout with its own `node_modules`, so every extra window means another
+/// independent extension-host / TS-server / lint-server stack with nothing
+/// shared. `--reuse-window` keeps all workspaces in a single window, swapping
+/// the folder rather than multiplying the tooling.
+fn open_workspace_in_editor(path: &Path) -> AppResult<()> {
+    let status = std::process::Command::new(vscode_cli())
+        .arg("--reuse-window")
+        .arg(path)
+        .status()
+        .map_err(|e| {
+            AppError::Other(format!(
+                "failed to open {} in {EDITOR_APP}: {e}",
+                path.display()
+            ))
+        })?;
+
+    if !status.success() {
+        return Err(AppError::Other(format!(
+            "{EDITOR_APP} exited {status} opening {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn open_repos_config(paths: State<'_, Paths>) -> AppResult<()> {
     let path = paths.repos_config_file();
@@ -295,7 +339,7 @@ pub async fn open_in_vscode(
         .await
         .ok_or_else(|| AppError::WorkspaceNotFound(id.clone()))?;
 
-    open_in_editor(&workspace_root)
+    open_workspace_in_editor(&workspace_root)
 }
 
 #[derive(Debug, Deserialize)]
