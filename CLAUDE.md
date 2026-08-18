@@ -24,6 +24,26 @@ It also generates a `CLAUDE.md` at each workspace root (`workspace_doc.rs`) expl
 
 The prose lives in `repos.toml`, not in Rust: `[workspace_doc].body` (with `{branch}` / `{repo_list}` / `{available_repos}` / `{workspace_root}` / `{clone_dir}` placeholders) falling back to `DEFAULT_BODY`, plus per-repo `claude_notes`. Rust owns only the marker line and the "Repo notes" section.
 
+## Logging & diagnostics
+
+Two log sinks, filtered independently (`logging.rs`):
+
+- **File** — `logs/tethys.log.<date>`, full `info,tethys_lib=debug`. This is the real log.
+- **stderr** — mirrored into whichever terminal ran `pnpm tauri dev`. Defaults to `warn` only, because it's an unbounded pipe into a terminal emulator's scrollback. `TETHYS_LOG_STDERR` overrides it (`off` to silence, `info,tethys_lib=debug` for the full firehose). `RUST_LOG` sets overall verbosity and caps *both* sinks — raising `TETHYS_LOG_STDERR` past it does nothing.
+
+### Memory watchdog
+
+`~/.local/bin/memwatch.sh` (outside this repo) samples system + per-app memory every 20s into `~/memwatch/samples.tsv`, and dumps `~/memwatch/snap-<ts>.txt` when iTerm2 >1.2GB or VS Code >5GB. Snapshots carry top-30 RSS, every tty and its command, `vmmap -summary` for iTerm2, and a tethys log tail. Start with `nohup memwatch.sh 20 &`, stop with `pkill -f memwatch.sh`.
+
+Written to chase an intermittent "iTerm2 eats all the RAM" report. Findings from 8.5k samples over 5 days (2026-08-13 → 08-18):
+
+- **iTerm2 was never the problem** — max 225MB, mean 111MB. Never came close to tripping.
+- **Tethys is not a heavy process** — mean 66MB, and its stderr output measured ~236 KB/hour before the `warn` default landed. (One 770MB sample is the script catching a concurrent `cargo` build under `target/`, not the app.)
+- **The machine is chronically oversubscribed** on 24GB: swap mean 7.1GB / max 13.3GB, compressor mean 7GB, free pages routinely <100MB. Chrome is the largest consumer (mean 4.0GB, max 7.2GB).
+- **The one trip was VS Code**, 5.3GB at 2026-08-14T14:42 — a burst of Code renderer + extension-host processes <15s old, alongside `oxlint --lsp` running inside a Tethys worktree (`~/code/worktrees/<workspace>/nl-frontend`). Each worktree is a full checkout with its own `node_modules`, so opening several in VS Code multiplies the LSP/TS-server stack with nothing shared.
+
+So: apparent app-level memory blowups here are most likely symptoms of system-wide pressure, not a leak in Tethys. Check `samples.tsv` before assuming otherwise.
+
 ## Rust
 
 Use idiomatic rust. After a set of changes are finished, run clippy and clean up the issues it reports
