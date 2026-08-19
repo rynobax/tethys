@@ -38,6 +38,35 @@ impl GhError {
     }
 }
 
+/// Where PR status comes from.
+///
+/// The seam between "talk to `gh`" and "decide what to poll and when". One
+/// method, because that's all the poller needs; two adapters, because tests
+/// need a source that doesn't shell out to a binary the CI box may not have
+/// and doesn't hit the network.
+#[async_trait::async_trait]
+pub trait PrSource: Send + Sync + 'static {
+    async fn fetch(
+        &self,
+        query: &str,
+        variables: &BTreeMap<String, String>,
+    ) -> Result<Value, GhError>;
+}
+
+/// Production adapter: the `gh` CLI.
+pub struct GhCli;
+
+#[async_trait::async_trait]
+impl PrSource for GhCli {
+    async fn fetch(
+        &self,
+        query: &str,
+        variables: &BTreeMap<String, String>,
+    ) -> Result<Value, GhError> {
+        run_graphql(query, variables).await
+    }
+}
+
 /// Run a GraphQL query via `gh api graphql` and return the parsed `data` payload.
 ///
 /// `variables` is a map of string-valued GraphQL variables. The query we send

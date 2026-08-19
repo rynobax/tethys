@@ -1,5 +1,6 @@
 pub mod client;
 pub mod poller;
+pub mod pr_status;
 pub mod pr_ref;
 pub mod remote_url;
 pub mod status;
