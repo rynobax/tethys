@@ -1,6 +1,7 @@
 mod child_env;
 mod claude;
 mod claude_local;
+mod claude_settings;
 mod commands;
 mod error;
 mod git;
