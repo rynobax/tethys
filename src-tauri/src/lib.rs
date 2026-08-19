@@ -25,6 +25,7 @@ mod state;
 mod store;
 mod theme;
 mod tmux;
+mod turn;
 mod workspace_doc;
 
 use std::sync::Arc;
@@ -383,10 +384,10 @@ fn prewarm_live_sessions(
             Ok(_) => {
                 info!(session_id = %c.session_id, "pre-warmed live tmux session");
                 // Restore the last persisted turn state so the dot survives
-                // restarts. `reattach_tmux` defaults the entry to Working;
-                // override it here. If nothing was persisted, leave Working.
+                // restarts. `reattach_tmux` seeds Working for a pane that may
+                // be mid-response; override it when we have a better answer.
                 if let Some(state) = c.runtime_state {
-                    supervisor.seed_turn(
+                    supervisor.restore_turn(
                         &c.session_id,
                         state,
                         c.notification_type,

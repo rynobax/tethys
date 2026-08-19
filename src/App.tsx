@@ -10,7 +10,6 @@ import type {
   RepoLink,
   ScriptInfo,
   SessionInfo,
-  SessionRuntimeState,
   Theme,
   TurnChangedEvent,
   Workspace,
@@ -61,21 +60,16 @@ function App() {
     Map<WorkspaceId, CreateWorkspaceArgs>
   >(new Map());
   /**
-   * Per-session turn state tracked by listening to `session:turn_changed`
-   * globally. Used for the sidebar attention dot without needing to
-   * fetch sessions for every workspace. `acknowledged` mirrors the
-   * persisted `turn_acknowledged` flag — the user's dismissal of the dot,
-   * cleared server-side on the next runtime_state transition.
+   * Per-session attention state, tracked by listening to
+   * `session:turn_changed` globally so the sidebar dot doesn't need a
+   * sessions fetch per workspace.
+   *
+   * Stores the backend's derived answers rather than the raw
+   * running/runtime_state/turn_acknowledged triple. Deriving it here is what
+   * let the sidebar aggregate and the chip dot drift apart.
    */
   const [turnStates, setTurnStates] = useState<
-    Map<
-      string,
-      {
-        workspaceId: string;
-        state: SessionRuntimeState;
-        acknowledged: boolean;
-      }
-    >
+    Map<string, { workspaceId: string; needsTurn: boolean; working: boolean }>
   >(new Map());
   /**
    * Sessions for every workspace, cached so switching into a workspace
@@ -146,18 +140,17 @@ function App() {
       runtime_state,
       notification_type,
       turn_acknowledged,
+      running,
+      needs_turn,
+      working,
     } = event.payload;
     setTurnStates((prev) => {
       const next = new Map(prev);
-      if (runtime_state === "dormant") {
-        next.delete(session_id);
-      } else {
-        next.set(session_id, {
-          workspaceId: workspace_id,
-          state: runtime_state,
-          acknowledged: turn_acknowledged,
-        });
-      }
+      next.set(session_id, {
+        workspaceId: workspace_id,
+        needsTurn: needs_turn,
+        working,
+      });
       return next;
     });
     // Keep the cached SessionInfo[] in sync so WorkspaceDetail sees the
@@ -175,6 +168,9 @@ function App() {
                 runtime_state,
                 notification_type: notification_type ?? null,
                 turn_acknowledged,
+                running,
+                needs_turn,
+                working,
               }
             : s,
         ),
@@ -208,28 +204,20 @@ function App() {
   });
 
   const workspaceNeedsTurn = useCallback(
-    (w: Workspace): boolean => {
-      if (w.archived_at) return false;
-      for (const info of turnStates.values()) {
-        if (info.workspaceId !== w.id) continue;
-        if (info.state !== "idle" && info.state !== "waiting_input") continue;
-        if (info.acknowledged) continue;
-        return true;
-      }
-      return false;
-    },
+    (w: Workspace): boolean =>
+      !w.archived_at &&
+      [...turnStates.values()].some(
+        (info) => info.workspaceId === w.id && info.needsTurn,
+      ),
     [turnStates],
   );
 
   const workspaceWorking = useCallback(
-    (w: Workspace): boolean => {
-      if (w.archived_at) return false;
-      for (const info of turnStates.values()) {
-        if (info.workspaceId !== w.id) continue;
-        if (info.state === "working") return true;
-      }
-      return false;
-    },
+    (w: Workspace): boolean =>
+      !w.archived_at &&
+      [...turnStates.values()].some(
+        (info) => info.workspaceId === w.id && info.working,
+      ),
     [turnStates],
   );
 
@@ -248,9 +236,7 @@ function App() {
       // back, which updates turnStates. No optimistic local update needed —
       // the round-trip is fast and the persisted flag is the source of truth.
       for (const [sessionId, info] of turnStates) {
-        if (info.workspaceId !== workspace.id) continue;
-        if (info.state !== "idle" && info.state !== "waiting_input") continue;
-        if (info.acknowledged) continue;
+        if (info.workspaceId !== workspace.id || !info.needsTurn) continue;
         invoke("acknowledge_session_turn", {
           workspaceId: workspace.id,
           sessionId,
@@ -272,40 +258,35 @@ function App() {
         next.set(workspaceId, list);
         return next;
       });
-      // Seed turnStates from the listing. The backend restores
-      // runtime_state from disk on boot via seed_turn but intentionally
-      // doesn't emit session:turn_changed (the frontend isn't subscribed
-      // yet) — without this, the sidebar dot stays dark across restarts
-      // until the next live event fires for that session.
+      // Seed turnStates from the listing. The backend restores turn state
+      // from disk at boot but deliberately emits nothing (the frontend isn't
+      // subscribed yet) — without this the sidebar dot stays dark across
+      // restarts until the next live event fires.
+      //
+      // This used to race the `dormant` event handler, which deleted the
+      // entry while this re-inserted a stale one. Both sides now read the
+      // same derived flags, so they can't disagree.
       setTurnStates((prev) => {
         let next: Map<
           string,
-          {
-            workspaceId: string;
-            state: SessionRuntimeState;
-            acknowledged: boolean;
-          }
+          { workspaceId: string; needsTurn: boolean; working: boolean }
         > | null = null;
         const ensure = () => {
           if (!next) next = new Map(prev);
           return next;
         };
         for (const s of list) {
-          if (s.runtime_state === "dormant") {
-            if (prev.has(s.id)) ensure().delete(s.id);
-            continue;
-          }
           const cur = prev.get(s.id);
           if (
             !cur ||
-            cur.state !== s.runtime_state ||
             cur.workspaceId !== workspaceId ||
-            cur.acknowledged !== s.turn_acknowledged
+            cur.needsTurn !== s.needs_turn ||
+            cur.working !== s.working
           ) {
             ensure().set(s.id, {
               workspaceId,
-              state: s.runtime_state,
-              acknowledged: s.turn_acknowledged,
+              needsTurn: s.needs_turn,
+              working: s.working,
             });
           }
         }
@@ -1537,10 +1518,7 @@ function SessionChip({
   onContextMenu: (id: string, x: number, y: number) => void;
 }) {
   const label = meta.id.slice(0, 8);
-  const needsTurn =
-    live?.running &&
-    !live.turn_acknowledged &&
-    (live.runtime_state === "idle" || live.runtime_state === "waiting_input");
+  const needsTurn = live?.needs_turn ?? false;
   const chipClass = [
     "session-chip",
     selected ? "active" : "",
@@ -1823,11 +1801,7 @@ function SessionBar({
       {chipMenu &&
         (() => {
           const live = liveById.get(chipMenu.sessionId);
-          const needsTurn =
-            !!live?.running &&
-            !live.turn_acknowledged &&
-            (live.runtime_state === "idle" ||
-              live.runtime_state === "waiting_input");
+          const needsTurn = live?.needs_turn ?? false;
           const isHidden = hiddenSessions.some(
             (m) => m.id === chipMenu.sessionId,
           );

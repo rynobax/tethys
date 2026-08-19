@@ -187,6 +187,15 @@ export interface SessionInfo {
   notification_type: string | null;
   /** User dismissed the "your turn" indicator; reset on next state transition. */
   turn_acknowledged: boolean;
+  /**
+   * Whether this session wants the user's attention. Derived in Rust from
+   * running + runtime_state + turn_acknowledged, so every consumer agrees —
+   * the frontend used to recompute it in four places from two different
+   * definitions.
+   */
+  needs_turn: boolean;
+  /** Whether Claude is actively working. Derived alongside `needs_turn`. */
+  working: boolean;
 }
 
 export interface ScriptInfo {
@@ -206,6 +215,11 @@ export interface TurnChangedEvent {
   runtime_state: SessionRuntimeState;
   notification_type: string | null;
   turn_acknowledged: boolean;
+  /** Whether the session's PTY is still alive. */
+  running: boolean;
+  /** Same derived predicates as on `SessionInfo`, so both paths agree. */
+  needs_turn: boolean;
+  working: boolean;
 }
 
 export interface GithubStatusChangedEvent {

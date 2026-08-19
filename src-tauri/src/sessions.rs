@@ -14,6 +14,7 @@ use crate::hook_listener::HookMessage;
 use crate::pty::{OnExit, PtyProcess, PtySpawn, Ring};
 use crate::state::SessionRuntimeState;
 use crate::store::Store;
+use crate::turn::{TurnChanged, TurnSignal, TurnState, TurnTracker};
 use crate::tmux;
 
 const RING_CAPACITY: usize = 2 * 1024 * 1024; // 2 MB scrollback per session
@@ -29,10 +30,10 @@ struct SpawnRequest<'a> {
     args: &'a [String],
     tmux_bin: PathBuf,
     seed_bytes: &'a [u8],
-    /// Runtime state to seed the session with before any hooks arrive. A
-    /// brand-new spawn sits at an empty prompt (`WaitingInput`); a reattach
-    /// may be mid-response (`Working`).
-    initial_state: SessionRuntimeState,
+    /// Why this session is starting — `Spawned` for a fresh prompt,
+    /// `Reattached` for a pane that may be mid-response. The turn state each
+    /// implies is `TurnTracker`'s business, not the caller's.
+    seed: TurnSignal,
 }
 
 pub type SessionId = String;
@@ -55,6 +56,17 @@ pub struct SessionInfo {
     /// User dismissed the "your turn" dot for this session. Reset on the
     /// next runtime_state transition.
     pub turn_acknowledged: bool,
+    /// Whether this session wants the user's attention.
+    ///
+    /// Derived here rather than in the frontend, which used to recompute it in
+    /// four places from `running` / `runtime_state` / `turn_acknowledged` —
+    /// and two of those four disagreed about whether `running` mattered, so
+    /// the sidebar aggregate and the chip dot could light differently for the
+    /// same session.
+    pub needs_turn: bool,
+    /// Whether Claude is actively working in this session. Derived alongside
+    /// `needs_turn` for the same reason.
+    pub working: bool,
 }
 
 struct SessionHandle {
@@ -72,50 +84,16 @@ struct PendingSpawn {
 
 const PENDING_TTL: Duration = Duration::from_secs(30);
 
-/// Per-session UI state (turn + last notification subtype + the user's
-/// dismissal of the "your turn" dot). Held in memory; the persisted
-/// mirror lives on `ClaudeSessionMeta` so all three survive restarts.
-#[derive(Debug, Default, Clone)]
-struct TurnState {
-    state: SessionRuntimeState,
-    notification_type: Option<String>,
-    acknowledged: bool,
-}
-
-impl TurnState {
-    /// Apply an incoming turn signal. Returns `true` when the UI needs a
-    /// fresh `session:turn_changed` (state/notification changed, or a
-    /// dismissed indicator must re-light because a new signal arrived for
-    /// the same state). A repeated signal for an already-lit state is a
-    /// no-op so we don't spam redundant events.
-    fn apply(
-        &mut self,
-        state: SessionRuntimeState,
-        notification_type: Option<String>,
-    ) -> bool {
-        let unchanged =
-            self.state == state && self.notification_type == notification_type;
-        // An acknowledged indicator re-lights on the next signal even when the
-        // state is identical: a repeated idle_prompt is a fresh nudge, not
-        // noise, so a cleared "your turn" row doesn't stay dark forever.
-        if unchanged && !self.acknowledged {
-            return false;
-        }
-        self.state = state;
-        self.notification_type = notification_type;
-        self.acknowledged = false;
-        true
-    }
-}
-
 pub struct SessionSupervisor {
     sessions: Mutex<HashMap<SessionId, SessionHandle>>,
     /// Maps the `TETHYS_SPAWN_TOKEN` we set on the PTY env to the
     /// session metadata we need to update once Claude's SessionStart hook
     /// tells us the claude_session_id.
     pending: Mutex<HashMap<String, PendingSpawn>>,
-    /// Per-session turn state. Keyed by Tethys `SessionId`.
-    turn: Mutex<HashMap<SessionId, TurnState>>,
+    /// Owns every rule about what a session's turn indicator shows.
+    /// `Arc` so the PTY exit hook can report a child exit without holding a
+    /// reference back to the supervisor.
+    turn: Arc<TurnTracker>,
     store: Arc<Store>,
     app: AppHandle,
 }
@@ -125,28 +103,30 @@ impl SessionSupervisor {
         Self {
             sessions: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
-            turn: Mutex::new(HashMap::new()),
+            turn: Arc::new(TurnTracker::new()),
             store,
             app,
         }
     }
 
-    /// Seed the in-memory turn map from a persisted snapshot. Used at
-    /// boot, immediately after `reattach_tmux` clobbers the entry with
-    /// `Working`. Does not persist (the value came from disk) and does
-    /// not emit — the frontend hasn't subscribed yet, and `list_sessions`
-    /// will pick the value up from `list_for_workspace`.
-    pub fn seed_turn(
+    /// Restore a session's turn state from its persisted snapshot at boot.
+    ///
+    /// Must run after `reattach_tmux`, which seeds `Working` for a pane that
+    /// may be mid-response; the persisted value is the better answer when we
+    /// have one.
+    pub fn restore_turn(
         &self,
         session_id: &str,
         state: SessionRuntimeState,
         notification_type: Option<String>,
         acknowledged: bool,
     ) {
-        let mut map = self.turn.lock().unwrap();
-        map.insert(
-            session_id.to_string(),
-            TurnState {
+        // Seeds publish nothing: the frontend isn't subscribed yet and
+        // `list_sessions` reads straight out of the tracker.
+        self.turn.observe(
+            session_id,
+            "",
+            TurnSignal::Restored {
                 state,
                 notification_type,
                 acknowledged,
@@ -154,46 +134,30 @@ impl SessionSupervisor {
         );
     }
 
-    /// Update a session's turn state + emit `session:turn_changed` + write
-    /// the new state through to `state.json` so the indicator survives a
-    /// Tethys restart. No-op if the new state matches the current one.
-    async fn set_turn(
+    /// Feed a signal to the turn tracker and, if it changed anything the user
+    /// can see, tell the UI and write it through to `state.json`.
+    ///
+    /// The single place turn state becomes visible. Every source — hooks, the
+    /// probe loop, the exit watcher, the user's acknowledgement — goes through
+    /// here, so "what happens when two of them disagree" is answered by
+    /// `TurnTracker::observe` rather than by whichever call site ran last.
+    async fn apply_signal(
         &self,
         session_id: &str,
         workspace_id: &str,
-        state: SessionRuntimeState,
-        notification_type: Option<String>,
+        signal: TurnSignal,
     ) {
-        let changed = {
-            let mut map = self.turn.lock().unwrap();
-            let current = map.entry(session_id.to_string()).or_default();
-            current.apply(state, notification_type.clone())
-        };
-        if !changed {
+        let Some(changed) = self.turn.observe(session_id, workspace_id, signal) else {
             return;
-        }
-        let _ = self.app.emit(
-            "session:turn_changed",
-            serde_json::json!({
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "runtime_state": state,
-                "notification_type": notification_type,
-                "turn_acknowledged": false,
-            }),
-        );
-        let persist = self
-            .store
-            .update_workspace_quiet(workspace_id, |ws| {
-                if let Some(meta) = ws.session_mut(session_id) {
-                    meta.runtime_state = Some(state);
-                    meta.notification_type = notification_type.clone();
-                    meta.turn_acknowledged = false;
-                }
-                Ok(())
-            })
-            .await;
-        if let Err(e) = persist {
+        };
+        let running = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .is_some_and(|h| h.pty.is_running());
+        publish_turn(&self.app, &changed, running);
+        if let Err(e) = persist_turn(&self.store, &changed).await {
             warn!(error = %e, session_id, "persist turn state failed");
         }
     }
@@ -283,70 +247,30 @@ impl SessionSupervisor {
                 }
             }
 
-            let (current, current_nt) = {
-                let map = self.turn.lock().unwrap();
-                match map.get(&sess_id) {
-                    Some(t) => (t.state, t.notification_type.clone()),
-                    None => (SessionRuntimeState::default(), None),
-                }
-            };
-            if current == probe_state {
-                continue;
+            let before = self.turn.get(&sess_id).state;
+            self.apply_signal(
+                &sess_id,
+                &ws_id,
+                TurnSignal::Probe { state: probe_state },
+            )
+            .await;
+            let after = self.turn.get(&sess_id).state;
+            if before != after {
+                warn!(
+                    session_id = %sess_id,
+                    hook_state = ?before,
+                    probe_state = ?probe_state,
+                    "probe/hook turn-state mismatch — applied probe (authoritative)"
+                );
             }
-
-            warn!(
-                session_id = %sess_id,
-                hook_state = ?current,
-                probe_state = ?probe_state,
-                "probe/hook turn-state mismatch — applying probe (authoritative)"
-            );
-            // The probe can't distinguish permission_prompt from idle_prompt,
-            // so keep the hook's subtype when we're still waiting on input.
-            let nt = if probe_state == SessionRuntimeState::WaitingInput {
-                current_nt
-            } else {
-                None
-            };
-            self.set_turn(&sess_id, &ws_id, probe_state, nt).await;
         }
     }
 
-    /// User dismissed the "your turn" indicator. Sets `turn_acknowledged`
-    /// in memory, persists it, and emits a `session:turn_changed` event so
-    /// the sidebar dot vanishes immediately. The flag is cleared again on
-    /// the next runtime_state transition (see `set_turn`).
-    pub async fn acknowledge_turn(
-        &self,
-        session_id: &str,
-        workspace_id: &str,
-    ) -> AppResult<()> {
-        let (state, notification_type) = {
-            let mut map = self.turn.lock().unwrap();
-            let current = map.entry(session_id.to_string()).or_default();
-            if current.acknowledged {
-                return Ok(());
-            }
-            current.acknowledged = true;
-            (current.state, current.notification_type.clone())
-        };
-        let _ = self.app.emit(
-            "session:turn_changed",
-            serde_json::json!({
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "runtime_state": state,
-                "notification_type": notification_type,
-                "turn_acknowledged": true,
-            }),
-        );
-        self.store
-            .update_workspace_quiet(workspace_id, |ws| {
-                if let Some(meta) = ws.session_mut(session_id) {
-                    meta.turn_acknowledged = true;
-                }
-                Ok(())
-            })
-            .await
+    /// The user dismissed the "your turn" indicator. Cleared again by the
+    /// next fresh signal — see `TurnTracker`.
+    pub async fn acknowledge_turn(&self, session_id: &str, workspace_id: &str) {
+        self.apply_signal(session_id, workspace_id, TurnSignal::Acknowledged)
+            .await;
     }
 
     /// Inner spawn: opens a PTY, runs `program args`, wires up reader/
@@ -363,17 +287,23 @@ impl SessionSupervisor {
             args,
             tmux_bin,
             seed_bytes,
-            initial_state,
+            seed,
         } = req;
+        let seed_state = match seed {
+            TurnSignal::Reattached => SessionRuntimeState::Working,
+            _ => SessionRuntimeState::WaitingInput,
+        };
         let info = SessionInfo {
             id: id.clone(),
             workspace_id: workspace_id.clone(),
             repo_key,
             cwd: cwd.to_path_buf(),
             running: true,
-            runtime_state: initial_state,
+            runtime_state: seed_state,
             notification_type: None,
             turn_acknowledged: false,
+            needs_turn: false,
+            working: false,
         };
 
         let pty = PtyProcess::spawn(
@@ -386,7 +316,13 @@ impl SessionSupervisor {
                 tmux_session_name: id.clone(),
                 tmux_bin,
             },
-            session_exit_hook(self.app.clone(), workspace_id.clone(), id.clone()),
+            session_exit_hook(
+                self.app.clone(),
+                self.store.clone(),
+                self.turn.clone(),
+                workspace_id.clone(),
+                id.clone(),
+            ),
         )?;
 
         let handle = SessionHandle {
@@ -395,17 +331,9 @@ impl SessionSupervisor {
         };
 
         self.sessions.lock().unwrap().insert(id.clone(), handle);
-        // Seed the caller-provided initial state. Hooks refine it shortly: a
-        // brand-new spawn waits at the prompt (WaitingInput), a reattach is
-        // assumed mid-response (Working).
-        self.turn.lock().unwrap().insert(
-            id,
-            TurnState {
-                state: initial_state,
-                notification_type: None,
-                acknowledged: false,
-            },
-        );
+        // Seeds publish nothing — hooks refine the state moments later, and
+        // the frontend reads the seed out of `list_sessions`.
+        self.turn.observe(&id, &workspace_id, seed);
         let _ = self.app.emit(
             "session:changed",
             serde_json::json!({ "workspace_id": workspace_id }),
@@ -468,9 +396,7 @@ impl SessionSupervisor {
             args: &args,
             tmux_bin: tmux_bin.to_path_buf(),
             seed_bytes: &[],
-            // Freshly-spawned (or freshly-resumed) Claude lands at an empty
-            // prompt waiting on the user — show "your turn", not "working".
-            initial_state: SessionRuntimeState::WaitingInput,
+            seed: TurnSignal::Spawned,
         })?;
 
         // Prune any expired pending correlations while we're here.
@@ -529,9 +455,7 @@ impl SessionSupervisor {
             args: &args,
             tmux_bin: tmux_bin.to_path_buf(),
             seed_bytes: &seed,
-            // A reattached session may be mid-response; assume Working and let
-            // hooks correct it.
-            initial_state: SessionRuntimeState::Working,
+            seed: TurnSignal::Reattached,
         })
     }
 
@@ -611,11 +535,15 @@ impl SessionSupervisor {
         .await;
     }
 
-    /// Find the Tethys session this hook belongs to and flip its turn state.
-    /// Matches first on `claude_session_id` directly. Falls back to the
-    /// parent session when the hook comes from a subagent — subagent
-    /// transcripts live at `.../<parent-uuid>/subagents/agent-*.jsonl`, so
-    /// the parent's claude_session_id is recoverable from `transcript_path`.
+    /// Find the Tethys session this hook belongs to and feed the tracker.
+    ///
+    /// Matches first on `claude_session_id`. Falls back to the parent session
+    /// when the hook comes from a subagent — subagent transcripts live at
+    /// `.../<parent-uuid>/subagents/agent-*.jsonl`, so the parent's id is
+    /// recoverable from `transcript_path`. Falls back last to `cwd`, which is
+    /// stable across the id rotation Claude does on compaction/resume; without
+    /// it a rotated id means every hook silently misses until the 2s probe
+    /// loop heals the id.
     async fn set_turn_from_hook(
         &self,
         msg: &HookMessage,
@@ -635,9 +563,11 @@ impl SessionSupervisor {
             .transcript_path
             .as_deref()
             .and_then(parent_session_from_subagent_path);
+        let cwd = msg.cwd.as_deref();
         let lookup = self
             .store
             .read(|s| {
+                let mut by_cwd = None;
                 for ws in &s.workspaces {
                     for sess in &ws.sessions {
                         let tracked = sess.claude_session_id.as_deref();
@@ -647,9 +577,17 @@ impl SessionSupervisor {
                         {
                             return Some((ws.id.clone(), sess.id.clone()));
                         }
+                        // Remember a cwd match but keep looking for an id
+                        // match, which is always the better answer.
+                        if by_cwd.is_none()
+                            && cwd.is_some()
+                            && sess.cwd.to_str() == cwd
+                        {
+                            by_cwd = Some((ws.id.clone(), sess.id.clone()));
+                        }
                     }
                 }
-                None
+                by_cwd
             })
             .await;
         let Some((ws_id, sess_id)) = lookup else {
@@ -660,7 +598,15 @@ impl SessionSupervisor {
             );
             return;
         };
-        self.set_turn(&sess_id, &ws_id, state, notification_type).await;
+        self.apply_signal(
+            &sess_id,
+            &ws_id,
+            TurnSignal::Hook {
+                state,
+                notification_type,
+            },
+        )
+        .await;
     }
 
     async fn handle_session_start(&self, msg: HookMessage) {
@@ -758,7 +704,6 @@ impl SessionSupervisor {
     }
 
     pub fn list_for_workspace(&self, workspace_id: &str) -> Vec<SessionInfo> {
-        let turn_map = self.turn.lock().unwrap().clone();
         let sessions = self.sessions.lock().unwrap();
         sessions
             .values()
@@ -766,7 +711,9 @@ impl SessionSupervisor {
             .map(|h| {
                 let mut info = h.info.clone();
                 info.running = h.pty.is_running();
-                let turn = turn_map.get(&h.info.id).cloned().unwrap_or_default();
+                let turn = self.turn.get(&h.info.id);
+                info.needs_turn = turn.needs_turn(info.running);
+                info.working = turn.is_working(info.running);
                 info.runtime_state = turn.state;
                 info.notification_type = turn.notification_type;
                 info.turn_acknowledged = turn.acknowledged;
@@ -797,11 +744,78 @@ fn parent_session_from_subagent_path(transcript_path: &str) -> Option<String> {
     Some(subagents_dir.parent()?.file_name()?.to_str()?.to_string())
 }
 
+/// Emit a turn change to the frontend. One shape, one place — the payload
+/// used to be hand-built as `serde_json::json!` at three call sites, and the
+/// third had already drifted, omitting `turn_acknowledged` while the
+/// TypeScript type declared it non-optional.
+fn publish_turn(app: &AppHandle, changed: &TurnChanged, running: bool) {
+    let snapshot = TurnState {
+        state: changed.runtime_state,
+        notification_type: changed.notification_type.clone(),
+        acknowledged: changed.turn_acknowledged,
+    };
+    let _ = app.emit(
+        "session:turn_changed",
+        TurnChangedEvent {
+            changed,
+            running,
+            needs_turn: snapshot.needs_turn(running),
+            working: snapshot.is_working(running),
+        },
+    );
+}
+
+/// What goes over the wire on `session:turn_changed`.
+///
+/// The tracker is pure and can't know whether the PTY is still alive, so the
+/// two liveness-dependent predicates are added here — the one place with
+/// access to both. The frontend gets the answer rather than the ingredients.
+#[derive(Clone, Serialize)]
+struct TurnChangedEvent<'a> {
+    #[serde(flatten)]
+    changed: &'a TurnChanged,
+    running: bool,
+    needs_turn: bool,
+    working: bool,
+}
+
+/// Write a turn change through to `state.json` so the indicator survives a
+/// restart. Quiet: the caller already emitted the more specific
+/// `session:turn_changed`, so there's no need for a `workspace:changed` too.
+async fn persist_turn(store: &Arc<Store>, changed: &TurnChanged) -> AppResult<()> {
+    let session_id = changed.session_id.clone();
+    let runtime_state = changed.runtime_state;
+    let notification_type = changed.notification_type.clone();
+    let acknowledged = changed.turn_acknowledged;
+    store
+        .update_workspace_quiet(&changed.workspace_id, move |ws| {
+            if let Some(meta) = ws.session_mut(&session_id) {
+                meta.runtime_state = Some(runtime_state);
+                meta.notification_type = notification_type;
+                meta.turn_acknowledged = acknowledged;
+            }
+            Ok(())
+        })
+        .await
+}
+
 /// Build the exit hook handed to [`PtyProcess::spawn`]. It runs only on a
 /// true child exit (the watcher already filtered out client detaches): scrub
-/// tmux's detach epilogue from the ring, then emit `session:exit` and a
-/// `Dormant` `session:turn_changed` so the UI stops showing Working forever.
-fn session_exit_hook(app: AppHandle, workspace_id: String, session_id: SessionId) -> OnExit {
+/// tmux's detach epilogue from the ring, announce the exit, and record the
+/// session as `Dormant`.
+///
+/// Recording it is the part that used to be missing. The hook emitted a
+/// `Dormant` event but never wrote it anywhere, so `list_sessions` kept
+/// returning the pre-exit state — and the frontend's own refresh, racing the
+/// event, put the stale state straight back and re-lit the sidebar dot for a
+/// session that had already died.
+fn session_exit_hook(
+    app: AppHandle,
+    store: Arc<Store>,
+    turn: Arc<TurnTracker>,
+    workspace_id: String,
+    session_id: SessionId,
+) -> OnExit {
     Box::new(move |code, ring| {
         // Session truly gone — tmux client printed `[detached (from
         // session …)]` to the pty just before exiting. Strip that trailing
@@ -818,17 +832,23 @@ fn session_exit_hook(app: AppHandle, workspace_id: String, session_id: SessionId
                 "code": code,
             }),
         );
-        // Turn state is stale once the PTY is gone — emit a Dormant
-        // transition so the UI doesn't keep showing Working indefinitely.
-        let _ = app.emit(
-            "session:turn_changed",
-            serde_json::json!({
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "runtime_state": SessionRuntimeState::Dormant,
-                "notification_type": Option::<String>::None,
-            }),
-        );
+
+        if let Some(changed) = turn.observe(
+            &session_id,
+            &workspace_id,
+            TurnSignal::ChildExited,
+        ) {
+            // The child just exited, so it is definitively not running.
+            publish_turn(&app, &changed, false);
+            // The exit hook is a sync callback on the watcher thread, so the
+            // write-through goes on the runtime.
+            let store = store.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = persist_turn(&store, &changed).await {
+                    warn!(error = %e, "persist dormant turn state failed");
+                }
+            });
+        }
     })
 }
 
@@ -974,9 +994,7 @@ fn plan_probe_reconciliation(
 #[cfg(test)]
 mod tests {
     use super::parent_session_from_subagent_path;
-    use super::{
-        plan_probe_reconciliation, ProbeAction, ProbeView, TrackedSession, TurnState,
-    };
+    use super::{plan_probe_reconciliation, ProbeAction, ProbeView, TrackedSession};
     use crate::state::SessionRuntimeState;
 
     /// Claude rotated its session id and left the old probe file behind, so
@@ -1080,45 +1098,6 @@ mod tests {
             running: false,
         }];
         assert!(plan_probe_reconciliation(&probes, &sessions).is_empty());
-    }
-
-    #[test]
-    fn apply_reports_change_on_state_transition() {
-        let mut turn = TurnState::default();
-        assert!(turn.apply(SessionRuntimeState::Working, None));
-        assert_eq!(turn.state, SessionRuntimeState::Working);
-        assert!(!turn.acknowledged);
-    }
-
-    #[test]
-    fn apply_is_noop_for_repeated_unacknowledged_signal() {
-        let mut turn = TurnState::default();
-        turn.apply(
-            SessionRuntimeState::WaitingInput,
-            Some("idle_prompt".into()),
-        );
-        // Same state + notification, still lit — nothing to re-emit.
-        assert!(!turn.apply(
-            SessionRuntimeState::WaitingInput,
-            Some("idle_prompt".into())
-        ));
-    }
-
-    #[test]
-    fn apply_relights_acknowledged_indicator_on_repeated_signal() {
-        let mut turn = TurnState::default();
-        turn.apply(
-            SessionRuntimeState::WaitingInput,
-            Some("idle_prompt".into()),
-        );
-        turn.acknowledged = true; // user cleared the notification
-
-        // A repeated idle_prompt for the same state must re-light the row.
-        assert!(turn.apply(
-            SessionRuntimeState::WaitingInput,
-            Some("idle_prompt".into())
-        ));
-        assert!(!turn.acknowledged);
     }
 
     #[test]

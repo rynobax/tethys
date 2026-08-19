@@ -1184,7 +1184,8 @@ pub async fn acknowledge_session_turn(
 ) -> AppResult<()> {
     supervisor
         .acknowledge_turn(&session_id, &workspace_id)
-        .await
+        .await;
+    Ok(())
 }
 
 #[derive(Debug, serde::Deserialize)]
