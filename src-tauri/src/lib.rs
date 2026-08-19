@@ -30,7 +30,7 @@ mod workspace_doc;
 use std::sync::Arc;
 
 use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
-use tauri::{Manager, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tracing::{error, info, warn};
 
@@ -41,8 +41,20 @@ use crate::purge::Purger;
 use crate::registry::RegistryLoad;
 use crate::scripts::ScriptSupervisor;
 use crate::sessions::SessionSupervisor;
-use crate::store::Store;
+use crate::store::{Store, WorkspaceNotifier};
 use crate::tmux::TmuxBin;
+
+/// Adapter that turns the `Store`'s workspace-changed notifications into the
+/// `workspace:changed` Tauri event the frontend listens for.
+struct TauriNotifier(AppHandle);
+
+impl WorkspaceNotifier for TauriNotifier {
+    fn workspace_changed(&self, workspace_id: &str) {
+        let _ = self
+            .0
+            .emit("workspace:changed", serde_json::json!({ "workspace_id": workspace_id }));
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -85,7 +97,12 @@ pub fn run() {
             let state_path = paths.state_file();
             let tmp_path = paths.state_tmp_file();
             let store: Arc<Store> = tauri::async_runtime::block_on(async {
-                Store::load(state_path, tmp_path).await
+                Store::load(
+                    state_path,
+                    tmp_path,
+                    Box::new(TauriNotifier(handle.clone())),
+                )
+                .await
             })
             .map_err(|e| {
                 error!(error = %e, "failed to load store");
@@ -450,16 +467,14 @@ fn prewarm_live_scripts(
     if !to_drop.is_empty() {
         let store_for_drop = store.clone();
         tauri::async_runtime::block_on(async move {
-            let _ = store_for_drop
-                .mutate(|s| {
-                    for (ws_id, script_id) in &to_drop {
-                        if let Some(ws) = s.find_workspace_mut(ws_id) {
-                            ws.script_runs.retain(|m| &m.id != script_id);
-                        }
-                    }
-                    Ok(())
-                })
-                .await;
+            for (ws_id, script_id) in &to_drop {
+                let _ = store_for_drop
+                    .update_workspace(ws_id, |ws| {
+                        ws.script_runs.retain(|m| &m.id != script_id);
+                        Ok(())
+                    })
+                    .await;
+            }
         });
     }
 }

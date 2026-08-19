@@ -171,10 +171,7 @@ impl Purger {
                 Ok(_) => {
                     info!(id = %ws.id, branch = %ws.branch, "purged workspace");
                     any_change = true;
-                    let _ = self.app.emit(
-                        "workspace:changed",
-                        serde_json::json!({ "workspace_id": ws.id }),
-                    );
+                    self.store.notify_changed(&ws.id);
                 }
                 Err(e) => {
                     let msg = e.to_string();

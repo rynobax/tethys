@@ -94,7 +94,6 @@ pub struct AttachPrArgs {
 /// number fails loudly instead of parking an empty chip in the UI.
 #[tauri::command]
 pub async fn attach_pr(
-    app: AppHandle,
     store: State<'_, Arc<Store>>,
     registry: State<'_, Arc<RegistryLoad>>,
     args: AttachPrArgs,
@@ -175,10 +174,7 @@ pub async fn attach_pr(
     let stored = status.clone();
     let workspace_id = args.workspace_id.clone();
     store
-        .mutate(move |s| {
-            let ws = s
-                .find_workspace_mut(&workspace_id)
-                .ok_or_else(|| AppError::WorkspaceNotFound(workspace_id.clone()))?;
+        .update_workspace(&workspace_id, move |ws| {
             let link = ws.link_mut(&repo_key).ok_or_else(|| {
                 AppError::Other(format!("workspace has no worktree for {repo_key}"))
             })?;
@@ -203,7 +199,6 @@ pub async fn attach_pr(
         })
         .await?;
 
-    emit_workspace_changed(&app, &args.workspace_id);
     Ok(status)
 }
 
@@ -217,15 +212,11 @@ pub struct DetachPrArgs {
 /// Stop tracking a manually-attached PR. Nothing on GitHub is touched.
 #[tauri::command]
 pub async fn detach_pr(
-    app: AppHandle,
     store: State<'_, Arc<Store>>,
     args: DetachPrArgs,
 ) -> AppResult<()> {
     store
-        .mutate(|s| {
-            let ws = s
-                .find_workspace_mut(&args.workspace_id)
-                .ok_or_else(|| AppError::WorkspaceNotFound(args.workspace_id.clone()))?;
+        .update_workspace(&args.workspace_id, |ws| {
             let link = ws.link_mut(&args.repo_key).ok_or_else(|| {
                 AppError::Other(format!("workspace has no worktree for {}", args.repo_key))
             })?;
@@ -233,8 +224,6 @@ pub async fn detach_pr(
             Ok(())
         })
         .await?;
-
-    emit_workspace_changed(&app, &args.workspace_id);
     Ok(())
 }
 
@@ -325,9 +314,8 @@ pub async fn open_in_vscode(
     // from "no such workspace", and saying so is the difference between the
     // user waiting and the user hunting for a bug.
     let workspace_root: PathBuf = store
-        .read(|s| s.find_workspace(&id).map(|w| w.root_buf()))
-        .await
-        .ok_or_else(|| AppError::WorkspaceNotFound(id.clone()))?
+        .with_workspace(&id, Workspace::root_buf)
+        .await?
         .ok_or_else(|| {
             AppError::Other(
                 "workspace has no repos yet — nothing to open".to_string(),
@@ -690,10 +678,7 @@ pub async fn create_workspace(
     match orchestrate {
         Ok(()) => {
             let stored = store
-                .mutate(|s| {
-                    let ws = s
-                        .find_workspace_mut(&id)
-                        .ok_or_else(|| AppError::WorkspaceNotFound(id.clone()))?;
+                .update_workspace(&id, |ws| {
                     ws.repo_links = created.clone();
                     ws.status = WorkspaceStatus::Ready;
                     Ok(ws.clone())
@@ -705,7 +690,6 @@ pub async fn create_workspace(
 
             info!(id = %stored.id, branch = %stored.branch, repos = stored.repo_links.len(), "created workspace");
             let _ = tx.0.send(JobEvent::Success);
-            emit_workspace_changed(&app, &stored.id);
             Ok(stored)
         }
         Err(e) => {
@@ -741,19 +725,16 @@ pub async fn create_workspace(
             // error visible in the detail pane. The user dismisses via the
             // existing `forget_workspace` command.
             let mutate_result = store
-                .mutate(|s| {
-                    if let Some(ws) = s.find_workspace_mut(&id) {
-                        ws.status = WorkspaceStatus::CreationFailed {
-                            error: msg.clone(),
-                        };
-                    }
+                .update_workspace(&id, |ws| {
+                    ws.status = WorkspaceStatus::CreationFailed {
+                        error: msg.clone(),
+                    };
                     Ok(())
                 })
                 .await;
             if let Err(mutate_err) = mutate_result {
                 warn!(error = %mutate_err, "failed to mark workspace as CreationFailed");
             }
-            emit_workspace_changed(&app, &id);
 
             let _ = tx.0.send(JobEvent::Failed { error: msg });
             Err(e)
@@ -775,7 +756,6 @@ pub struct AddRepoArgs {
 /// intact.
 #[tauri::command]
 pub async fn add_repo_to_workspace(
-    app: AppHandle,
     store: State<'_, Arc<Store>>,
     registry: State<'_, Arc<RegistryLoad>>,
     paths: State<'_, Paths>,
@@ -789,17 +769,14 @@ pub async fn add_repo_to_workspace(
         .ok_or_else(|| AppError::Other(format!("unknown repo key: {}", args.repo_key)))?;
 
     let (branch, already_present, is_deleted) = store
-        .read(|s| {
-            s.find_workspace(&args.workspace_id).map(|w| {
-                (
-                    w.branch.clone(),
-                    w.has_link(&args.repo_key),
-                    w.deleted_at.is_some(),
-                )
-            })
+        .with_workspace(&args.workspace_id, |w| {
+            (
+                w.branch.clone(),
+                w.has_link(&args.repo_key),
+                w.deleted_at.is_some(),
+            )
         })
-        .await
-        .ok_or_else(|| AppError::WorkspaceNotFound(args.workspace_id.clone()))?;
+        .await?;
 
     if is_deleted {
         return Err(AppError::Other(
@@ -838,12 +815,18 @@ pub async fn add_repo_to_workspace(
     match provision {
         Ok(link) => {
             let updated = store
-                .mutate(|s| {
-                    let ws = s
-                        .find_workspace_mut(&args.workspace_id)
-                        .ok_or_else(|| {
-                            AppError::WorkspaceNotFound(args.workspace_id.clone())
-                        })?;
+                .update_workspace(&args.workspace_id, |ws| {
+                    // Re-check both pre-conditions, not just one: provisioning
+                    // took minutes of git I/O and the user may have soft-deleted
+                    // the workspace in the meantime. Pushing a link onto a
+                    // deleted workspace hands the purger a worktree it doesn't
+                    // know it owns.
+                    if ws.deleted_at.is_some() {
+                        return Err(AppError::Other(
+                            "workspace was deleted while the repo was being provisioned"
+                                .into(),
+                        ));
+                    }
                     if ws.has_link(&link.repo_key) {
                         return Err(AppError::Other(format!(
                             "repo '{}' is already in this workspace",
@@ -873,7 +856,6 @@ pub async fn add_repo_to_workspace(
                 "added repo to workspace"
             );
             let _ = tx.0.send(JobEvent::Success);
-            emit_workspace_changed(&app, &args.workspace_id);
             Ok(updated)
         }
         Err(e) => {
@@ -912,12 +894,8 @@ pub async fn delete_workspace(
     id: WorkspaceId,
 ) -> AppResult<()> {
     let session_ids: Vec<String> = store
-        .read(|s| {
-            s.find_workspace(&id)
-                .map(|w| w.sessions.iter().map(|m| m.id.clone()).collect())
-        })
-        .await
-        .ok_or_else(|| AppError::WorkspaceNotFound(id.clone()))?;
+        .with_workspace(&id, |w| w.sessions.iter().map(|m| m.id.clone()).collect())
+        .await?;
 
     // Kill running scripts (dev servers etc.) before anything else — these
     // would otherwise keep writing to the worktree we're about to tear down,
@@ -936,10 +914,7 @@ pub async fn delete_workspace(
     }
 
     store
-        .mutate(|s| {
-            let ws = s
-                .find_workspace_mut(&id)
-                .ok_or_else(|| AppError::WorkspaceNotFound(id.clone()))?;
+        .update_workspace(&id, |ws| {
             // Idempotent: re-deleting an already-soft-deleted workspace
             // refreshes the timestamp, which extends the grace window.
             ws.deleted_at = Some(Utc::now());
@@ -951,7 +926,6 @@ pub async fn delete_workspace(
         .await?;
 
     info!(%id, "soft-deleted workspace");
-    emit_workspace_changed(&app, &id);
     let _ = app.emit("system_status:changed", &());
     Ok(())
 }
@@ -965,54 +939,40 @@ pub async fn cancel_delete_workspace(
     id: WorkspaceId,
 ) -> AppResult<()> {
     store
-        .mutate(|s| {
-            let ws = s
-                .find_workspace_mut(&id)
-                .ok_or_else(|| AppError::WorkspaceNotFound(id.clone()))?;
+        .update_workspace(&id, |ws| {
             ws.deleted_at = None;
             Ok(())
         })
         .await?;
-    emit_workspace_changed(&app, &id);
     let _ = app.emit("system_status:changed", &());
     Ok(())
 }
 
 #[tauri::command]
 pub async fn archive_workspace(
-    app: AppHandle,
     store: State<'_, Arc<Store>>,
     id: WorkspaceId,
 ) -> AppResult<()> {
     store
-        .mutate(|s| {
-            let ws = s
-                .find_workspace_mut(&id)
-                .ok_or_else(|| AppError::WorkspaceNotFound(id.clone()))?;
+        .update_workspace(&id, |ws| {
             ws.archived_at = Some(Utc::now());
             Ok(())
         })
         .await?;
-    emit_workspace_changed(&app, &id);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn unarchive_workspace(
-    app: AppHandle,
     store: State<'_, Arc<Store>>,
     id: WorkspaceId,
 ) -> AppResult<()> {
     store
-        .mutate(|s| {
-            let ws = s
-                .find_workspace_mut(&id)
-                .ok_or_else(|| AppError::WorkspaceNotFound(id.clone()))?;
+        .update_workspace(&id, |ws| {
             ws.archived_at = None;
             Ok(())
         })
         .await?;
-    emit_workspace_changed(&app, &id);
     Ok(())
 }
 
@@ -1241,7 +1201,6 @@ pub struct StartClaudeArgs {
 /// left as `None` — it gets filled in by the `SessionStart` hook.
 #[tauri::command]
 pub async fn start_claude_session(
-    app: AppHandle,
     supervisor: State<'_, Arc<SessionSupervisor>>,
     store: State<'_, Arc<Store>>,
     claude_bin: State<'_, ClaudeBin>,
@@ -1249,7 +1208,6 @@ pub async fn start_claude_session(
     args: StartClaudeArgs,
 ) -> AppResult<SessionInfo> {
     spawn_claude(
-        &app,
         &supervisor,
         &store,
         &claude_bin,
@@ -1273,7 +1231,6 @@ pub struct ResumeClaudeArgs {
 
 #[tauri::command]
 pub async fn resume_claude_session(
-    app: AppHandle,
     supervisor: State<'_, Arc<SessionSupervisor>>,
     store: State<'_, Arc<Store>>,
     claude_bin: State<'_, ClaudeBin>,
@@ -1322,7 +1279,7 @@ pub async fn resume_claude_session(
             &cwd,
             &tmux_bin.0,
         )?;
-        emit_workspace_changed(&app, &args.workspace_id);
+        store.notify_changed(&args.workspace_id);
         return Ok(info);
     }
 
@@ -1337,7 +1294,6 @@ pub async fn resume_claude_session(
         repo_key: args.repo_key,
     };
     spawn_claude(
-        &app,
         &supervisor,
         &store,
         &claude_bin,
@@ -1380,7 +1336,6 @@ fn transcript_is_resumable(path: Option<&Path>) -> bool {
 /// the new binary — there's nothing to resume.
 #[tauri::command]
 pub async fn switch_claude_binary(
-    app: AppHandle,
     supervisor: State<'_, Arc<SessionSupervisor>>,
     store: State<'_, Arc<Store>>,
     claude_bin: State<'_, ClaudeBin>,
@@ -1436,7 +1391,6 @@ pub async fn switch_claude_binary(
         repo_key,
     };
     spawn_claude(
-        &app,
         &supervisor,
         &store,
         &claude_bin,
@@ -1461,7 +1415,6 @@ struct SpawnOpts<'a> {
 }
 
 async fn spawn_claude(
-    app: &AppHandle,
     supervisor: &Arc<SessionSupervisor>,
     store: &Arc<Store>,
     claude_bin: &ClaudeBin,
@@ -1535,10 +1488,7 @@ async fn spawn_claude(
     };
 
     store
-        .mutate(|s| {
-            let ws = s
-                .find_workspace_mut(&args.workspace_id)
-                .ok_or_else(|| AppError::WorkspaceNotFound(args.workspace_id.clone()))?;
+        .update_workspace(&args.workspace_id, |ws| {
             // Resuming? Drop the prior meta for this Claude conversation so
             // we don't accumulate dormant duplicates with the same
             // claude_session_id across runs.
@@ -1553,7 +1503,6 @@ async fn spawn_claude(
         })
         .await?;
 
-    emit_workspace_changed(app, &args.workspace_id);
     Ok(info)
 }
 
@@ -1568,31 +1517,21 @@ pub struct SetClaudeHiddenArgs {
 /// tmux session and the supervisor's `SessionHandle` keep running.
 #[tauri::command]
 pub async fn set_claude_session_hidden(
-    app: AppHandle,
     store: State<'_, Arc<Store>>,
     args: SetClaudeHiddenArgs,
 ) -> AppResult<()> {
-    let touched = store
-        .mutate(|s| {
-            let ws = s
-                .find_workspace_mut(&args.workspace_id)
-                .ok_or_else(|| AppError::WorkspaceNotFound(args.workspace_id.clone()))?;
-            let Some(meta) = ws.session_mut(&args.session_id) else {
-                return Ok(false);
-            };
+    store
+        .update_workspace(&args.workspace_id, |ws| {
+            let meta = ws.session_mut(&args.session_id).ok_or_else(|| {
+                AppError::Other(format!(
+                    "session {} not found in workspace {}",
+                    args.session_id, args.workspace_id
+                ))
+            })?;
             meta.hidden = args.hidden;
-            Ok(true)
+            Ok(())
         })
         .await?;
-
-    if !touched {
-        return Err(AppError::Other(format!(
-            "session {} not found in workspace {}",
-            args.session_id, args.workspace_id
-        )));
-    }
-
-    emit_workspace_changed(&app, &args.workspace_id);
     Ok(())
 }
 
@@ -1611,10 +1550,7 @@ pub async fn set_workspace_notes(
     args: SetWorkspaceNotesArgs,
 ) -> AppResult<()> {
     store
-        .mutate(|s| {
-            let ws = s
-                .find_workspace_mut(&args.workspace_id)
-                .ok_or_else(|| AppError::WorkspaceNotFound(args.workspace_id.clone()))?;
+        .update_workspace_quiet(&args.workspace_id, |ws| {
             ws.notes = args.notes;
             Ok(())
         })

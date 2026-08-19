@@ -184,13 +184,11 @@ impl SessionSupervisor {
         );
         let persist = self
             .store
-            .mutate(|s| {
-                if let Some(ws) = s.find_workspace_mut(workspace_id) {
-                    if let Some(meta) = ws.session_mut(session_id) {
-                        meta.runtime_state = Some(state);
-                        meta.notification_type = notification_type.clone();
-                        meta.turn_acknowledged = false;
-                    }
+            .update_workspace_quiet(workspace_id, |ws| {
+                if let Some(meta) = ws.session_mut(session_id) {
+                    meta.runtime_state = Some(state);
+                    meta.notification_type = notification_type.clone();
+                    meta.turn_acknowledged = false;
                 }
                 Ok(())
             })
@@ -273,11 +271,9 @@ impl SessionSupervisor {
                 let csid = new_csid.clone();
                 let healed = self
                     .store
-                    .mutate(move |s| {
-                        if let Some(ws) = s.find_workspace_mut(&ws) {
-                            if let Some(m) = ws.session_mut(&sid) {
-                                m.claude_session_id = Some(csid);
-                            }
+                    .update_workspace_quiet(&ws, move |ws| {
+                        if let Some(m) = ws.session_mut(&sid) {
+                            m.claude_session_id = Some(csid);
                         }
                         Ok(())
                     })
@@ -344,11 +340,9 @@ impl SessionSupervisor {
             }),
         );
         self.store
-            .mutate(|s| {
-                if let Some(ws) = s.find_workspace_mut(workspace_id) {
-                    if let Some(meta) = ws.session_mut(session_id) {
-                        meta.turn_acknowledged = true;
-                    }
+            .update_workspace_quiet(workspace_id, |ws| {
+                if let Some(meta) = ws.session_mut(session_id) {
+                    meta.turn_acknowledged = true;
                 }
                 Ok(())
             })
@@ -694,10 +688,7 @@ impl SessionSupervisor {
 
         let update = self
             .store
-            .mutate(|state| {
-                let Some(ws) = state.find_workspace_mut(&workspace_id) else {
-                    return Ok(false);
-                };
+            .update_workspace(&workspace_id, |ws| {
                 let Some(session) = ws.session_mut(&session_id) else {
                     return Ok(false);
                 };
@@ -714,10 +705,6 @@ impl SessionSupervisor {
                     %claude_session_id,
                     source = msg.source.as_deref().unwrap_or("?"),
                     "correlated SessionStart hook",
-                );
-                let _ = self.app.emit(
-                    "workspace:changed",
-                    serde_json::json!({ "workspace_id": workspace_id }),
                 );
             }
             Ok(false) => warn!(

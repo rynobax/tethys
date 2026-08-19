@@ -313,10 +313,8 @@ fn script_exit_hook(
         let id_for_state = script_id.clone();
         tauri::async_runtime::spawn(async move {
             let _ = store
-                .mutate(|s| {
-                    if let Some(ws) = s.find_workspace_mut(&workspace_id_for_state) {
-                        ws.script_runs.retain(|m| m.id != id_for_state);
-                    }
+                .update_workspace(&workspace_id_for_state, |ws| {
+                    ws.script_runs.retain(|m| m.id != id_for_state);
                     Ok(())
                 })
                 .await;
