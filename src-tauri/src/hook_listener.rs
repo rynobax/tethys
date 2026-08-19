@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
@@ -9,17 +8,9 @@ use tracing::{debug, error, info, warn};
 use crate::error::AppResult;
 use crate::sessions::SessionSupervisor;
 
-/// Payload sent by `tethys-hook` over the UDS. Mirrors the companion
-/// binary's `HookMessage` struct — keep these in sync.
-#[derive(Debug, Deserialize)]
-pub struct HookMessage {
-    pub event: String,
-    pub session_id: Option<String>,
-    pub transcript_path: Option<String>,
-    pub source: Option<String>,
-    pub notification_type: Option<String>,
-    pub spawn_token: Option<String>,
-}
+/// Payload sent by `tethys-hook` over the UDS. Defined once in the companion
+/// crate so the sender can't grow a field the receiver silently drops.
+pub use tethys_hook::HookMessage;
 
 /// Bind `hook.sock` and spawn an accept loop. If the socket already exists
 /// (prior run crashed without cleanup), remove it first.

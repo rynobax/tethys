@@ -1,4 +1,4 @@
-import type { ChecksRollup, GithubPrStatus, RepoLink, Workspace } from "./types";
+import type { GithubPrStatus, RepoLink, Workspace } from "./types";
 
 /**
  * Five minutes — several missed ticks at the poller's 45s base interval. Past
@@ -41,37 +41,4 @@ export function isReadyToDelete(ws: Workspace): boolean {
   const prs = workspacePrs(ws);
   if (prs.length === 0) return false;
   return prs.every((pr) => pr.state === "merged");
-}
-
-/**
- * Worst-case rollup across all open PRs in the workspace.
- * Failure > Pending > Success. Neutral/None are ignored.
- */
-export function checksSummary(ws: Workspace): ChecksRollup | null {
-  let worst: ChecksRollup | null = null;
-  for (const pr of workspacePrs(ws)) {
-    if (pr.state !== "open") continue;
-    if (pr.has_merge_conflicts) return "failure";
-    const c = pr.checks;
-    if (c === "failure") return "failure";
-    if (c === "pending") worst = "pending";
-    else if (c === "success" && worst === null) worst = "success";
-  }
-  return worst;
-}
-
-/** Sum of unresolved review threads across all open PRs. */
-export function unresolvedTotal(ws: Workspace): number {
-  let sum = 0;
-  for (const pr of workspacePrs(ws)) {
-    if (pr.state === "open") sum += pr.unresolved_threads;
-  }
-  return sum;
-}
-
-/** Find the primary PR chip to show on a workspace row — the first open PR, else first. */
-export function primaryRepoLink(ws: Workspace): RepoLink | null {
-  const open = ws.repo_links.find((r) => r.github?.state === "open");
-  if (open) return open;
-  return ws.repo_links.find((r) => r.github !== null) ?? null;
 }

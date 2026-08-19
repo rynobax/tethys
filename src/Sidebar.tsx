@@ -21,6 +21,7 @@ import { CSS } from "@dnd-kit/utilities";
 
 import type { Workspace, WorkspaceId } from "./types";
 import { GithubChip } from "./GithubChip";
+import { linkPrs } from "./workspaceDerived";
 
 type Props = {
   /** Workspaces that should appear in the sidebar (soft-deleted already filtered out). */
@@ -341,7 +342,7 @@ function WorkspaceRow({
           {workspace.repo_links.map((r) => (
             <li key={r.repo_key}>
               <span className="repo-key">{r.repo_key}</span>
-              {(r.github || r.attached_prs.length > 0) && (
+              {linkPrs(r).length > 0 && (
                 <div className="repo-gh-footer">
                   {r.github && <GithubChip status={r.github} linkable={false} />}
                   {r.attached_prs.map(

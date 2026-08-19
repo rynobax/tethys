@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Claude Code hook companion binary — forwards hook events to the Tethys app via UDS"
 
+[lib]
+name = "tethys_hook"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tethys-hook"
 path = "src/main.rs"

@@ -75,8 +75,14 @@ impl GithubPoller {
                 _ = tokio::time::sleep(delay) => {}
                 _ = self.force.notified() => {}
             }
+            // Disabled means `gh` wasn't installed when we last looked. Park
+            // (next_delay is effectively infinite) rather than returning —
+            // `probe_login` can flip us back to Authenticated once the user
+            // installs it, and it notifies `force` to wake us. Returning here
+            // killed the loop for the rest of the process's life while the UI
+            // happily reported "authenticated".
             if self.inner.lock().await.auth == AuthState::Disabled {
-                return;
+                continue;
             }
             self.tick().await;
         }
@@ -281,6 +287,12 @@ impl GithubPoller {
         };
         if changed {
             self.emit_auth_changed().await;
+            // If we just came back from Disabled, the run loop is parked on an
+            // effectively-infinite sleep. Wake it so polling resumes now
+            // instead of never.
+            if new_auth != AuthState::Disabled {
+                self.force.notify_one();
+            }
         }
         returned
     }

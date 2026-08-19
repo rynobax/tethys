@@ -19,7 +19,9 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+
+use tethys_hook::HookMessage;
 
 /// Fields we care about from Claude Code's hook payload. Every field is
 /// optional so unknown hook events or schema shifts don't break us.
@@ -35,25 +37,6 @@ struct HookInput {
     notification_type: Option<String>,
     stop_hook_active: Option<bool>,
     last_assistant_message: Option<String>,
-}
-
-/// What we send over the UDS. Flattened (no nesting) for simpler Rust-side
-/// parsing.
-#[derive(Serialize)]
-struct HookMessage {
-    event: String,
-    session_id: Option<String>,
-    cwd: Option<String>,
-    transcript_path: Option<String>,
-    hook_event_name: Option<String>,
-    source: Option<String>,
-    message: Option<String>,
-    notification_type: Option<String>,
-    stop_hook_active: Option<bool>,
-    last_assistant_message: Option<String>,
-    /// Tethys-injected: matches the UUID set as `TETHYS_SPAWN_TOKEN` on the
-    /// PTY. `None` for sessions Tethys didn't spawn.
-    spawn_token: Option<String>,
 }
 
 fn main() {

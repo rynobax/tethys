@@ -1,10 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use tracing::{info, warn};
-
-use crate::error::{AppError, AppResult};
-use crate::shell::extract_path;
+use crate::error::AppResult;
+use crate::shell;
 
 /// Socket label for the tmux server Tethys uses. Kept distinct from the
 /// user's personal tmux so their `~/.tmux.conf` isn't loaded, their
@@ -15,35 +13,10 @@ pub const SOCKET_LABEL: &str = "tethys";
 /// Newtype managed in Tauri state, like `ClaudeBin`.
 pub struct TmuxBin(pub PathBuf);
 
-/// Resolve the absolute path to `tmux` via a login shell, mirroring
-/// `claude::resolve` — desktop apps on macOS don't inherit Homebrew's bin
-/// dir in PATH, so we shell out to zsh.
+/// Resolve the absolute path to `tmux` via a login shell — desktop apps on
+/// macOS don't inherit Homebrew's bin dir in PATH.
 pub fn resolve() -> AppResult<PathBuf> {
-    let output = Command::new("/bin/zsh")
-        .args(["-ilc", "which tmux"])
-        .output()
-        .map_err(|e| AppError::Other(format!("failed to invoke /bin/zsh: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(AppError::Other(format!(
-            "`which tmux` via /bin/zsh failed: {}",
-            if stderr.is_empty() { "no stderr" } else { &stderr }
-        )));
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let path = extract_path(&raw);
-
-    if path.is_empty() || !path.starts_with('/') {
-        warn!(?path, "tmux not on login-shell PATH");
-        return Err(AppError::Other(
-            "tmux not found — install with `brew install tmux` and make sure `which tmux` works in a login shell".into(),
-        ));
-    }
-
-    info!(%path, "resolved tmux binary");
-    Ok(PathBuf::from(path))
+    shell::which("tmux", Some("brew install tmux"))
 }
 
 /// `true` if the tmux session named `session_id` exists on the Tethys

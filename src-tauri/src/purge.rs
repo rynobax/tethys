@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::git;
+use crate::job::JobTx;
 use crate::paths::Paths;
 use crate::pending_permissions;
 use crate::reconcile;
@@ -48,6 +49,10 @@ pub async fn purge_workspace(
         );
     }
 
+    // The purger runs in the background with no job channel to stream to, so
+    // its git output is discarded — but failures still carry the stderr tail.
+    let tx = JobTx::silent();
+
     for link in &workspace.repo_links {
         let clone_path = paths.repo_clone_path(&link.repo_key);
 
@@ -68,12 +73,14 @@ pub async fn purge_workspace(
             continue;
         }
 
-        git::worktree_remove_silent(&clone_path, &link.worktree_path, true).await?;
-        git::worktree_prune_best_effort_silent(&clone_path).await;
+        git::worktree_remove(&clone_path, &link.worktree_path, true, &tx, &link.repo_key)
+            .await?;
+        git::worktree_prune_best_effort(&clone_path, &tx, &link.repo_key).await;
         // Only delete branches Tethys created — a pre-existing branch checked
         // out for local edits (e.g. a PR branch) must survive the purge.
         if link.created_branch {
-            git::branch_delete_best_effort_silent(&clone_path, &workspace.branch).await;
+            git::branch_delete_best_effort(&clone_path, &workspace.branch, &tx, &link.repo_key)
+                .await;
         }
     }
 

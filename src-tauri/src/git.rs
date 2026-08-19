@@ -8,9 +8,52 @@ use tokio::process::Command;
 use crate::error::{AppError, AppResult};
 use crate::job::{JobTx, LogStream};
 
+/// How many trailing stderr lines `run_streamed` keeps so a failure can say
+/// *why* it failed, not just which exit code it produced.
+const STDERR_TAIL_LINES: usize = 10;
+
+/// Outcome of a streamed child process: the exit status plus the tail of its
+/// stderr. The tail is what turns "exited with Some(128)" into an error the
+/// user can act on — the lines went to the log pane either way, but a job that
+/// fails outside a visible log pane (the background purger, a rollback) has
+/// nowhere else to surface them.
+pub struct RunOutcome {
+    pub status: std::process::ExitStatus,
+    stderr_tail: Vec<String>,
+}
+
+impl RunOutcome {
+    pub fn success(&self) -> bool {
+        self.status.success()
+    }
+
+    /// `Ok(())` on a zero exit, otherwise an error naming the operation, the
+    /// exit code, and the captured stderr tail.
+    pub fn check(&self, op: impl std::fmt::Display) -> AppResult<()> {
+        if self.status.success() {
+            return Ok(());
+        }
+        Err(AppError::Other(self.failure_message(op)))
+    }
+
+    /// The same message `check` produces, for best-effort callers that report
+    /// a failure without bubbling it.
+    pub fn failure_message(&self, op: impl std::fmt::Display) -> String {
+        let mut msg = format!("{op} exited with {:?}", self.status.code());
+        if !self.stderr_tail.is_empty() {
+            msg.push_str(": ");
+            msg.push_str(&self.stderr_tail.join("; "));
+        }
+        msg
+    }
+}
+
 /// Run a child process, streaming each line of stdout/stderr as `JobEvent::Log`
 /// via the provided `JobTx`. Blocks until the child exits. Returns the exit
-/// status so the caller decides what to do on non-zero.
+/// status and stderr tail so the caller decides what to do on non-zero.
+///
+/// Pass `JobTx::silent()` for a background job with no UI channel — the events
+/// are discarded but the stderr tail still comes back on the outcome.
 ///
 /// `repo` is attached to each emitted event so the UI can group output by repo.
 pub async fn run_streamed<I, S>(
@@ -19,7 +62,7 @@ pub async fn run_streamed<I, S>(
     cwd: Option<&Path>,
     tx: &JobTx,
     repo: Option<&str>,
-) -> AppResult<std::process::ExitStatus>
+) -> AppResult<RunOutcome>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -42,20 +85,23 @@ where
     let tx_out = tx.clone();
     let repo_out = repo.map(String::from);
     let stdout_task = tokio::spawn(async move {
-        drain_lines(stdout, &tx_out, LogStream::Stdout, repo_out.as_deref()).await;
+        drain_lines(stdout, &tx_out, LogStream::Stdout, repo_out.as_deref()).await
     });
 
     let tx_err = tx.clone();
     let repo_err = repo.map(String::from);
     let stderr_task = tokio::spawn(async move {
-        drain_lines(stderr, &tx_err, LogStream::Stderr, repo_err.as_deref()).await;
+        drain_lines(stderr, &tx_err, LogStream::Stderr, repo_err.as_deref()).await
     });
 
     let status = child.wait().await?;
     let _ = stdout_task.await;
-    let _ = stderr_task.await;
+    let stderr_tail = stderr_task.await.unwrap_or_default();
 
-    Ok(status)
+    Ok(RunOutcome {
+        status,
+        stderr_tail,
+    })
 }
 
 /// Probe whether `clone_path` looks like a complete git clone by asking
@@ -80,12 +126,23 @@ async fn is_valid_clone(clone_path: &Path) -> bool {
 /// a `JobEvent::Log`. Without splitting on `\r`, progress lines never
 /// surface — the user just sees "Cloning into..." and then nothing for
 /// minutes while the clone runs.
+/// Returns the last [`STDERR_TAIL_LINES`] non-empty segments so the caller can
+/// attach them to a failure. Bounded, so a multi-minute clone's progress output
+/// doesn't accumulate.
 async fn drain_lines<R: AsyncRead + Unpin>(
     mut reader: R,
     tx: &JobTx,
     stream: LogStream,
     repo: Option<&str>,
-) {
+) -> Vec<String> {
+    let mut tail: std::collections::VecDeque<String> =
+        std::collections::VecDeque::with_capacity(STDERR_TAIL_LINES);
+    let mut push_tail = |line: &str| {
+        if tail.len() == STDERR_TAIL_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(line.to_string());
+    };
     let mut buf = [0u8; 4096];
     let mut line: Vec<u8> = Vec::with_capacity(256);
     loop {
@@ -95,11 +152,9 @@ async fn drain_lines<R: AsyncRead + Unpin>(
                 for &byte in &buf[..n] {
                     if byte == b'\n' || byte == b'\r' {
                         if !line.is_empty() {
-                            tx.log(
-                                stream,
-                                String::from_utf8_lossy(&line).into_owned(),
-                                repo,
-                            );
+                            let text = String::from_utf8_lossy(&line).into_owned();
+                            push_tail(&text);
+                            tx.log(stream, text, repo);
                             line.clear();
                         }
                     } else {
@@ -111,8 +166,11 @@ async fn drain_lines<R: AsyncRead + Unpin>(
         }
     }
     if !line.is_empty() {
-        tx.log(stream, String::from_utf8_lossy(&line).into_owned(), repo);
+        let text = String::from_utf8_lossy(&line).into_owned();
+        push_tail(&text);
+        tx.log(stream, text, repo);
     }
+    tail.into()
 }
 
 /// Clone `remote_url` into `clone_path` if it's not already a valid clone.
@@ -155,7 +213,7 @@ pub async fn ensure_clone(
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    let status = run_streamed(
+    run_streamed(
         "git",
         [
             "clone".as_ref(),
@@ -170,14 +228,8 @@ pub async fn ensure_clone(
         tx,
         Some(repo),
     )
-    .await?;
-
-    if !status.success() {
-        return Err(AppError::Other(format!(
-            "git clone {remote_url} exited with {:?}",
-            status.code()
-        )));
-    }
+    .await?
+    .check(format!("git clone {remote_url}"))?;
     Ok(())
 }
 
@@ -194,14 +246,9 @@ pub async fn pull_clone(clone_path: &Path, tx: &JobTx, repo: &str) -> AppResult<
         "pull".as_ref(),
         "--ff-only".as_ref(),
     ];
-    let status = run_streamed("git", args, None, tx, Some(repo)).await?;
-    if !status.success() {
-        return Err(AppError::Other(format!(
-            "git pull --ff-only in {} exited with {:?}",
-            clone_path.display(),
-            status.code()
-        )));
-    }
+    run_streamed("git", args, None, tx, Some(repo))
+        .await?
+        .check(format!("git pull --ff-only in {}", clone_path.display()))?;
     Ok(())
 }
 
@@ -270,15 +317,9 @@ pub async fn worktree_add(
         }
     }
 
-    let status = run_streamed("git", args, None, tx, Some(repo)).await?;
-
-    if !status.success() {
-        return Err(AppError::Other(format!(
-            "git worktree add {} exited with {:?}",
-            worktree_path.display(),
-            status.code()
-        )));
-    }
+    run_streamed("git", args, None, tx, Some(repo))
+        .await?
+        .check(format!("git worktree add {}", worktree_path.display()))?;
     Ok(())
 }
 
@@ -330,14 +371,12 @@ pub async fn ensure_clone_on_default_branch(
         "checkout".as_ref(),
         default.as_ref(),
     ];
-    let status = run_streamed("git", args, None, tx, Some(repo)).await?;
-    if !status.success() {
-        return Err(AppError::Other(format!(
-            "git checkout {default} in {} exited with {:?}",
-            clone_path.display(),
-            status.code()
-        )));
-    }
+    run_streamed("git", args, None, tx, Some(repo))
+        .await?
+        .check(format!(
+            "git checkout {default} in {}",
+            clone_path.display()
+        ))?;
     Ok(())
 }
 
@@ -425,11 +464,8 @@ pub async fn worktree_prune_best_effort(clone_path: &Path, tx: &JobTx, repo: &st
         "prune".as_ref(),
     ];
     match run_streamed("git", args, None, tx, Some(repo)).await {
-        Ok(status) if status.success() => {}
-        Ok(status) => tx.status(
-            format!("worktree prune exited with {:?}", status.code()),
-            Some(repo),
-        ),
+        Ok(outcome) if outcome.success() => {}
+        Ok(outcome) => tx.status(outcome.failure_message("worktree prune"), Some(repo)),
         Err(e) => tx.status(format!("worktree prune failed: {e}"), Some(repo)),
     }
 }
@@ -453,70 +489,16 @@ pub async fn branch_delete_best_effort(
         branch.as_ref(),
     ];
     match run_streamed("git", args, None, tx, Some(repo)).await {
-        Ok(status) if status.success() => {}
-        Ok(status) => tx.status(
-            format!("branch -D {branch} exited with {:?} (already gone?)", status.code()),
+        Ok(outcome) if outcome.success() => {}
+        Ok(outcome) => tx.status(
+            format!(
+                "{} (already gone?)",
+                outcome.failure_message(format!("branch -D {branch}"))
+            ),
             Some(repo),
         ),
-        Err(e) => tx.status(
-            format!("branch -D {branch} failed: {e}"),
-            Some(repo),
-        ),
+        Err(e) => tx.status(format!("branch -D {branch} failed: {e}"), Some(repo)),
     }
-}
-
-/// `git -C <clone_path> worktree remove <worktree_path>`. Silent variant
-/// for the background purger: no `JobTx`, no per-line streaming.
-pub async fn worktree_remove_silent(
-    clone_path: &Path,
-    worktree_path: &Path,
-    force: bool,
-) -> AppResult<()> {
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.arg("-C")
-        .arg(clone_path)
-        .arg("worktree")
-        .arg("remove");
-    if force {
-        cmd.arg("--force");
-    }
-    cmd.arg(worktree_path);
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| AppError::Other(format!("git worktree remove: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(AppError::Other(format!(
-            "git worktree remove {} exited with {:?}: {stderr}",
-            worktree_path.display(),
-            output.status.code()
-        )));
-    }
-    Ok(())
-}
-
-/// `git -C <clone_path> worktree prune`. Silent best-effort variant.
-pub async fn worktree_prune_best_effort_silent(clone_path: &Path) {
-    let _ = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(clone_path)
-        .arg("worktree")
-        .arg("prune")
-        .output()
-        .await;
-}
-
-/// `git -C <clone_path> branch -D <branch>`. Silent best-effort variant.
-pub async fn branch_delete_best_effort_silent(clone_path: &Path, branch: &str) {
-    let _ = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(clone_path)
-        .arg("branch")
-        .arg("-D")
-        .arg(branch)
-        .output()
-        .await;
 }
 
 /// `git -C <clone_path> worktree remove <worktree_path>`. Returns an error if
@@ -544,15 +526,9 @@ pub async fn worktree_remove(
     }
     args.push(worktree_path.as_os_str());
 
-    let status = run_streamed("git", args, None, tx, Some(repo)).await?;
-
-    if !status.success() {
-        return Err(AppError::Other(format!(
-            "git worktree remove {} exited with {:?}",
-            worktree_path.display(),
-            status.code()
-        )));
-    }
+    run_streamed("git", args, None, tx, Some(repo))
+        .await?
+        .check(format!("git worktree remove {}", worktree_path.display()))?;
     Ok(())
 }
 
@@ -611,8 +587,103 @@ mod tests {
     }
 
     fn noop_tx() -> JobTx {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        JobTx(tx)
+        JobTx::silent()
+    }
+
+    /// A `JobTx` whose receiver stays alive so tests can assert on the
+    /// emitted log lines.
+    fn recording_tx() -> (JobTx, tokio::sync::mpsc::UnboundedReceiver<crate::job::JobEvent>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (JobTx(tx), rx)
+    }
+
+    fn logged_lines(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::job::JobEvent>,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let crate::job::JobEvent::Log { line, .. } = ev {
+                out.push(line);
+            }
+        }
+        out
+    }
+
+    /// Progress output that overwrites its line with a bare `\r` must still
+    /// reach the log pane. Without `\r` splitting a multi-minute clone shows
+    /// "Cloning into..." and then nothing at all.
+    #[tokio::test]
+    async fn splits_progress_output_on_carriage_returns() {
+        let (tx, mut rx) = recording_tx();
+        let outcome = run_streamed(
+            "/bin/sh",
+            ["-c", "printf 'a\rb\rc\n'"],
+            None,
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.success());
+        assert_eq!(logged_lines(&mut rx), vec!["a", "b", "c"]);
+    }
+
+    /// A failure must name the reason, not just the exit code — the purger and
+    /// the create-rollback path have no log pane to fall back on.
+    #[tokio::test]
+    async fn failure_carries_the_stderr_tail() {
+        let (tx, _rx) = recording_tx();
+        let outcome = run_streamed(
+            "/bin/sh",
+            ["-c", "echo 'fatal: not a git repository' >&2; exit 128"],
+            None,
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let err = outcome.check("git status").unwrap_err().to_string();
+        assert!(err.contains("git status"), "{err}");
+        assert!(err.contains("128"), "{err}");
+        assert!(err.contains("fatal: not a git repository"), "{err}");
+    }
+
+    /// Only the tail is kept, so a chatty child can't accumulate unboundedly.
+    #[tokio::test]
+    async fn stderr_tail_is_bounded() {
+        let (tx, _rx) = recording_tx();
+        let outcome = run_streamed(
+            "/bin/sh",
+            ["-c", "for i in $(seq 1 50); do echo line$i >&2; done; exit 1"],
+            None,
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let msg = outcome.failure_message("op");
+        assert!(msg.contains("line50"), "keeps the last line: {msg}");
+        assert!(!msg.contains("line40"), "drops older lines: {msg}");
+    }
+
+    /// `JobTx::silent()` has no receiver; sends must not panic or block.
+    #[tokio::test]
+    async fn silent_sink_discards_output() {
+        let outcome = run_streamed(
+            "/bin/sh",
+            ["-c", "echo hello; echo oops >&2; exit 3"],
+            None,
+            &JobTx::silent(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(!outcome.success());
+        assert!(outcome.failure_message("op").contains("oops"));
     }
 
     #[tokio::test]

@@ -41,6 +41,15 @@ pub enum LogStream {
 pub struct JobTx(pub UnboundedSender<JobEvent>);
 
 impl JobTx {
+    /// A sink whose events go nowhere. For background jobs with no UI channel
+    /// (the purger, a create rollback) that still want the same git functions
+    /// the foreground path uses. Sends already discard their error, so a
+    /// dropped receiver is the designed behaviour, not a special case.
+    pub fn silent() -> Self {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        JobTx(tx)
+    }
+
     pub fn status(&self, message: impl Into<String>, repo: Option<&str>) {
         let _ = self.0.send(JobEvent::Status {
             message: message.into(),
