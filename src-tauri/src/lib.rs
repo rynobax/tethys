@@ -14,6 +14,7 @@ mod logging;
 mod paths;
 mod pending_permissions;
 mod probe;
+mod provision;
 mod pty;
 mod purge;
 mod reconcile;

@@ -102,9 +102,233 @@ fn parse_number(s: &str) -> Option<u32> {
     s.parse::<u32>().ok().filter(|n| *n > 0)
 }
 
+/// Decide which of a workspace's GitHub-backed repos a pasted PR reference
+/// belongs to.
+///
+/// Six distinguishable failure modes live here, and until this moved out of
+/// `attach_pr` none of them could be tested: the function around them took two
+/// Tauri `State` handles and hit the network before any of this was
+/// observable.
+///
+/// `candidates` is `(repo_key, slug)` for the workspace's GitHub-linked repos
+/// only — a repo with no `github_slug` has nothing to query.
+pub fn resolve_attach_target(
+    candidates: &[(String, GithubSlug)],
+    explicit_repo_key: Option<&str>,
+    parsed: &PrRef,
+) -> Result<(String, GithubSlug), AttachError> {
+    let (repo_key, slug) = match (explicit_repo_key, &parsed.slug) {
+        (Some(key), _) => candidates
+            .iter()
+            .find(|(k, _)| k == key)
+            .cloned()
+            .ok_or_else(|| AttachError::NotAGithubRepo {
+                repo_key: key.to_string(),
+            })?,
+        (None, Some(want)) => candidates
+            .iter()
+            .find(|(_, slug)| slug == want)
+            .cloned()
+            .ok_or_else(|| AttachError::NoRepoForSlug {
+                slug: want.clone(),
+            })?,
+        (None, None) if candidates.len() == 1 => candidates[0].clone(),
+        (None, None) if candidates.is_empty() => return Err(AttachError::NoGithubRepos),
+        (None, None) => return Err(AttachError::Ambiguous),
+    };
+
+    // An explicit repo plus a URL naming a different one is a mistake worth
+    // reporting rather than silently trusting one over the other.
+    if let Some(want) = &parsed.slug {
+        if want != &slug {
+            return Err(AttachError::SlugMismatch {
+                number: parsed.number,
+                pasted: want.clone(),
+                repo_key,
+                configured: slug,
+            });
+        }
+    }
+    Ok((repo_key, slug))
+}
+
+/// Why a PR reference couldn't be pinned to one repo.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AttachError {
+    /// An explicit repo key that isn't a GitHub-linked repo in this workspace.
+    NotAGithubRepo { repo_key: String },
+    /// A pasted URL for a repo this workspace doesn't contain.
+    NoRepoForSlug { slug: GithubSlug },
+    /// A bare number, and no GitHub-linked repo to attach it to.
+    NoGithubRepos,
+    /// A bare number, and more than one repo it could belong to.
+    Ambiguous,
+    /// The pasted URL and the chosen repo disagree.
+    SlugMismatch {
+        number: u32,
+        pasted: GithubSlug,
+        repo_key: String,
+        configured: GithubSlug,
+    },
+}
+
+impl std::fmt::Display for AttachError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AttachError::NotAGithubRepo { repo_key } => {
+                write!(f, "{repo_key} isn't a GitHub-linked repo in this workspace")
+            }
+            AttachError::NoRepoForSlug { slug } => write!(
+                f,
+                "no repo in this workspace points at {}/{}",
+                slug.owner, slug.name
+            ),
+            AttachError::NoGithubRepos => {
+                write!(f, "this workspace has no GitHub-linked repos to attach a PR to")
+            }
+            AttachError::Ambiguous => write!(
+                f,
+                "this workspace has more than one GitHub repo — pick which one the PR belongs to"
+            ),
+            AttachError::SlugMismatch {
+                number,
+                pasted,
+                repo_key,
+                configured,
+            } => write!(
+                f,
+                "PR #{number} is in {}/{}, but repo {repo_key} points at {}/{}",
+                pasted.owner, pasted.name, configured.owner, configured.name
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gs(owner: &str, name: &str) -> GithubSlug {
+        GithubSlug {
+            owner: owner.into(),
+            name: name.into(),
+        }
+    }
+
+    fn candidates(pairs: &[(&str, &str, &str)]) -> Vec<(String, GithubSlug)> {
+        pairs
+            .iter()
+            .map(|(key, owner, name)| (key.to_string(), gs(owner, name)))
+            .collect()
+    }
+
+    fn bare(number: u32) -> PrRef {
+        PrRef { slug: None, number }
+    }
+
+    fn qualified(owner: &str, name: &str, number: u32) -> PrRef {
+        PrRef {
+            slug: Some(gs(owner, name)),
+            number,
+        }
+    }
+
+    /// One GitHub repo in the workspace: a bare number is unambiguous.
+    #[test]
+    fn a_bare_number_resolves_when_there_is_only_one_repo() {
+        let c = candidates(&[("api", "me", "api")]);
+        let (key, s) = resolve_attach_target(&c, None, &bare(12)).unwrap();
+        assert_eq!(key, "api");
+        assert_eq!(s, gs("me", "api"));
+    }
+
+    #[test]
+    fn a_bare_number_is_ambiguous_with_two_repos() {
+        let c = candidates(&[("api", "me", "api"), ("web", "me", "web")]);
+        assert_eq!(
+            resolve_attach_target(&c, None, &bare(12)),
+            Err(AttachError::Ambiguous)
+        );
+    }
+
+    /// Distinct from ambiguity: there is nothing to attach to at all, and
+    /// saying "pick which one" would be nonsense.
+    #[test]
+    fn a_bare_number_with_no_github_repos_says_so() {
+        assert_eq!(
+            resolve_attach_target(&[], None, &bare(12)),
+            Err(AttachError::NoGithubRepos)
+        );
+    }
+
+    #[test]
+    fn a_pasted_url_picks_its_own_repo_out_of_several() {
+        let c = candidates(&[("api", "me", "api"), ("web", "me", "web")]);
+        let (key, _) = resolve_attach_target(&c, None, &qualified("me", "web", 3)).unwrap();
+        assert_eq!(key, "web");
+    }
+
+    #[test]
+    fn a_pasted_url_for_a_repo_outside_the_workspace_is_rejected() {
+        let c = candidates(&[("api", "me", "api")]);
+        assert_eq!(
+            resolve_attach_target(&c, None, &qualified("other", "thing", 3)),
+            Err(AttachError::NoRepoForSlug {
+                slug: gs("other", "thing")
+            })
+        );
+    }
+
+    #[test]
+    fn an_explicit_repo_key_wins_for_a_bare_number() {
+        let c = candidates(&[("api", "me", "api"), ("web", "me", "web")]);
+        let (key, _) = resolve_attach_target(&c, Some("web"), &bare(9)).unwrap();
+        assert_eq!(key, "web");
+    }
+
+    #[test]
+    fn an_explicit_repo_key_that_is_not_github_linked_is_rejected() {
+        let c = candidates(&[("api", "me", "api")]);
+        assert_eq!(
+            resolve_attach_target(&c, Some("docs"), &bare(9)),
+            Err(AttachError::NotAGithubRepo {
+                repo_key: "docs".into()
+            })
+        );
+    }
+
+    /// Picking a repo and pasting a URL for a different one is a mistake worth
+    /// reporting rather than silently trusting one over the other.
+    #[test]
+    fn an_explicit_repo_disagreeing_with_the_pasted_url_is_reported() {
+        let c = candidates(&[("api", "me", "api"), ("web", "me", "web")]);
+        let err = resolve_attach_target(&c, Some("api"), &qualified("me", "web", 42)).unwrap_err();
+        assert_eq!(
+            err,
+            AttachError::SlugMismatch {
+                number: 42,
+                pasted: gs("me", "web"),
+                repo_key: "api".into(),
+                configured: gs("me", "api"),
+            }
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("#42") && msg.contains("me/web") && msg.contains("me/api"), "{msg}");
+    }
+
+    /// Every failure mode has to render as something a user can act on.
+    #[test]
+    fn every_failure_mode_has_a_message() {
+        for err in [
+            AttachError::NotAGithubRepo { repo_key: "x".into() },
+            AttachError::NoRepoForSlug { slug: gs("a", "b") },
+            AttachError::NoGithubRepos,
+            AttachError::Ambiguous,
+        ] {
+            assert!(!err.to_string().is_empty(), "{err:?}");
+        }
+    }
+
 
     fn slug(owner: &str, name: &str) -> Option<GithubSlug> {
         Some(GithubSlug {

@@ -275,6 +275,62 @@ pub enum WorktreeBranch<'a> {
     ExistingLocal,
 }
 
+/// How a worktree's branch should be resolved, and whether Tethys owns it.
+///
+/// Owning a branch is the whole of the teardown contract: Purge deletes only
+/// branches Tethys created, so a pre-existing branch checked out for local
+/// edits (a PR branch, say) survives. That rule used to be four lines inline
+/// between two awaits in a 2000-line command module, where it could only be
+/// exercised by provisioning a real workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchPlan {
+    pub source: OwnedWorktreeBranch,
+    /// Tethys may delete this branch on teardown only if it created it.
+    pub created_branch: bool,
+}
+
+/// Owned twin of [`WorktreeBranch`], so the decision can be made (and tested)
+/// separately from the borrow that runs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnedWorktreeBranch {
+    NewFromHead,
+    TrackRemote(String),
+    ExistingLocal,
+}
+
+impl OwnedWorktreeBranch {
+    pub fn as_ref(&self) -> WorktreeBranch<'_> {
+        match self {
+            OwnedWorktreeBranch::NewFromHead => WorktreeBranch::NewFromHead,
+            OwnedWorktreeBranch::TrackRemote(s) => WorktreeBranch::TrackRemote(s),
+            OwnedWorktreeBranch::ExistingLocal => WorktreeBranch::ExistingLocal,
+        }
+    }
+}
+
+/// Decide how to resolve `branch` given what already exists.
+///
+/// A local branch is checked out as-is; git refuses if another worktree
+/// already has it, which is the guard against two workspaces sharing a branch.
+/// A branch that only exists on the remote gets a fresh local tracking branch.
+/// Otherwise we branch off the clone's HEAD.
+pub fn plan_branch(branch: &str, local_exists: bool, remote_exists: bool) -> BranchPlan {
+    match (local_exists, remote_exists) {
+        (true, _) => BranchPlan {
+            source: OwnedWorktreeBranch::ExistingLocal,
+            created_branch: false,
+        },
+        (false, true) => BranchPlan {
+            source: OwnedWorktreeBranch::TrackRemote(format!("origin/{branch}")),
+            created_branch: true,
+        },
+        (false, false) => BranchPlan {
+            source: OwnedWorktreeBranch::NewFromHead,
+            created_branch: true,
+        },
+    }
+}
+
 pub async fn worktree_add(
     clone_path: &Path,
     worktree_path: &Path,
@@ -588,6 +644,31 @@ mod tests {
 
     fn noop_tx() -> JobTx {
         JobTx::silent()
+    }
+
+    /// The full input space of the branch decision — four lines that decide
+    /// whether Purge is allowed to delete one of the user's own branches.
+    #[test]
+    fn branch_planning_over_every_combination() {
+        let local = plan_branch("feat/x", true, false);
+        assert_eq!(local.source, OwnedWorktreeBranch::ExistingLocal);
+        assert!(!local.created_branch, "never delete a branch we found");
+
+        // A local branch wins even when the remote also has one.
+        let both = plan_branch("feat/x", true, true);
+        assert_eq!(both.source, OwnedWorktreeBranch::ExistingLocal);
+        assert!(!both.created_branch);
+
+        let remote = plan_branch("feat/x", false, true);
+        assert_eq!(
+            remote.source,
+            OwnedWorktreeBranch::TrackRemote("origin/feat/x".into())
+        );
+        assert!(remote.created_branch);
+
+        let fresh = plan_branch("feat/x", false, false);
+        assert_eq!(fresh.source, OwnedWorktreeBranch::NewFromHead);
+        assert!(fresh.created_branch);
     }
 
     /// A `JobTx` whose receiver stays alive so tests can assert on the

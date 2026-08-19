@@ -12,18 +12,21 @@ use tauri::ipc::InvokeResponseBody;
 use crate::claude;
 use crate::claude_local;
 use crate::error::{AppError, AppResult};
-use crate::git;
 use crate::github::poller::{fetch_pr_status, AuthSnapshot, GithubPoller};
-use crate::github::{parse_pr_reference, GithubPrStatus, GithubSlug};
+use crate::github::{
+    parse_pr_reference, resolve_attach_target, GithubPrStatus, GithubSlug,
+};
 use crate::inprogress::InProgressWorkspaces;
 use crate::job::{JobEvent, JobTx};
 use crate::paths::Paths;
+use crate::provision::{
+    provision_repo_worktree, teardown_repo_worktree, RepoProvision, RepoTeardown,
+};
 use crate::purge::Purger;
 use crate::reconcile::{self, Discrepancies};
 use crate::registry::{self, starter_template, RegistryLoad, Repo, RepoRegistry};
 use crate::scripts::{ScriptInfo, ScriptSupervisor};
 use crate::sessions::{SessionInfo, SessionSupervisor};
-use crate::setup;
 use crate::state::{
     AttachedPr, ClaudeSessionMeta, RepoLink, ScriptRunMeta, SystemErrorEntry, Workspace,
     WorkspaceId, WorkspaceStatus,
@@ -121,40 +124,9 @@ pub async fn attach_pr(
         }
     }
 
-    let (repo_key, slug) = match (&args.repo_key, &pr.slug) {
-        (Some(key), _) => candidates
-            .into_iter()
-            .find(|(k, _)| k == key)
-            .ok_or_else(|| {
-                AppError::Other(format!("{key} isn't a GitHub-linked repo in this workspace"))
-            })?,
-        (None, Some(want)) => candidates
-            .into_iter()
-            .find(|(_, slug)| slug == want)
-            .ok_or_else(|| {
-                AppError::Other(format!(
-                    "no repo in this workspace points at {}/{}",
-                    want.owner, want.name
-                ))
-            })?,
-        (None, None) if candidates.len() == 1 => candidates.remove(0),
-        (None, None) => {
-            return Err(AppError::Other(
-                "this workspace has more than one GitHub repo — pick which one the PR belongs to"
-                    .to_string(),
-            ))
-        }
-    };
-    // An explicit repo_key plus a URL for a different repo is a mistake worth
-    // reporting rather than silently trusting one over the other.
-    if let Some(want) = &pr.slug {
-        if want != &slug {
-            return Err(AppError::Other(format!(
-                "PR #{} is in {}/{}, but repo {repo_key} points at {}/{}",
-                pr.number, want.owner, want.name, slug.owner, slug.name
-            )));
-        }
-    }
+    let (repo_key, slug) =
+        resolve_attach_target(&candidates, args.repo_key.as_deref(), &pr)
+            .map_err(|e| AppError::Other(e.to_string()))?;
 
     let status = fetch_pr_status(&slug, pr.number)
         .await
@@ -338,217 +310,6 @@ pub struct CreateWorkspaceArgs {
     /// Resolved on the login-shell PATH at spawn time.
     #[serde(default)]
     pub claude_binary: Option<String>,
-}
-
-struct RepoProvision<'a> {
-    repo: &'a Repo,
-    worktree_path: &'a Path,
-    branch: &'a str,
-    paths: &'a Paths,
-    tx: &'a JobTx,
-}
-
-/// Clone (if needed) → pull → resolve branch → worktree add → install
-/// `.claude/settings.local.json` symlink → run setup script. Returns the
-/// `RepoLink` to push into state. Atomic for its own repo: any failure past
-/// `worktree add` tears down this repo's worktree (and its branch, if Tethys
-/// created it) before bubbling. Sibling repos remain the caller's
-/// responsibility (we don't know whether more still need provisioning).
-async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLink> {
-    let clone_path = ctx.paths.repo_clone_path(&ctx.repo.key);
-
-    git::ensure_clone(&clone_path, &ctx.repo.remote_url, ctx.tx, &ctx.repo.key).await?;
-    // A stray checkout in the clone would otherwise feed the wrong base into
-    // the pull (fast-forwards HEAD) and into any `track_from = None` worktree
-    // (branches off HEAD). Put it back on the default branch first.
-    git::ensure_clone_on_default_branch(
-        &clone_path,
-        ctx.repo.default_branch.as_deref(),
-        ctx.tx,
-        &ctx.repo.key,
-    )
-    .await?;
-    git::pull_clone(&clone_path, ctx.tx, &ctx.repo.key).await?;
-
-    // Decide how the worktree's branch is resolved. An already-existing local
-    // branch is checked out as-is (e.g. editing a PR branch locally); git
-    // refuses if it's already checked out by another workspace. A branch that
-    // only exists on the remote gets a fresh local tracking branch. Otherwise
-    // we branch off HEAD.
-    let branch_preexisted = git::branch_exists(&clone_path, ctx.branch).await?;
-    let remote_start = if !branch_preexisted
-        && git::remote_branch_exists(&clone_path, "origin", ctx.branch).await?
-    {
-        Some(format!("origin/{}", ctx.branch))
-    } else {
-        None
-    };
-    let source = match (branch_preexisted, &remote_start) {
-        (true, _) => git::WorktreeBranch::ExistingLocal,
-        (false, Some(start)) => git::WorktreeBranch::TrackRemote(start),
-        (false, None) => git::WorktreeBranch::NewFromHead,
-    };
-    // Tethys "owns" (and may delete on teardown) only branches it creates.
-    let created_branch = !branch_preexisted;
-
-    if branch_preexisted {
-        ctx.tx.status(
-            format!("checking out existing branch {}", ctx.branch),
-            Some(&ctx.repo.key),
-        );
-    }
-
-    // Everything past `worktree_add` leaves on-disk state behind, so on failure
-    // we tear down this repo's own worktree (and its branch, only if we created
-    // it) before bubbling. Sibling repos are the caller's responsibility.
-    let provisioned = async {
-        git::worktree_add(
-            &clone_path,
-            ctx.worktree_path,
-            ctx.branch,
-            source,
-            ctx.tx,
-            &ctx.repo.key,
-        )
-        .await?;
-
-        claude_local::install_symlink(ctx.worktree_path, ctx.paths, ctx.tx, &ctx.repo.key).await?;
-
-        copy_configured_files(
-            &clone_path,
-            ctx.worktree_path,
-            &ctx.repo.copy_files,
-            ctx.tx,
-            &ctx.repo.key,
-        )
-        .await?;
-
-        let mut link = RepoLink {
-            repo_key: ctx.repo.key.clone(),
-            worktree_path: ctx.worktree_path.to_path_buf(),
-            setup_script_ran_at: None,
-            github: None,
-            attached_prs: Vec::new(),
-            created_branch,
-        };
-
-        if let Some(script) = ctx
-            .repo
-            .default_setup_script
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            setup::run_setup_script(
-                script,
-                ctx.worktree_path,
-                ctx.repo.setup_timeout_secs,
-                ctx.tx,
-                &ctx.repo.key,
-            )
-            .await?;
-            link.setup_script_ran_at = Some(Utc::now());
-        }
-
-        Ok::<RepoLink, AppError>(link)
-    }
-    .await;
-
-    match provisioned {
-        Ok(link) => Ok(link),
-        Err(e) => {
-            teardown_repo_worktree(RepoTeardown {
-                repo_key: &ctx.repo.key,
-                worktree_path: ctx.worktree_path,
-                branch: ctx.branch,
-                created_branch,
-                paths: ctx.paths,
-                tx: ctx.tx,
-            })
-            .await;
-            Err(e)
-        }
-    }
-}
-
-/// Copy each entry in `copy_files` from the base clone into the new worktree.
-/// These are typically gitignored files (`.env`, etc.) that `git worktree add`
-/// won't carry over but setup scripts and dev servers need. Missing sources
-/// are silently skipped; an existing file at the destination is left alone.
-/// Paths must be relative and free of `..` segments — anything else is
-/// rejected to keep the copy contained inside `clone_path` / `worktree_path`.
-async fn copy_configured_files(
-    clone_path: &Path,
-    worktree_path: &Path,
-    copy_files: &[String],
-    tx: &JobTx,
-    repo_key: &str,
-) -> AppResult<()> {
-    for rel in copy_files {
-        let rel_path = Path::new(rel);
-        if rel_path.is_absolute()
-            || rel_path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            return Err(AppError::Other(format!(
-                "copy_files entry '{rel}' must be a relative path without '..' segments",
-            )));
-        }
-
-        let src = clone_path.join(rel_path);
-        match tokio::fs::symlink_metadata(&src).await {
-            Ok(meta) if meta.is_file() => {}
-            Ok(_) => continue,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(AppError::Io(e)),
-        }
-
-        let dst = worktree_path.join(rel_path);
-        if tokio::fs::try_exists(&dst).await? {
-            continue;
-        }
-        if let Some(parent) = dst.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
-        tokio::fs::copy(&src, &dst).await?;
-        tx.status(format!("copied {rel} from clone"), Some(repo_key));
-    }
-    Ok(())
-}
-
-struct RepoTeardown<'a> {
-    repo_key: &'a str,
-    worktree_path: &'a Path,
-    branch: &'a str,
-    /// Whether Tethys created this branch. A pre-existing branch (e.g. a PR
-    /// branch checked out for local edits) is left intact — only the worktree
-    /// is removed.
-    created_branch: bool,
-    paths: &'a Paths,
-    tx: &'a JobTx,
-}
-
-/// Best-effort reverse of `provision_repo_worktree`: force-remove the
-/// worktree, prune stale registrations, and delete the branch when Tethys
-/// created it. Errors are streamed as status events but never bubbled —
-/// teardown is always best-effort.
-async fn teardown_repo_worktree(ctx: RepoTeardown<'_>) {
-    if ctx.worktree_path.exists() {
-        let clone_path = ctx.paths.repo_clone_path(ctx.repo_key);
-        if let Err(cleanup_err) =
-            git::worktree_remove(&clone_path, ctx.worktree_path, true, ctx.tx, ctx.repo_key).await
-        {
-            ctx.tx.status(
-                format!("cleanup failed for {}: {cleanup_err}", ctx.repo_key),
-                Some(ctx.repo_key),
-            );
-        }
-        git::worktree_prune_best_effort(&clone_path, ctx.tx, ctx.repo_key).await;
-        if ctx.created_branch {
-            git::branch_delete_best_effort(&clone_path, ctx.branch, ctx.tx, ctx.repo_key).await;
-        }
-    }
 }
 
 /// Orchestrates clone + worktree add + setup script for every selected repo,
