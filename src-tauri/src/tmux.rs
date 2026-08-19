@@ -19,6 +19,65 @@ pub fn resolve() -> AppResult<PathBuf> {
     shell::which("tmux", Some("brew install tmux"))
 }
 
+/// Default pane size for a freshly-created tmux session. xterm.js resizes it
+/// to the real geometry as soon as the pane mounts.
+const INITIAL_COLS: &str = "200";
+const INITIAL_ROWS: &str = "50";
+
+/// argv for creating a tmux session named `session_id` running `command`.
+///
+/// `env` becomes per-session `-e` variables — how `TETHYS_SPAWN_TOKEN` reaches
+/// Claude so its SessionStart hook can be correlated back.
+///
+/// Built here rather than at each call site because the sessions and scripts
+/// supervisors used to construct this argv separately, character for
+/// character, including the load-bearing detail that [`server_init_args`] must
+/// be *prepended*: on cold start `new-session` is what boots the server, so
+/// options set afterwards would miss it and the pane would silently come up
+/// without `mouse on`.
+pub fn new_session_args(
+    session_id: &str,
+    env: &[(&str, String)],
+    command: &[String],
+) -> Vec<String> {
+    let mut args: Vec<String> = vec!["-L".into(), SOCKET_LABEL.into()];
+    args.extend(server_init_args());
+    args.extend([
+        "new-session".into(),
+        "-A".into(), // attach if a session with this name somehow exists
+        "-D".into(), // ...and detach any other clients on that session
+        "-s".into(),
+        session_id.to_string(),
+    ]);
+    for (key, value) in env {
+        args.push("-e".into());
+        args.push(format!("{key}={value}"));
+    }
+    args.extend([
+        "-x".into(),
+        INITIAL_COLS.into(),
+        "-y".into(),
+        INITIAL_ROWS.into(),
+        "--".into(),
+    ]);
+    args.extend(command.iter().cloned());
+    args
+}
+
+/// argv for attaching a fresh client to an existing tmux session, detaching
+/// any other client first.
+pub fn attach_session_args(session_id: &str) -> Vec<String> {
+    let mut args: Vec<String> = vec!["-L".into(), SOCKET_LABEL.into()];
+    args.extend(server_init_args());
+    args.extend([
+        "attach-session".into(),
+        "-d".into(), // detach any other clients
+        "-t".into(),
+        session_id.to_string(),
+    ]);
+    args
+}
+
 /// `true` if the tmux session named `session_id` exists on the Tethys
 /// server. Uses `tmux -L tethys has-session -t <id>` — exit 0 = exists.
 pub fn has_session(tmux_bin: &Path, session_id: &str) -> bool {
@@ -162,3 +221,67 @@ pub fn kill_session(tmux_bin: &Path, session_id: &str) {
         .status();
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rule that made this worth extracting: server options must come
+    /// before `new-session`, because on cold start `new-session` is what boots
+    /// the server. Get the order wrong and the pane comes up without
+    /// `mouse on`, which breaks scrolling in Claude's fullscreen renderer —
+    /// silently, and only on the first launch after a reboot.
+    #[test]
+    fn server_options_are_prepended_before_the_subcommand() {
+        let args = new_session_args("sess-1", &[], &["/bin/zsh".into()]);
+        let new_session = args.iter().position(|a| a == "new-session").unwrap();
+        let mouse = args.iter().position(|a| a == "mouse").unwrap();
+        assert!(mouse < new_session, "{args:?}");
+
+        let args = attach_session_args("sess-1");
+        let attach = args.iter().position(|a| a == "attach-session").unwrap();
+        let mouse = args.iter().position(|a| a == "mouse").unwrap();
+        assert!(mouse < attach, "{args:?}");
+    }
+
+    #[test]
+    fn both_argv_builders_target_the_tethys_socket() {
+        for args in [
+            new_session_args("s", &[], &["cmd".into()]),
+            attach_session_args("s"),
+        ] {
+            assert_eq!(&args[0], "-L");
+            assert_eq!(&args[1], SOCKET_LABEL);
+        }
+    }
+
+    #[test]
+    fn new_session_carries_env_and_command() {
+        let args = new_session_args(
+            "sess-1",
+            &[("TETHYS_SPAWN_TOKEN", "tok-123".to_string())],
+            &["/bin/zsh".into(), "-lc".into(), "yarn dev".into()],
+        );
+
+        let e = args.iter().position(|a| a == "-e").unwrap();
+        assert_eq!(args[e + 1], "TETHYS_SPAWN_TOKEN=tok-123");
+
+        // Everything after `--` is the command, in order.
+        let sep = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(&args[sep + 1..], ["/bin/zsh", "-lc", "yarn dev"]);
+    }
+
+    #[test]
+    fn a_session_with_no_env_has_no_e_flags() {
+        let args = new_session_args("sess-1", &[], &["claude".into()]);
+        assert!(!args.iter().any(|a| a == "-e"), "{args:?}");
+        assert_eq!(args.last().unwrap(), "claude");
+    }
+
+    #[test]
+    fn attach_detaches_other_clients() {
+        let args = attach_session_args("sess-1");
+        let t = args.iter().position(|a| a == "-t").unwrap();
+        assert_eq!(args[t + 1], "sess-1");
+        assert!(args.contains(&"-d".to_string()));
+    }
+}

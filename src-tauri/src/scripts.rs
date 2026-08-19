@@ -80,23 +80,11 @@ impl ScriptSupervisor {
         let id = Uuid::new_v4().to_string();
         let started_at = Utc::now();
 
-        let mut args: Vec<String> = vec!["-L".into(), tmux::SOCKET_LABEL.into()];
-        args.extend(tmux::server_init_args());
-        args.extend([
-            "new-session".into(),
-            "-A".into(),
-            "-D".into(),
-            "-s".into(),
-            id.clone(),
-            "-x".into(),
-            "200".into(),
-            "-y".into(),
-            "50".into(),
-            "--".into(),
-            "/bin/zsh".into(),
-            "-lc".into(),
-            command.clone(),
-        ]);
+        let args = tmux::new_session_args(
+            &id,
+            &[],
+            &["/bin/zsh".into(), "-lc".into(), command.clone()],
+        );
 
         self.spawn_with_id(SpawnRequest {
             id,
@@ -132,14 +120,7 @@ impl ScriptSupervisor {
             )));
         }
         let seed = tmux::capture_pane(tmux_bin, &id).unwrap_or_default();
-        let mut args: Vec<String> = vec!["-L".into(), tmux::SOCKET_LABEL.into()];
-        args.extend(tmux::server_init_args());
-        args.extend([
-            "attach-session".into(),
-            "-d".into(),
-            "-t".into(),
-            id.clone(),
-        ]);
+        let args = tmux::attach_session_args(&id);
         self.spawn_with_id(SpawnRequest {
             id,
             workspace_id,

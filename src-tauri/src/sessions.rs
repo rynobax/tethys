@@ -362,30 +362,16 @@ impl SessionSupervisor {
         let token = Uuid::new_v4().to_string();
         let id = new_session_id();
 
-        // Chain: -L <socket> set-option ... ; set-option ... ; new-session ...
-        // The server options are prepended so they apply on cold-start
-        // (when new-session is what boots the server).
-        let mut args: Vec<String> = vec!["-L".into(), tmux::SOCKET_LABEL.into()];
-        args.extend(tmux::server_init_args());
-        args.extend([
-            "new-session".into(),
-            "-A".into(), // attach if a session with this name somehow exists
-            "-D".into(), // ...and detach any other clients on that session
-            "-s".into(),
-            id.clone(),
-            "-e".into(),
-            format!("TETHYS_SPAWN_TOKEN={token}"),
-            "-x".into(),
-            "200".into(),
-            "-y".into(),
-            "50".into(),
-            "--".into(),
-            claude_bin.to_string_lossy().into_owned(),
-        ]);
+        let mut command = vec![claude_bin.to_string_lossy().into_owned()];
         if let Some(csid) = resume_claude_session_id {
-            args.push("--resume".into());
-            args.push(csid.to_string());
+            command.push("--resume".into());
+            command.push(csid.to_string());
         }
+        let args = tmux::new_session_args(
+            &id,
+            &[("TETHYS_SPAWN_TOKEN", token.clone())],
+            &command,
+        );
 
         let info = self.spawn_with_id(SpawnRequest {
             id,
@@ -438,14 +424,7 @@ impl SessionSupervisor {
         // area and we'd lose the historical context in xterm.js.
         let seed = tmux::capture_pane(tmux_bin, &session_id).unwrap_or_default();
 
-        let mut args: Vec<String> = vec!["-L".into(), tmux::SOCKET_LABEL.into()];
-        args.extend(tmux::server_init_args());
-        args.extend([
-            "attach-session".into(),
-            "-d".into(), // detach any other clients
-            "-t".into(),
-            session_id.clone(),
-        ]);
+        let args = tmux::attach_session_args(&session_id);
         self.spawn_with_id(SpawnRequest {
             id: session_id,
             workspace_id,
