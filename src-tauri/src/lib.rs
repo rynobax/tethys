@@ -257,7 +257,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_workspaces,
-            commands::get_workspace,
             commands::create_workspace,
             commands::add_repo_to_workspace,
             commands::delete_workspace,
@@ -271,7 +270,6 @@ pub fn run() {
             commands::list_pending_permissions,
             commands::apply_pending_permission,
             commands::dismiss_pending_permission,
-            commands::list_repos,
             commands::registry_status,
             commands::github_auth_status,
             commands::github_reprobe_auth,

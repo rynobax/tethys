@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
-import { Channel, invoke } from "@tauri-apps/api/core";
+import * as api from "./ipc/commands";
+import { Channel } from "./ipc/commands";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
@@ -78,12 +79,12 @@ export function ScriptTerminal({ scriptId }: Props) {
 
     const dataSub = term.onData((data) => {
       const bytes = Array.from(new TextEncoder().encode(data));
-      invoke("send_input_script", { scriptId, data: bytes }).catch((e) => {
+      api.sendInputScript(scriptId, bytes).catch((e) => {
         console.error("send_input_script failed:", e);
       });
     });
     const resizeSub = term.onResize(({ cols, rows }) => {
-      invoke("resize_script", { scriptId, cols, rows }).catch((e) => {
+      api.resizeScript(scriptId, cols, rows).catch((e) => {
         console.error("resize_script failed:", e);
       });
     });
@@ -94,14 +95,14 @@ export function ScriptTerminal({ scriptId }: Props) {
     };
 
     let cancelled = false;
-    invoke<number[]>("attach_script", { scriptId, onBytes: channel })
+    api.attachScript(scriptId, channel)
       .then((scrollback) => {
         if (cancelled) return;
         if (scrollback.length > 0) {
           term.write(new Uint8Array(scrollback));
         }
         const { cols, rows } = term;
-        invoke("resize_script", { scriptId, cols, rows }).catch(() => {});
+        api.resizeScript(scriptId, cols, rows).catch(() => {});
       })
       .catch((e) => {
         term.write(`\r\n\x1b[31m[attach failed: ${String(e)}]\x1b[0m\r\n`);
@@ -128,7 +129,7 @@ export function ScriptTerminal({ scriptId }: Props) {
       // reference to `term` so Tauri's registered callback stops pinning the
       // disposed terminal in the webview. See SessionTerminal for the full
       // rationale.
-      invoke("detach_script", { scriptId, channelId: channel.id }).catch(
+      api.detachScript(scriptId, channel.id).catch(
         () => {},
       );
       channel.onmessage = () => {};

@@ -1,17 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import * as api from "./ipc/commands";
 import type {
   CreateWorkspaceArgs,
   Discrepancies,
-  GithubPrStatus,
-  GithubStatusChangedEvent,
   RegistryStatus,
   Repo,
   RepoLink,
   ScriptInfo,
   SessionInfo,
   Theme,
-  TurnChangedEvent,
   Workspace,
   WorkspaceId,
 } from "./types";
@@ -24,7 +21,7 @@ import { Sidebar } from "./Sidebar";
 import { SystemStatus } from "./SystemStatus";
 import { applyTheme, ThemeContext } from "./theme";
 import { useBackendJob, type JobDescriptor } from "./useBackendJob";
-import { useTauriEvent } from "./useTauriEvent";
+import { useAppEvent } from "./ipc/events";
 import { isReadyToDelete } from "./workspaceDerived";
 import "./App.css";
 
@@ -119,7 +116,7 @@ function App() {
   const [theme, setTheme] = useState<Theme | null>(null);
 
   useEffect(() => {
-    invoke<Theme | null>("get_theme")
+    api.getTheme()
       .then((t) => {
         setTheme(t);
         applyTheme(t);
@@ -127,13 +124,13 @@ function App() {
       .catch((e) => console.error("get_theme failed:", e));
   }, []);
 
-  useTauriEvent<Theme | null>("theme:changed", (event) => {
-    const t = event.payload ?? null;
+  useAppEvent("theme:changed", (payload) => {
+    const t = payload ?? null;
     setTheme(t);
     applyTheme(t);
   });
 
-  useTauriEvent<TurnChangedEvent>("session:turn_changed", (event) => {
+  useAppEvent("session:turn_changed", (payload) => {
     const {
       workspace_id,
       session_id,
@@ -143,7 +140,7 @@ function App() {
       running,
       needs_turn,
       working,
-    } = event.payload;
+    } = payload;
     setTurnStates((prev) => {
       const next = new Map(prev);
       next.set(session_id, {
@@ -179,8 +176,8 @@ function App() {
     });
   });
 
-  useTauriEvent<GithubStatusChangedEvent>("github:status_changed", (event) => {
-    const { workspace_id, repo_key, pr_number, status } = event.payload;
+  useAppEvent("github:status_changed", (payload) => {
+    const { workspace_id, repo_key, pr_number, status } = payload;
     setWorkspaces((prev) =>
       prev.map((w) => {
         if (w.id !== workspace_id) return w;
@@ -237,10 +234,7 @@ function App() {
       // the round-trip is fast and the persisted flag is the source of truth.
       for (const [sessionId, info] of turnStates) {
         if (info.workspaceId !== workspace.id || !info.needsTurn) continue;
-        invoke("acknowledge_session_turn", {
-          workspaceId: workspace.id,
-          sessionId,
-        }).catch((e) =>
+        api.acknowledgeSessionTurn(workspace.id, sessionId).catch((e) =>
           console.error("acknowledge_session_turn failed:", e),
         );
       }
@@ -250,9 +244,7 @@ function App() {
 
   const refreshSessionsFor = useCallback(async (workspaceId: WorkspaceId) => {
     try {
-      const list = await invoke<SessionInfo[]>("list_sessions", {
-        workspaceId,
-      });
+      const list = await api.listSessions(workspaceId);
       setSessionsByWorkspace((prev) => {
         const next = new Map(prev);
         next.set(workspaceId, list);
@@ -299,9 +291,7 @@ function App() {
 
   const refreshScriptsFor = useCallback(async (workspaceId: WorkspaceId) => {
     try {
-      const list = await invoke<ScriptInfo[]>("list_scripts", {
-        workspaceId,
-      });
+      const list = await api.listScripts(workspaceId);
       setScriptsByWorkspace((prev) => {
         const next = new Map(prev);
         next.set(workspaceId, list);
@@ -315,9 +305,9 @@ function App() {
   const refresh = useCallback(async () => {
     try {
       const [list, reg, disc] = await Promise.all([
-        invoke<Workspace[]>("list_workspaces"),
-        invoke<RegistryStatus>("registry_status"),
-        invoke<Discrepancies>("list_discrepancies"),
+        api.listWorkspaces(),
+        api.registryStatus(),
+        api.listDiscrepancies(),
       ]);
       setWorkspaces(list);
       setRegistry(reg);
@@ -337,18 +327,18 @@ function App() {
     refresh();
   }, [refresh]);
 
-  useTauriEvent("workspace:changed", () => refresh());
-  useTauriEvent<{ workspace_id: string }>("session:changed", (event) => {
-    refreshSessionsFor(event.payload.workspace_id);
+  useAppEvent("workspace:changed", () => refresh());
+  useAppEvent("session:changed", (payload) => {
+    refreshSessionsFor(payload.workspace_id);
   });
-  useTauriEvent<{ workspace_id: string }>("session:exit", (event) => {
-    refreshSessionsFor(event.payload.workspace_id);
+  useAppEvent("session:exit", (payload) => {
+    refreshSessionsFor(payload.workspace_id);
   });
-  useTauriEvent<{ workspace_id: string }>("script:changed", (event) => {
-    refreshScriptsFor(event.payload.workspace_id);
+  useAppEvent("script:changed", (payload) => {
+    refreshScriptsFor(payload.workspace_id);
   });
-  useTauriEvent<{ workspace_id: string }>("script:exit", (event) => {
-    refreshScriptsFor(event.payload.workspace_id);
+  useAppEvent("script:exit", (payload) => {
+    refreshScriptsFor(payload.workspace_id);
   });
 
   // Paste any draft initial-prompt into a workspace's first Claude session
@@ -374,7 +364,7 @@ function App() {
           setTimeout(resolve, DRAFT_PROMPT_SETTLE_MS),
         );
         try {
-          await invoke("send_input", { sessionId, data: bytes });
+          await api.sendInput(sessionId, bytes);
         } catch (e) {
           console.error("flush draft prompt failed:", e);
           // Let a later `workspace:changed` retry the paste.
@@ -507,9 +497,7 @@ function App() {
       const repoKey =
         ws.repo_links.length === 1 ? ws.repo_links[0].repo_key : null;
       try {
-        await invoke<SessionInfo>("start_claude_session", {
-          args: { workspace_id: ws.id, repo_key: repoKey },
-        });
+        await api.startClaudeSession(ws.id, repoKey);
       } catch (e) {
         setError(`auto-start claude failed: ${String(e)}`);
       }
@@ -539,7 +527,7 @@ function App() {
       // no worktrees on disk for a CreationFailed entry (the backend
       // already tore them down) and no purger semantics to preserve.
       try {
-        await invoke("forget_workspace", { id: workspaceId });
+        await api.forgetWorkspace(workspaceId);
       } catch (e) {
         // Workspace may already be gone (e.g. invoke rejected before the
         // draft was even inserted) — not fatal, just log and move on.
@@ -553,12 +541,10 @@ function App() {
     setSelectedId((cur) => (cur === workspace.id ? null : cur));
     // CreationFailed entries have no worktrees on disk, so skip the
     // soft-delete + 1-hour grace window and just drop from state.
-    const command =
-      workspace.status.kind === "creation_failed"
-        ? "forget_workspace"
-        : "delete_workspace";
     try {
-      await invoke(command, { id: workspace.id });
+      await (workspace.status.kind === "creation_failed"
+        ? api.forgetWorkspace(workspace.id)
+        : api.deleteWorkspace(workspace.id));
     } catch (e) {
       setError(`delete failed: ${String(e)}`);
     }
@@ -566,10 +552,9 @@ function App() {
 
   const handleArchiveToggle = useCallback(async (workspace: Workspace) => {
     try {
-      await invoke(
-        workspace.archived_at ? "unarchive_workspace" : "archive_workspace",
-        { id: workspace.id },
-      );
+      await (workspace.archived_at
+        ? api.unarchiveWorkspace(workspace.id)
+        : api.archiveWorkspace(workspace.id));
     } catch (e) {
       setError(`archive failed: ${String(e)}`);
     }
@@ -577,8 +562,9 @@ function App() {
 
   const handleReorder = useCallback(async (ids: WorkspaceId[]) => {
     // Optimistically reorder so the drop animation lands on the right row,
-    // then fire the backend command. The `workspace:reordered` event also
-    // drives a refresh — doing this here avoids the round-trip flicker.
+    // then fire the backend command. This local update is the only thing that
+    // repaints the sidebar — the backend emits nothing for a reorder, because
+    // a round-trip would flicker the row that was just dropped.
     setWorkspaces((prev) => {
       const byId = new Map(prev.map((w) => [w.id, w]));
       const moved: Workspace[] = [];
@@ -591,7 +577,7 @@ function App() {
       return [...moved, ...rest];
     });
     try {
-      await invoke("reorder_workspaces", { ids });
+      await api.reorderWorkspaces(ids);
     } catch (e) {
       setError(`reorder failed: ${String(e)}`);
     }
@@ -754,8 +740,7 @@ function CreationRunner({
   const descriptor = useMemo<JobDescriptor>(
     () => ({
       key: workspaceId,
-      command: "create_workspace",
-      args: { args },
+      ...api.jobs.createWorkspace({ args }),
     }),
     [workspaceId, args],
   );
@@ -793,7 +778,7 @@ function RegistryNotice({
 }) {
   const openConfig = async () => {
     try {
-      await invoke("open_repos_config");
+      await api.openReposConfig();
     } catch (e) {
       alert(String(e));
     }
@@ -879,9 +864,7 @@ function WorkspaceNotes({
   const save = useCallback(
     (notes: string) => {
       pending.current = null;
-      invoke("set_workspace_notes", {
-        args: { workspace_id: workspaceId, notes },
-      }).catch(() => {
+      api.setWorkspaceNotes(workspaceId, notes).catch(() => {
         // Best-effort persistence; the text stays in the editor regardless.
       });
     },
@@ -1072,9 +1055,7 @@ function WorkspaceDetail({
     setBusy(true);
     setError(null);
     try {
-      const res = await invoke<SessionInfo>("start_claude_session", {
-        args: { workspace_id: workspace.id, repo_key: repoKey },
-      });
+      const res = await api.startClaudeSession(workspace.id, repoKey);
       selectSession(res.id);
       // App-level listener on `session:changed` refreshes the cache.
     } catch (e) {
@@ -1088,19 +1069,14 @@ function WorkspaceDetail({
   // persists turn_acknowledged + emits session:turn_changed, which clears
   // the chip dot (and folds into the workspace row aggregate).
   const clearSessionTurn = (sessionId: string) => {
-    invoke("acknowledge_session_turn", {
-      workspaceId: workspace.id,
-      sessionId,
-    }).catch((e) => console.error("acknowledge_session_turn failed:", e));
+    api.acknowledgeSessionTurn(workspace.id, sessionId).catch((e) => console.error("acknowledge_session_turn failed:", e));
   };
 
   const setSessionHidden = async (sessionId: string, hidden: boolean) => {
     setBusy(true);
     setError(null);
     try {
-      await invoke("set_claude_session_hidden", {
-        args: { workspace_id: workspace.id, session_id: sessionId, hidden },
-      });
+      await api.setClaudeSessionHidden(workspace.id, sessionId, hidden);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -1112,13 +1088,7 @@ function WorkspaceDetail({
     setBusy(true);
     setError(null);
     try {
-      const res = await invoke<SessionInfo>("resume_claude_session", {
-        args: {
-          workspace_id: workspace.id,
-          repo_key: repoKey,
-          session_meta_id: metaId,
-        },
-      });
+      const res = await api.resumeClaudeSession(workspace.id, repoKey, metaId);
       selectSession(res.id);
     } catch (e) {
       setError(String(e));
@@ -1133,13 +1103,7 @@ function WorkspaceDetail({
     setBusy(true);
     setError(null);
     try {
-      const res = await invoke<SessionInfo>("switch_claude_binary", {
-        args: {
-          workspace_id: workspace.id,
-          session_meta_id: metaId,
-          claude_binary: binary,
-        },
-      });
+      const res = await api.switchClaudeBinary(workspace.id, metaId, binary);
       selectSession(res.id);
     } catch (e) {
       setError(String(e));
@@ -1165,13 +1129,7 @@ function WorkspaceDetail({
     setBusy(true);
     setError(null);
     try {
-      await invoke<ScriptInfo>("start_script", {
-        args: {
-          workspace_id: workspace.id,
-          repo_key: repoKey,
-          script_name: scriptName,
-        },
-      });
+      await api.startScript(workspace.id, repoKey, scriptName);
       selectScript(repoKey, scriptName);
     } catch (e) {
       setError(String(e));
@@ -1182,9 +1140,7 @@ function WorkspaceDetail({
 
   const dismissScript = async (scriptId: string) => {
     try {
-      await invoke("dismiss_script", {
-        args: { workspace_id: workspace.id, script_id: scriptId },
-      });
+      await api.dismissScript(workspace.id, scriptId);
     } catch (e) {
       setError(String(e));
     }
@@ -1194,13 +1150,7 @@ function WorkspaceDetail({
   const detachPr = async (repoKey: string, prNumber: number) => {
     setError(null);
     try {
-      await invoke("detach_pr", {
-        args: {
-          workspace_id: workspace.id,
-          repo_key: repoKey,
-          pr_number: prNumber,
-        },
-      });
+      await api.detachPr(workspace.id, repoKey, prNumber);
     } catch (e) {
       setError(String(e));
     }
@@ -1258,7 +1208,7 @@ function WorkspaceDetail({
           <button
             type="button"
             onClick={() =>
-              invoke("open_in_vscode", { id: workspace.id }).catch((e) =>
+              api.openInVscode(workspace.id).catch((e) =>
                 setError(String(e)),
               )
             }
@@ -2033,13 +1983,7 @@ function AttachPrDialog({
     try {
       // Backend fetches the PR before persisting, so a bad number errors here.
       // Its `workspace:changed` event repaints the chip row.
-      await invoke<GithubPrStatus>("attach_pr", {
-        args: {
-          workspace_id: workspace.id,
-          repo_key: repoKey,
-          reference: reference.trim(),
-        },
-      });
+      await api.attachPr(workspace.id, repoKey, reference.trim());
       onClose();
     } catch (e) {
       setError(String(e));
@@ -2134,8 +2078,9 @@ function AddRepoDialog({
     if (!tempId || !picked) return null;
     return {
       key: tempId,
-      command: "add_repo_to_workspace",
-      args: { args: { workspace_id: workspace.id, repo_key: picked } },
+      ...api.jobs.addRepoToWorkspace({
+        args: { workspace_id: workspace.id, repo_key: picked },
+      }),
     };
   }, [tempId, picked, workspace.id]);
 

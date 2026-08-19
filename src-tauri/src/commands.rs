@@ -42,23 +42,6 @@ pub async fn list_workspaces(store: State<'_, Arc<Store>>) -> AppResult<Vec<Work
 }
 
 #[tauri::command]
-pub async fn get_workspace(
-    store: State<'_, Arc<Store>>,
-    id: WorkspaceId,
-) -> AppResult<Workspace> {
-    store
-        .read(|s| s.find_workspace(&id).cloned())
-        .await
-        .ok_or_else(|| AppError::WorkspaceNotFound(id.clone()))
-}
-
-#[tauri::command]
-pub fn list_repos(registry: State<'_, Arc<RegistryLoad>>) -> AppResult<Vec<Repo>> {
-    let reg = registry.require()?;
-    Ok(reg.repos.clone())
-}
-
-#[tauri::command]
 pub fn registry_status(registry: State<'_, Arc<RegistryLoad>>) -> RegistryLoad {
     (**registry).clone()
 }
@@ -743,7 +726,6 @@ pub async fn unarchive_workspace(
 /// current relative position in `AppState.workspaces`.
 #[tauri::command]
 pub async fn reorder_workspaces(
-    app: AppHandle,
     store: State<'_, Arc<Store>>,
     ids: Vec<WorkspaceId>,
 ) -> AppResult<()> {
@@ -771,7 +753,8 @@ pub async fn reorder_workspaces(
             Ok(())
         })
         .await?;
-    let _ = app.emit("workspace:reordered", &());
+    // No event: the frontend reorders optimistically so the dropped row
+    // doesn't flicker, and re-broadcasting the order would undo that.
     Ok(())
 }
 

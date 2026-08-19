@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import * as api from "./ipc/commands";
 
 import type {
   Discrepancies,
@@ -9,7 +9,7 @@ import type {
   Workspace,
   WorkspaceId,
 } from "./types";
-import { useTauriEvent } from "./useTauriEvent";
+import { useAppEvent } from "./ipc/events";
 
 type Props = {
   /** All workspaces, including soft-deleted. The modal lists pending deletions. */
@@ -39,7 +39,7 @@ export function SystemStatus({
 
   const refreshErrors = useCallback(async () => {
     try {
-      const list = await invoke<SystemErrorEntry[]>("list_system_errors");
+      const list = await api.listSystemErrors();
       setErrors(list);
     } catch (e) {
       console.error("list_system_errors:", e);
@@ -48,7 +48,7 @@ export function SystemStatus({
 
   const refreshPending = useCallback(async () => {
     try {
-      const list = await invoke<PendingPermission[]>("list_pending_permissions");
+      const list = await api.listPendingPermissions();
       setPending(list);
     } catch (e) {
       console.error("list_pending_permissions:", e);
@@ -60,8 +60,8 @@ export function SystemStatus({
     refreshPending();
   }, [refreshErrors, refreshPending]);
 
-  useTauriEvent("system_status:changed", () => refreshErrors());
-  useTauriEvent("pending_permissions:changed", () => refreshPending());
+  useAppEvent("system_status:changed", () => refreshErrors());
+  useAppEvent("pending_permissions:changed", () => refreshPending());
 
   const pendingDeletes = allWorkspaces.filter((w) => w.deleted_at !== null);
   const hasErrors = errors.length > 0;
@@ -206,7 +206,7 @@ function StatusTab({
   const cancelDelete = async (id: WorkspaceId) => {
     setBusy(`cancel:${id}`);
     try {
-      await invoke("cancel_delete_workspace", { id });
+      await api.cancelDeleteWorkspace(id);
     } catch (e) {
       alert(String(e));
     } finally {
@@ -217,7 +217,7 @@ function StatusTab({
   const dismissError = async (id: string) => {
     setBusy(`err:${id}`);
     try {
-      await invoke("dismiss_system_error", { id });
+      await api.dismissSystemError(id);
     } catch (e) {
       alert(String(e));
     } finally {
@@ -228,7 +228,7 @@ function StatusTab({
   const runCleanupNow = async () => {
     setBusy("cleanup");
     try {
-      await invoke("run_purge_now");
+      await api.runPurgeNow();
     } catch (e) {
       alert(String(e));
     } finally {
@@ -239,7 +239,7 @@ function StatusTab({
 
   const openConfig = async () => {
     try {
-      await invoke("open_repos_config");
+      await api.openReposConfig();
     } catch (e) {
       alert(String(e));
     }
@@ -417,12 +417,7 @@ function PendingPermissionRow({
     if (selected.size === 0) return;
     setBusy(true);
     try {
-      await invoke("apply_pending_permission", {
-        args: {
-          id: entry.id,
-          target_repo_keys: Array.from(selected),
-        },
-      });
+      await api.applyPendingPermission(entry.id, Array.from(selected));
       onChanged();
     } catch (e) {
       alert(String(e));
@@ -434,7 +429,7 @@ function PendingPermissionRow({
   const dismiss = async () => {
     setBusy(true);
     try {
-      await invoke("dismiss_pending_permission", { id: entry.id });
+      await api.dismissPendingPermission(entry.id);
       onChanged();
     } catch (e) {
       alert(String(e));
@@ -530,13 +525,13 @@ function DiskMismatchSection({
 
   const removeOrphan = (path: string) =>
     withBusy(`orphan:${path}`, async () => {
-      await invoke("remove_orphan_dir", { path });
+      await api.removeOrphanDir(path);
       onChanged();
     });
 
   const forgetWorkspace = (id: string) =>
     withBusy(`forget:${id}`, async () => {
-      await invoke("forget_workspace", { id });
+      await api.forgetWorkspace(id);
       onChanged();
     });
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { useTauriEvent } from "./useTauriEvent";
+import * as api from "./ipc/commands";
+import { useAppEvent } from "./ipc/events";
 import type { GithubAuthSnapshot } from "./types";
 
 export function GithubAuthFooter() {
@@ -8,21 +8,19 @@ export function GithubAuthFooter() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    invoke<GithubAuthSnapshot>("github_auth_status")
+    api.githubAuthStatus()
       .then(setSnap)
       .catch(() => setSnap(null));
   }, []);
 
-  useTauriEvent<GithubAuthSnapshot>("github:auth_changed", (event) => {
-    setSnap(event.payload);
-  });
+  useAppEvent("github:auth_changed", setSnap);
 
   if (!snap) return null;
 
   const reprobe = async () => {
     setBusy(true);
     try {
-      const next = await invoke<GithubAuthSnapshot>("github_reprobe_auth");
+      const next = await api.githubReprobeAuth();
       setSnap(next);
     } finally {
       setBusy(false);

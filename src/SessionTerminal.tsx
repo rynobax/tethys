@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
-import { Channel, invoke } from "@tauri-apps/api/core";
+import * as api from "./ipc/commands";
+import { Channel } from "./ipc/commands";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -132,12 +133,12 @@ export function SessionTerminal({ sessionId }: Props) {
       if (allImages) return;
       ev.preventDefault();
       ev.stopImmediatePropagation();
-      invoke<string[]>("read_clipboard_file_paths")
+      api.readClipboardFilePaths()
         .then((paths) => {
           if (paths.length === 0) return;
           const text = paths.map(escapeDroppedPath).join(" ") + " ";
           const bytes = Array.from(new TextEncoder().encode(text));
-          return invoke("send_input", { sessionId, data: bytes });
+          return api.sendInput(sessionId, bytes);
         })
         .catch((e) => {
           console.error("file paste failed:", e);
@@ -149,7 +150,7 @@ export function SessionTerminal({ sessionId }: Props) {
     // Returning false suppresses xterm's default dispatch for that key;
     // we send our own byte sequence via send_input.
     const sendRaw = (bytes: number[]) => {
-      invoke("send_input", { sessionId, data: bytes }).catch((e) => {
+      api.sendInput(sessionId, bytes).catch((e) => {
         console.error("send_input (keybind) failed:", e);
       });
     };
@@ -205,14 +206,14 @@ export function SessionTerminal({ sessionId }: Props) {
     // Keystrokes → backend.
     const dataSub = term.onData((data) => {
       const bytes = Array.from(new TextEncoder().encode(data));
-      invoke("send_input", { sessionId, data: bytes }).catch((e) => {
+      api.sendInput(sessionId, bytes).catch((e) => {
         console.error("send_input failed:", e);
       });
     });
 
     // Resize → backend.
     const resizeSub = term.onResize(({ cols, rows }) => {
-      invoke("resize_session", { sessionId, cols, rows }).catch((e) => {
+      api.resizeSession(sessionId, cols, rows).catch((e) => {
         console.error("resize_session failed:", e);
       });
     });
@@ -224,7 +225,7 @@ export function SessionTerminal({ sessionId }: Props) {
     };
 
     let cancelled = false;
-    invoke<number[]>("attach_session", { sessionId, onBytes: channel })
+    api.attachSession(sessionId, channel)
       .then((scrollback) => {
         if (cancelled) return;
         if (scrollback.length > 0) {
@@ -232,7 +233,7 @@ export function SessionTerminal({ sessionId }: Props) {
         }
         // Final resize to let the backend match xterm's cols/rows right away.
         const { cols, rows } = term;
-        invoke("resize_session", { sessionId, cols, rows }).catch(() => {});
+        api.resizeSession(sessionId, cols, rows).catch(() => {});
       })
       .catch((e) => {
         term.write(`\r\n\x1b[31m[attach failed: ${String(e)}]\x1b[0m\r\n`);
@@ -264,7 +265,7 @@ export function SessionTerminal({ sessionId }: Props) {
           event.payload.paths.map(escapeDroppedPath).join(" ") + " ";
         const text = `\x1b[200~${inner}\x1b[201~`;
         const bytes = Array.from(new TextEncoder().encode(text));
-        invoke("send_input", { sessionId, data: bytes }).catch((e) => {
+        api.sendInput(sessionId, bytes).catch((e) => {
           console.error("send_input (drag-drop) failed:", e);
         });
         term.focus();
@@ -298,7 +299,7 @@ export function SessionTerminal({ sessionId }: Props) {
       // Stop the backend fanning bytes to this dead pane. Its retain-on-error
       // path never fires on its own: the channel keeps succeeding as long as
       // its JS callback is registered, so we must detach explicitly.
-      invoke("detach_session", { sessionId, channelId: channel.id }).catch(
+      api.detachSession(sessionId, channel.id).catch(
         () => {},
       );
       // Sever the channel's reference to `term`. Tauri registers the channel's

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel, runJob } from "./ipc/commands";
 
 import type { JobEvent } from "./types";
 
@@ -54,7 +54,7 @@ export function useBackendJob(
       else if (event.kind === "failed") setState("failed");
     };
 
-    invoke(descriptor.command, { ...descriptor.args, onEvent: channel })
+    runJob(descriptor.command, descriptor.args, channel)
       .then((res) => {
         if (startedKeyRef.current !== capturedKey) return;
         setState((s) => (s === "running" ? "success" : s));
