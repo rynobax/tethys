@@ -179,13 +179,9 @@ pub async fn attach_pr(
             let ws = s
                 .find_workspace_mut(&workspace_id)
                 .ok_or_else(|| AppError::WorkspaceNotFound(workspace_id.clone()))?;
-            let link = ws
-                .repo_links
-                .iter_mut()
-                .find(|r| r.repo_key == repo_key)
-                .ok_or_else(|| {
-                    AppError::Other(format!("workspace has no worktree for {repo_key}"))
-                })?;
+            let link = ws.link_mut(&repo_key).ok_or_else(|| {
+                AppError::Other(format!("workspace has no worktree for {repo_key}"))
+            })?;
             if link.github.as_ref().is_some_and(|g| g.pr_number == pr.number) {
                 return Err(AppError::Other(format!(
                     "PR #{} is already tracked as this workspace's branch PR",
@@ -230,13 +226,9 @@ pub async fn detach_pr(
             let ws = s
                 .find_workspace_mut(&args.workspace_id)
                 .ok_or_else(|| AppError::WorkspaceNotFound(args.workspace_id.clone()))?;
-            let link = ws
-                .repo_links
-                .iter_mut()
-                .find(|r| r.repo_key == args.repo_key)
-                .ok_or_else(|| {
-                    AppError::Other(format!("workspace has no worktree for {}", args.repo_key))
-                })?;
+            let link = ws.link_mut(&args.repo_key).ok_or_else(|| {
+                AppError::Other(format!("workspace has no worktree for {}", args.repo_key))
+            })?;
             link.attached_prs.retain(|a| a.number != args.pr_number);
             Ok(())
         })
@@ -328,16 +320,19 @@ pub async fn open_in_vscode(
     store: State<'_, Arc<Store>>,
     id: WorkspaceId,
 ) -> AppResult<()> {
+    // A workspace that exists but has no repo links is a Creating draft or a
+    // failed creation — it has no root on disk yet. That is a different thing
+    // from "no such workspace", and saying so is the difference between the
+    // user waiting and the user hunting for a bug.
     let workspace_root: PathBuf = store
-        .read(|s| {
-            s.find_workspace(&id).and_then(|w| {
-                w.repo_links
-                    .first()
-                    .and_then(|r| r.worktree_path.parent().map(|p| p.to_path_buf()))
-            })
-        })
+        .read(|s| s.find_workspace(&id).map(|w| w.root_buf()))
         .await
-        .ok_or_else(|| AppError::WorkspaceNotFound(id.clone()))?;
+        .ok_or_else(|| AppError::WorkspaceNotFound(id.clone()))?
+        .ok_or_else(|| {
+            AppError::Other(
+                "workspace has no repos yet — nothing to open".to_string(),
+            )
+        })?;
 
     open_workspace_in_editor(&workspace_root)
 }
@@ -798,7 +793,7 @@ pub async fn add_repo_to_workspace(
             s.find_workspace(&args.workspace_id).map(|w| {
                 (
                     w.branch.clone(),
-                    w.repo_links.iter().any(|r| r.repo_key == args.repo_key),
+                    w.has_link(&args.repo_key),
                     w.deleted_at.is_some(),
                 )
             })
@@ -849,7 +844,7 @@ pub async fn add_repo_to_workspace(
                         .ok_or_else(|| {
                             AppError::WorkspaceNotFound(args.workspace_id.clone())
                         })?;
-                    if ws.repo_links.iter().any(|r| r.repo_key == link.repo_key) {
+                    if ws.has_link(&link.repo_key) {
                         return Err(AppError::Other(format!(
                             "repo '{}' is already in this workspace",
                             link.repo_key
@@ -1487,15 +1482,8 @@ async fn spawn_claude(
         .read(|s| {
             let w = s.find_workspace(&args.workspace_id)?;
             let cwd = match args.repo_key.as_deref() {
-                Some(key) => w
-                    .repo_links
-                    .iter()
-                    .find(|r| r.repo_key == key)
-                    .map(|r| r.worktree_path.clone()),
-                None => w
-                    .repo_links
-                    .first()
-                    .and_then(|r| r.worktree_path.parent().map(|p| p.to_path_buf())),
+                Some(key) => w.link(key).map(|r| r.worktree_path.clone()),
+                None => w.root_buf(),
             }?;
             Some((cwd, w.claude_binary.clone()))
         })
@@ -1589,7 +1577,7 @@ pub async fn set_claude_session_hidden(
             let ws = s
                 .find_workspace_mut(&args.workspace_id)
                 .ok_or_else(|| AppError::WorkspaceNotFound(args.workspace_id.clone()))?;
-            let Some(meta) = ws.sessions.iter_mut().find(|m| m.id == args.session_id) else {
+            let Some(meta) = ws.session_mut(&args.session_id) else {
                 return Ok(false);
             };
             meta.hidden = args.hidden;
@@ -1686,12 +1674,9 @@ pub async fn start_script(
 
     let cwd = store
         .read(|s| {
-            s.find_workspace(&args.workspace_id).and_then(|w| {
-                w.repo_links
-                    .iter()
-                    .find(|r| r.repo_key == args.repo_key)
-                    .map(|r| r.worktree_path.clone())
-            })
+            s.find_workspace(&args.workspace_id)
+                .and_then(|w| w.link(&args.repo_key))
+                .map(|r| r.worktree_path.clone())
         })
         .await
         .ok_or_else(|| {
@@ -1917,11 +1902,7 @@ JSON.stringify(paths);"#;
 /// not regenerated thereafter. Best-effort: failures are surfaced as a
 /// status event but never fail the parent command.
 async fn regen_workspace_root_settings(workspace: &Workspace, paths: &Paths, tx: &JobTx) {
-    let Some(workspace_root) = workspace
-        .repo_links
-        .first()
-        .and_then(|r| r.worktree_path.parent().map(|p| p.to_path_buf()))
-    else {
+    let Some(workspace_root) = workspace.root_buf() else {
         return;
     };
     let repo_keys: Vec<String> = workspace
@@ -1952,11 +1933,7 @@ async fn append_repo_to_workspace_root_settings(
     paths: &Paths,
     tx: &JobTx,
 ) {
-    let Some(workspace_root) = workspace
-        .repo_links
-        .first()
-        .and_then(|r| r.worktree_path.parent().map(|p| p.to_path_buf()))
-    else {
+    let Some(workspace_root) = workspace.root_buf() else {
         return;
     };
     if let Err(e) = claude_local::append_repo_to_workspace_root_settings(

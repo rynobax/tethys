@@ -91,7 +91,7 @@ pub async fn regenerate(
     registry: &RepoRegistry,
     paths: &Paths,
 ) -> AppResult<Option<PathBuf>> {
-    let Some(workspace_root) = workspace_root(workspace) else {
+    let Some(workspace_root) = workspace.root_buf() else {
         return Ok(None);
     };
     if !fs::try_exists(&workspace_root).await? {
@@ -136,16 +136,6 @@ pub async fn regenerate(
     }
     fs::write(&file_path, render(&doc)).await?;
     Ok(Some(file_path))
-}
-
-/// `<worktree_root>/<workspace_dir>` — the parent every repo worktree sits
-/// under. Derived from the first repo link, matching how sessions resolve the
-/// workspace-root cwd.
-fn workspace_root(workspace: &Workspace) -> Option<PathBuf> {
-    workspace
-        .repo_links
-        .first()
-        .and_then(|r| r.worktree_path.parent().map(Path::to_path_buf))
 }
 
 /// Whether we may write `path`: either it doesn't exist, or it exists and

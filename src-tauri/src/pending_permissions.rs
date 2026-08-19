@@ -76,11 +76,7 @@ pub struct PendingPermissionsFile {
 /// per-repo shared files and append any extra entries to the pending list.
 /// Called from `purge_workspace` before the worktree dirs are removed.
 pub async fn capture_for_purge(workspace: &Workspace, paths: &Paths) -> AppResult<()> {
-    let Some(workspace_root) = workspace
-        .repo_links
-        .first()
-        .and_then(|r| r.worktree_path.parent().map(|p| p.to_path_buf()))
-    else {
+    let Some(workspace_root) = workspace.root_buf() else {
         return Ok(());
     };
 

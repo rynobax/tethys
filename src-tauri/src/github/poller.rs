@@ -802,11 +802,7 @@ fn apply_results(state: &mut AppState, results: &[PollResult]) -> Vec<PollResult
         let Some(ws) = state.find_workspace_mut(&result.workspace_id) else {
             continue;
         };
-        let Some(link) = ws
-            .repo_links
-            .iter_mut()
-            .find(|r| r.repo_key == result.repo_key)
-        else {
+        let Some(link) = ws.link_mut(&result.repo_key) else {
             continue;
         };
         let slot = match result.kind {

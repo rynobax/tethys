@@ -186,7 +186,7 @@ impl SessionSupervisor {
             .store
             .mutate(|s| {
                 if let Some(ws) = s.find_workspace_mut(workspace_id) {
-                    if let Some(meta) = ws.sessions.iter_mut().find(|m| m.id == session_id) {
+                    if let Some(meta) = ws.session_mut(session_id) {
                         meta.runtime_state = Some(state);
                         meta.notification_type = notification_type.clone();
                         meta.turn_acknowledged = false;
@@ -275,7 +275,7 @@ impl SessionSupervisor {
                     .store
                     .mutate(move |s| {
                         if let Some(ws) = s.find_workspace_mut(&ws) {
-                            if let Some(m) = ws.sessions.iter_mut().find(|m| m.id == sid) {
+                            if let Some(m) = ws.session_mut(&sid) {
                                 m.claude_session_id = Some(csid);
                             }
                         }
@@ -346,7 +346,7 @@ impl SessionSupervisor {
         self.store
             .mutate(|s| {
                 if let Some(ws) = s.find_workspace_mut(workspace_id) {
-                    if let Some(meta) = ws.sessions.iter_mut().find(|m| m.id == session_id) {
+                    if let Some(meta) = ws.session_mut(session_id) {
                         meta.turn_acknowledged = true;
                     }
                 }
@@ -698,8 +698,7 @@ impl SessionSupervisor {
                 let Some(ws) = state.find_workspace_mut(&workspace_id) else {
                     return Ok(false);
                 };
-                let Some(session) = ws.sessions.iter_mut().find(|s| s.id == session_id)
-                else {
+                let Some(session) = ws.session_mut(&session_id) else {
                     return Ok(false);
                 };
                 session.claude_session_id = Some(claude_session_id.clone());

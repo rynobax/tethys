@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -196,6 +196,46 @@ pub enum SessionRuntimeState {
     WaitingInput,
 }
 
+impl Workspace {
+    /// `<worktree_root>/<workspace_dir>` — the directory every repo worktree
+    /// sits under, and the cwd for a session started at the workspace root.
+    ///
+    /// Derived from a repo link's parent rather than stored, so it can't drift
+    /// from where the worktrees actually are.
+    ///
+    /// `None` when the workspace has no repo links — which is every `Creating`
+    /// draft and every `CreationFailed` workspace. That is a real state, not an
+    /// error: callers that need a root decide for themselves whether it means
+    /// "skip", "not ready yet", or a message to the user.
+    pub fn root(&self) -> Option<&Path> {
+        self.repo_links
+            .first()
+            .and_then(|l| l.worktree_path.parent())
+    }
+
+    /// Same as [`Workspace::root`], owned — most callers pass it on to
+    /// something that wants a `PathBuf`.
+    pub fn root_buf(&self) -> Option<PathBuf> {
+        self.root().map(Path::to_path_buf)
+    }
+
+    pub fn link(&self, repo_key: &str) -> Option<&RepoLink> {
+        self.repo_links.iter().find(|r| r.repo_key == repo_key)
+    }
+
+    pub fn link_mut(&mut self, repo_key: &str) -> Option<&mut RepoLink> {
+        self.repo_links.iter_mut().find(|r| r.repo_key == repo_key)
+    }
+
+    pub fn has_link(&self, repo_key: &str) -> bool {
+        self.link(repo_key).is_some()
+    }
+
+    pub fn session_mut(&mut self, session_id: &str) -> Option<&mut ClaudeSessionMeta> {
+        self.sessions.iter_mut().find(|m| m.id == session_id)
+    }
+}
+
 impl AppState {
     pub fn find_workspace(&self, id: &str) -> Option<&Workspace> {
         self.workspaces.iter().find(|w| w.id == id)
@@ -209,6 +249,83 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn workspace_with_links(paths: &[&str]) -> Workspace {
+        Workspace {
+            id: "ws-1".into(),
+            branch: "feat/foo".into(),
+            created_at: Utc::now(),
+            repo_links: paths
+                .iter()
+                .enumerate()
+                .map(|(i, p)| RepoLink {
+                    repo_key: format!("repo{i}"),
+                    worktree_path: PathBuf::from(p),
+                    setup_script_ran_at: None,
+                    github: None,
+                    attached_prs: Vec::new(),
+                    created_branch: true,
+                })
+                .collect(),
+            sessions: Vec::new(),
+            claude_binary: None,
+            deleted_at: None,
+            archived_at: None,
+            status: WorkspaceStatus::Ready,
+            script_runs: Vec::new(),
+            notes: String::new(),
+        }
+    }
+
+    /// Every repo worktree is a sibling under the workspace dir, so any link
+    /// gives the same answer.
+    #[test]
+    fn root_is_the_parent_shared_by_every_worktree() {
+        let ws = workspace_with_links(&["/wt/ws-1/frontend", "/wt/ws-1/backend"]);
+        assert_eq!(ws.root(), Some(Path::new("/wt/ws-1")));
+    }
+
+    #[test]
+    fn root_works_with_a_single_link() {
+        let ws = workspace_with_links(&["/wt/ws-1/frontend"]);
+        assert_eq!(ws.root(), Some(Path::new("/wt/ws-1")));
+    }
+
+    /// A `Creating` draft is inserted with no repo links so its sidebar row
+    /// appears immediately. It has no root on disk, and every caller has to
+    /// cope with that — this is the case that used to be re-decided
+    /// (differently) at all seven derivation sites.
+    #[test]
+    fn a_workspace_with_no_repo_links_has_no_root() {
+        let mut ws = workspace_with_links(&[]);
+        ws.status = WorkspaceStatus::Creating;
+        assert_eq!(ws.root(), None);
+        assert_eq!(ws.root_buf(), None);
+    }
+
+    #[test]
+    fn links_and_sessions_are_found_by_key() {
+        let mut ws = workspace_with_links(&["/wt/ws-1/frontend"]);
+        assert!(ws.has_link("repo0"));
+        assert!(!ws.has_link("nope"));
+        assert_eq!(ws.link("repo0").map(|l| l.repo_key.as_str()), Some("repo0"));
+        assert!(ws.link_mut("nope").is_none());
+
+        ws.sessions.push(ClaudeSessionMeta {
+            id: "sess-1".into(),
+            repo_key: None,
+            cwd: PathBuf::from("/wt/ws-1"),
+            claude_session_id: None,
+            transcript_path: None,
+            claude_binary: None,
+            hidden: false,
+            runtime_state: None,
+            notification_type: None,
+            turn_acknowledged: false,
+        });
+        assert!(ws.session_mut("sess-1").is_some());
+        assert!(ws.session_mut("sess-2").is_none());
+    }
 
     #[test]
     fn pre_github_state_json_round_trips() {

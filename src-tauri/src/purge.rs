@@ -86,12 +86,7 @@ pub async fn purge_workspace(
 
     // Remove the parent dir left behind by `git worktree remove`.
     if let Ok(reg) = registry.require() {
-        if let Some(parent) = workspace
-            .repo_links
-            .first()
-            .and_then(|l| l.worktree_path.parent())
-            .map(|p| p.to_path_buf())
-        {
+        if let Some(parent) = workspace.root_buf() {
             if parent.exists() && reconcile::is_under(&reg.worktree_root, &parent) {
                 if let Err(e) = tokio::fs::remove_dir_all(&parent).await {
                     warn!(path = %parent.display(), error = %e, "failed to remove workspace dir during purge");
