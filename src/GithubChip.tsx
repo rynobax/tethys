@@ -185,11 +185,18 @@ function bugbotTitle(bugbot: ChecksRollup): string {
 export function GithubChip({
   status,
   linkable = true,
+  context,
   onDetach,
 }: {
   status: GithubPrStatus;
   /** When false, the chip is informational only — no click-to-open, no hover. */
   linkable?: boolean;
+  /**
+   * Extra hover context, prepended to the tooltip. The sidebar passes the repo
+   * key, since it drops the repo label from the row and the chip is then the
+   * only place that attribution can live.
+   */
+  context?: string;
   /** When set, renders a detach button. Only for manually-attached PRs. */
   onDetach?: () => void;
 }) {
@@ -216,6 +223,7 @@ export function GithubChip({
     .join(" ");
 
   const baseTitle = [
+    context,
     `PR #${status.pr_number}`,
     status.head_branch,
     `state: ${status.state}${status.is_draft ? " (draft)" : ""}`,

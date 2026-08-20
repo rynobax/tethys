@@ -44,7 +44,7 @@ html,
 
 .app {
   display: grid;
-  grid-template-columns: 170px 1fr;
+  grid-template-columns: 204px 1fr;
   height: 100vh;
 }
 
@@ -56,9 +56,25 @@ html,
   min-height: 0;
 }
 
+/*
+ * The workspace list lives in an inset rounded card rather than running edge to
+ * edge, so the sidebar reads as one object with the "New workspace" action at
+ * its top. `overflow: hidden` keeps the scrolling list inside the rounding.
+ */
+.sidebar-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  margin: 10px 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--fg) 3%, var(--sidebar-bg));
+  overflow: hidden;
+}
+
 .sidebar-header {
-  padding: 14px 14px 12px;
-  border-bottom: 1px solid var(--border);
+  padding: 8px 8px 4px;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -69,18 +85,48 @@ html,
   width: 100%;
 }
 
+/* Outlined rather than filled: it sits inside the list card, so a solid accent
+   block would out-shout the rows it introduces. */
+.new-workspace {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent) 45%, transparent);
+  background: color-mix(in oklab, var(--accent) 8%, transparent);
+}
+
+.new-workspace:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--accent) 16%, transparent);
+  border-color: color-mix(in oklab, var(--accent) 70%, transparent);
+}
+
+.new-workspace-plus {
+  font-weight: 700;
+}
+
 .workspace-list {
   list-style: none;
   margin: 0;
-  padding: 4px 0;
+  padding: 4px 8px 6px 10px;
   overflow-y: auto;
   flex: 1;
 }
 
+/* Rows are separated, rounded blocks — the selection reads as a pill inside the
+   card instead of a full-bleed stripe across it. */
 .workspace-list > li {
-  padding: 10px 14px;
+  position: relative;
+  padding: 7px 10px;
+  margin-bottom: 2px;
+  border-radius: 8px;
   cursor: pointer;
-  border-left: 3px solid transparent;
 }
 
 .workspace-list > li:hover {
@@ -88,7 +134,24 @@ html,
 }
 
 .workspace-list > li.selected {
-  border-left-color: var(--accent);
+  background: rgba(125, 125, 125, 0.14);
+}
+
+.workspace-list > li.selected:hover {
+  background: rgba(125, 125, 125, 0.2);
+}
+
+/* Accent bar for the selected row, sitting in the list's left gutter — outside
+   the row's own background, not overlapping it. */
+.workspace-list > li.selected::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: 5px;
+  bottom: 5px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--accent);
 }
 
 .workspace-list > li.empty {
@@ -103,28 +166,30 @@ html,
 
 .workspace-name {
   font-weight: 500;
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-size: 12px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
+/* One line, ellipsised: a wrapping branch name pushed the PR row out of a
+   consistent position and made the list hard to scan. The full name is on the
+   row's tooltip. */
 .workspace-name-text {
   flex: 1 1 auto;
   min-width: 0;
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .workspace-list > li.pending {
-  padding: 10px 14px;
-  cursor: pointer;
-  border-left: 3px solid var(--accent);
   opacity: 0.85;
 }
 
 .workspace-list > li.pending:hover {
-  background: rgba(125, 125, 125, 0.08);
   opacity: 1;
 }
 
@@ -136,14 +201,10 @@ html,
 }
 
 .workspace-list > li.creation-failed {
-  padding: 10px 14px;
-  cursor: pointer;
-  border-left: 3px solid #c64545;
   opacity: 0.9;
 }
 
 .workspace-list > li.creation-failed:hover {
-  background: rgba(125, 125, 125, 0.08);
   opacity: 1;
 }
 
@@ -154,45 +215,17 @@ html,
   font-style: italic;
 }
 
-.workspace-repo-list {
-  list-style: none;
-  margin: 4px 0 0;
-  padding: 0;
-  font-size: 11px;
-  color: color-mix(in oklab, var(--fg) 60%, var(--bg));
-  font-family: "SF Mono", ui-monospace, monospace;
-}
-
-.workspace-repo-list li {
-  padding: 2px 0;
-  line-height: 1.3;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 3px;
-  min-width: 0;
-}
-
-.workspace-repo-list .repo-key {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-.repo-gh-footer {
+/* Every PR in the workspace on one wrapping row under the branch name. */
+.workspace-prs {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding-left: 0;
-  /* A repo can carry several PRs (branch PR + manually attached ones) — they
-     wrap onto extra rows rather than overflowing the sidebar. */
   flex-wrap: wrap;
-  row-gap: 3px;
+  gap: 4px 8px;
+  margin-top: 3px;
   min-width: 0;
 }
 
-.repo-gh-footer .gh-chip {
+.workspace-prs .gh-chip {
   min-width: 0;
 }
 
@@ -1460,7 +1493,7 @@ button.danger.primary:hover:not(:disabled) {
 }
 
 .workspace-list > li.is-archived .workspace-name,
-.workspace-list > li.is-archived .repo-key {
+.workspace-list > li.is-archived .workspace-prs {
   opacity: 0.55;
 }
 
@@ -1473,13 +1506,14 @@ li.is-dragging {
   background: var(--sidebar-bg);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
   position: relative;
+  border-radius: 8px;
 }
 
 .archive-header {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 14px;
+  padding: 8px 10px;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -1571,6 +1605,7 @@ li.is-dragging {
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--border);
+  margin-top: auto;
 }
 
 .sidebar-footer .gh-auth-footer {

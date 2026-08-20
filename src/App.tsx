@@ -590,29 +590,39 @@ function App() {
     <ThemeContext.Provider value={theme}>
     <div className="app">
       <aside className="sidebar">
-        <div className="sidebar-header">
-          <button
-            className="primary"
-            onClick={() => setCreating(true)}
-            type="button"
-            disabled={!registryOk}
-            title={!registryOk ? "Configure repos.toml first" : undefined}
-          >
-            New workspace
-          </button>
+        {/*
+          Header and list share one rounded card so the "New workspace" action
+          reads as the top of the workspace list rather than a separate bar.
+          The card clips the list's scroll, keeping its corners rounded.
+        */}
+        <div className="sidebar-panel">
+          <div className="sidebar-header">
+            <button
+              className="new-workspace"
+              onClick={() => setCreating(true)}
+              type="button"
+              disabled={!registryOk}
+              title={!registryOk ? "Configure repos.toml first" : undefined}
+            >
+              <span className="new-workspace-plus" aria-hidden="true">
+                +
+              </span>
+              New workspace
+            </button>
+          </div>
+          <Sidebar
+            workspaces={visibleWorkspaces}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            onReorder={handleReorder}
+            onArchiveToggle={handleArchiveToggle}
+            onDelete={handleDelete}
+            onClearTurn={handleClearTurn}
+            workspaceNeedsTurn={workspaceNeedsTurn}
+            workspaceWorking={workspaceWorking}
+            runningScriptNames={runningScriptNamesFor}
+          />
         </div>
-        <Sidebar
-          workspaces={visibleWorkspaces}
-          selectedId={selectedId}
-          onSelect={setSelectedId}
-          onReorder={handleReorder}
-          onArchiveToggle={handleArchiveToggle}
-          onDelete={handleDelete}
-          onClearTurn={handleClearTurn}
-          workspaceNeedsTurn={workspaceNeedsTurn}
-          workspaceWorking={workspaceWorking}
-          runningScriptNames={runningScriptNamesFor}
-        />
         <div className="sidebar-footer">
           <SystemStatus
             allWorkspaces={workspaces}

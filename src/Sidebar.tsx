@@ -301,6 +301,13 @@ function WorkspaceRow({
     .filter(Boolean)
     .join(" ");
 
+  // One flat list of every PR in the workspace, laid out on a single wrapping
+  // row under the name. The repo it came from rides along so a multi-repo
+  // workspace can still say which checkout a chip belongs to, on hover.
+  const prs = workspace.repo_links.flatMap((r) =>
+    linkPrs(r).map((status) => ({ repoKey: r.repo_key, status })),
+  );
+
   return (
     <li
       ref={dndProps?.ref}
@@ -337,33 +344,22 @@ function WorkspaceRow({
       {status === "creation_failed" && (
         <div className="pending-label">creation failed</div>
       )}
-      {status === "ready" && workspace.repo_links.length > 0 && (
-        <ul className="workspace-repo-list">
-          {workspace.repo_links.map((r) => (
-            <li key={r.repo_key}>
-              <span className="repo-key">{r.repo_key}</span>
-              {linkPrs(r).length > 0 && (
-                <div className="repo-gh-footer">
-                  {r.github && <GithubChip status={r.github} linkable={false} />}
-                  {r.attached_prs.map(
-                    (a) =>
-                      a.status && (
-                        <GithubChip
-                          key={a.number}
-                          status={a.status}
-                          linkable={false}
-                        />
-                      ),
-                  )}
-                </div>
-              )}
-            </li>
+      {status === "ready" && prs.length > 0 && (
+        <div className="workspace-prs">
+          {prs.map(({ repoKey, status: pr }) => (
+            <GithubChip
+              key={`${repoKey}#${pr.pr_number}`}
+              status={pr}
+              context={repoKey}
+              linkable={false}
+            />
           ))}
-        </ul>
+        </div>
       )}
     </li>
   );
 }
+
 
 function ContextMenu({
   x,
