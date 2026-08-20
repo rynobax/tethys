@@ -32,3 +32,14 @@ The background teardown that runs after the grace window: worktrees removed, Tet
 
 **Pending Permissions**:
 Workspace-local Claude permission grants captured at purge for the user to later fold into the shared per-repo settings or discard.
+
+### Handoff
+
+**Handoff**:
+A workspace created by an agent from inside a running session, rather than by the user in the UI.
+
+**Origin**:
+Where a workspace came from — the user's own hand, or a handoff, and which session did the handing off.
+
+**Brief**:
+The instruction an agent writes for the session it hands work to. Unlike Notes, it is written by an agent, for an agent, and only at the moment of handoff.

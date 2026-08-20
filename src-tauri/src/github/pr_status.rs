@@ -1337,6 +1337,7 @@ mod tests {
                 }],
                 sessions: Vec::new(),
                 claude_binary: None,
+                origin: crate::state::Origin::Ui,
                 deleted_at: None,
                 archived_at: None,
                 status: Default::default(),

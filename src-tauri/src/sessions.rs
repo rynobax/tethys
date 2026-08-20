@@ -11,8 +11,9 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::hook_listener::HookMessage;
+use crate::mcp::McpLaunch;
 use crate::pty::{OnExit, PtyProcess, PtySpawn, Ring};
-use crate::state::SessionRuntimeState;
+use crate::state::{ClaudeSessionMeta, SessionRuntimeState};
 use crate::store::Store;
 use crate::turn::{TurnChanged, TurnSignal, TurnState, TurnTracker};
 use crate::tmux;
@@ -350,6 +351,11 @@ impl SessionSupervisor {
     /// The `TETHYS_SPAWN_TOKEN` correlation var reaches claude via tmux's
     /// `-e` flag (per-session env), so the SessionStart hook still maps
     /// back to the right Tethys session.
+    ///
+    /// `mcp` puts the handoff tool in this session's hands; `brief` is the
+    /// first message it starts with, set only for the session a handoff
+    /// creates.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_claude(
         &self,
         workspace_id: String,
@@ -358,6 +364,8 @@ impl SessionSupervisor {
         tmux_bin: &Path,
         claude_bin: &Path,
         resume_claude_session_id: Option<&str>,
+        mcp: Option<&McpLaunch>,
+        brief: Option<&str>,
     ) -> AppResult<(SessionInfo, String)> {
         let token = Uuid::new_v4().to_string();
         let id = new_session_id();
@@ -366,6 +374,16 @@ impl SessionSupervisor {
         if let Some(csid) = resume_claude_session_id {
             command.push("--resume".into());
             command.push(csid.to_string());
+        }
+        // Rendered here rather than by the caller because the config bakes in
+        // the session id, and this is where that id is minted.
+        if let Some(mcp) = mcp {
+            command.extend(mcp.claude_args(&workspace_id, &id));
+        }
+        // The Brief goes last: `claude [options] [prompt]`. tmux passes argv
+        // through verbatim, so a multi-line brief with quotes in it survives.
+        if let Some(brief) = brief {
+            command.push(brief.to_string());
         }
         let args = tmux::new_session_args(
             &id,
@@ -968,6 +986,119 @@ fn plan_probe_reconciliation(
         }
     }
     out
+}
+
+/// One request to put a Claude session on screen, however it got there:
+/// a fresh start, a resume, a binary switch, or the session a handoff creates.
+pub struct StartSession<'a> {
+    pub supervisor: &'a Arc<SessionSupervisor>,
+    pub store: &'a Arc<Store>,
+    pub workspace_id: &'a str,
+    /// `None` => start at the workspace root (the parent dir containing each
+    /// repo's worktree subdir).
+    pub repo_key: Option<String>,
+    /// App-wide binary resolved at boot; the fallback when neither the session
+    /// nor the workspace overrides it.
+    pub claude_bin: &'a Path,
+    pub tmux_bin: &'a Path,
+    /// Handoff tool config. Attached to every session Tethys spawns — whether
+    /// an agent can hand off shouldn't depend on which workspace it landed in.
+    pub mcp: Option<&'a McpLaunch>,
+    /// Resume an existing conversation via `claude --resume <id>`.
+    pub resume_claude_sid: Option<&'a str>,
+    /// Per-session binary override to run under and persist onto the new meta.
+    /// Takes precedence over the workspace default; `None` falls back to it.
+    pub session_binary: Option<&'a str>,
+    /// The Brief, for the session a handoff creates. `None` everywhere else —
+    /// a session the user started is one they're about to type into.
+    pub brief: Option<&'a str>,
+}
+
+/// Resolve where the session runs and which binary it runs under, spawn it,
+/// and persist the `ClaudeSessionMeta` that makes it resumable across restarts.
+pub async fn start_session(req: StartSession<'_>) -> AppResult<SessionInfo> {
+    if req.tmux_bin.as_os_str().is_empty() {
+        return Err(AppError::Other(
+            "tmux not found — install with `brew install tmux` and restart Tethys".into(),
+        ));
+    }
+
+    // Resolve the cwd: a specific repo's worktree, or — when repo_key is
+    // None — the workspace root (parent of every repo worktree).
+    // Also pull the per-workspace claude binary override, if any.
+    let (cwd, ws_binary) = req
+        .store
+        .read(|s| {
+            let w = s.find_workspace(req.workspace_id)?;
+            let cwd = match req.repo_key.as_deref() {
+                Some(key) => w.link(key).map(|r| r.worktree_path.clone()),
+                None => w.root_buf(),
+            }?;
+            Some((cwd, w.claude_binary.clone()))
+        })
+        .await
+        .ok_or_else(|| {
+            AppError::Other(match req.repo_key.as_deref() {
+                Some(key) => format!("no worktree for {}/{} in state", req.workspace_id, key),
+                None => format!(
+                    "workspace {} has no repos — can't resolve a root dir",
+                    req.workspace_id
+                ),
+            })
+        })?;
+
+    // Session override wins over the workspace default, which wins over the
+    // app-wide binary resolved at boot.
+    let resolved_bin = match req.session_binary.or(ws_binary.as_deref()) {
+        Some(bin) => crate::claude::resolve_named(bin)?,
+        None => req.claude_bin.to_path_buf(),
+    };
+
+    let (info, _token) = req.supervisor.spawn_claude(
+        req.workspace_id.to_string(),
+        req.repo_key.clone(),
+        &cwd,
+        req.tmux_bin,
+        &resolved_bin,
+        req.resume_claude_sid,
+        req.mcp,
+        req.brief,
+    )?;
+
+    // Persist a ClaudeSessionMeta entry so resume works across restarts.
+    // claude_session_id is filled in by the SessionStart hook once it
+    // arrives. We key on the Tethys-internal `id` (== SessionSupervisor id)
+    // so the UI and supervisor use a shared identifier.
+    let meta = ClaudeSessionMeta {
+        id: info.id.clone(),
+        repo_key: req.repo_key.clone(),
+        cwd: cwd.clone(),
+        claude_session_id: None,
+        transcript_path: None,
+        claude_binary: req.session_binary.map(str::to_string),
+        hidden: false,
+        runtime_state: None,
+        notification_type: None,
+        turn_acknowledged: false,
+    };
+
+    req.store
+        .update_workspace(req.workspace_id, |ws| {
+            // Resuming? Drop the prior meta for this Claude conversation so
+            // we don't accumulate dormant duplicates with the same
+            // claude_session_id across runs.
+            if let Some(csid) = req.resume_claude_sid {
+                ws.sessions
+                    .retain(|m| m.claude_session_id.as_deref() != Some(csid));
+            }
+            // Defensive: no dupes of the new tethys id either.
+            ws.sessions.retain(|m| m.id != meta.id);
+            ws.sessions.push(meta);
+            Ok(())
+        })
+        .await?;
+
+    Ok(info)
 }
 
 #[cfg(test)]

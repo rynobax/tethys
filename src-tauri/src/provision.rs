@@ -7,17 +7,23 @@
 //! Tauri type, so it is testable against a temp-dir git remote.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use chrono::Utc;
+use tracing::{info, warn};
 
 use crate::claude_local;
 use crate::error::{AppError, AppResult};
 use crate::git;
-use crate::job::JobTx;
+use crate::inprogress::InProgressWorkspaces;
+use crate::job::{JobEvent, JobTx};
 use crate::paths::Paths;
-use crate::registry::Repo;
+use crate::reconcile;
+use crate::registry::{Repo, RepoRegistry};
 use crate::setup;
-use crate::state::RepoLink;
+use crate::state::{RepoLink, Workspace, WorkspaceStatus};
+use crate::store::Store;
+use crate::workspace_doc;
 
 pub struct RepoProvision<'a> {
     pub repo: &'a Repo,
@@ -211,6 +217,179 @@ pub async fn teardown_repo_worktree(ctx: RepoTeardown<'_>) {
         git::worktree_prune_best_effort(&clone_path, ctx.tx, ctx.repo_key).await;
         if ctx.created_branch {
             git::branch_delete_best_effort(&clone_path, ctx.branch, ctx.tx, ctx.repo_key).await;
+        }
+    }
+}
+
+pub struct WorkspaceProvision<'a> {
+    /// Id of the `Creating` draft the caller already inserted into state.
+    pub workspace_id: &'a str,
+    pub branch: &'a str,
+    /// Directory name under `worktree_root`, shared by every repo's worktree.
+    pub workspace_dir: &'a str,
+    /// Repos to span, already resolved against the registry.
+    pub repos: &'a [Repo],
+    pub registry: &'a RepoRegistry,
+    pub paths: &'a Paths,
+    pub store: &'a Arc<Store>,
+    pub in_progress: &'a InProgressWorkspaces,
+    pub tx: &'a JobTx,
+}
+
+/// Provision every repo of a workspace whose `Creating` draft is already in
+/// state, then seed the files a session expects to find at the root.
+///
+/// On success the draft flips to `Ready` and the stored `Workspace` comes back.
+/// On failure every worktree that did land is torn down, the partial parent dir
+/// is removed, and the draft flips to `CreationFailed` with the message — so
+/// the row stays where it is with the error visible, and `forget_workspace` is
+/// how it goes away.
+///
+/// The caller supplies the event sink, which is the whole reason this isn't
+/// still inside the Tauri command: the UI path streams into a `Channel` the
+/// frontend opened, and a handoff has no frontend to stream to.
+pub async fn provision_workspace(ctx: WorkspaceProvision<'_>) -> AppResult<Workspace> {
+    // Register as in-progress so the reconciler doesn't flag our worktree dirs
+    // as orphans mid-create. The guard clears on any exit — normal return,
+    // `?`, panic, or task cancellation.
+    let _in_progress_guard = ctx.in_progress.insert(ctx.workspace_dir.to_string());
+
+    // Provisioned links accumulate here so the rollback path can tear down
+    // exactly what succeeded (each carries whether Tethys created its branch).
+    // A failing repo self-cleans inside `provision_repo_worktree`, so it never
+    // appears here.
+    let mut created: Vec<RepoLink> = Vec::new();
+    let orchestrate = async {
+        for repo in ctx.repos {
+            let worktree_path = ctx.registry.plan_worktree_path(ctx.workspace_dir, &repo.key);
+            let link = provision_repo_worktree(RepoProvision {
+                repo,
+                worktree_path: &worktree_path,
+                branch: ctx.branch,
+                paths: ctx.paths,
+                tx: ctx.tx,
+            })
+            .await?;
+            created.push(link);
+        }
+        Ok::<_, AppError>(())
+    }
+    .await;
+
+    match orchestrate {
+        Ok(()) => {
+            let stored = ctx
+                .store
+                .update_workspace(ctx.workspace_id, |ws| {
+                    ws.repo_links = created.clone();
+                    ws.status = WorkspaceStatus::Ready;
+                    Ok(ws.clone())
+                })
+                .await?;
+
+            seed_workspace_root(&stored, ctx.registry, ctx.paths, ctx.tx).await;
+
+            info!(
+                id = %stored.id,
+                branch = %stored.branch,
+                repos = stored.repo_links.len(),
+                "created workspace"
+            );
+            let _ = ctx.tx.0.send(JobEvent::Success);
+            Ok(stored)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            warn!(error = %msg, "workspace create failed; rolling back worktrees");
+            ctx.tx
+                .status(format!("tearing down partial workspace: {msg}"), None);
+
+            // Best-effort teardown of the repos we fully provisioned. Each link
+            // records whether Tethys created its branch, so a pre-existing
+            // branch we merely checked out (e.g. a PR branch) is left intact.
+            for link in created.iter().rev() {
+                teardown_repo_worktree(RepoTeardown {
+                    repo_key: &link.repo_key,
+                    worktree_path: &link.worktree_path,
+                    branch: ctx.branch,
+                    created_branch: link.created_branch,
+                    paths: ctx.paths,
+                    tx: ctx.tx,
+                })
+                .await;
+            }
+
+            // Remove the now-empty parent dir so the reconciler doesn't flag it
+            // as an orphan on the next tick.
+            let parent = ctx.registry.worktree_root.join(ctx.workspace_dir);
+            if parent.exists() && reconcile::is_under(&ctx.registry.worktree_root, &parent) {
+                if let Err(e) = tokio::fs::remove_dir_all(&parent).await {
+                    warn!(
+                        path = %parent.display(),
+                        error = %e,
+                        "failed to remove partial workspace dir"
+                    );
+                }
+            }
+
+            let mutate_result = ctx
+                .store
+                .update_workspace(ctx.workspace_id, |ws| {
+                    ws.status = WorkspaceStatus::CreationFailed {
+                        error: msg.clone(),
+                    };
+                    Ok(())
+                })
+                .await;
+            if let Err(mutate_err) = mutate_result {
+                warn!(error = %mutate_err, "failed to mark workspace as CreationFailed");
+            }
+
+            let _ = ctx.tx.0.send(JobEvent::Failed { error: msg });
+            Err(e)
+        }
+    }
+}
+
+/// Write the two files a session finds at a workspace root: the union-merged
+/// `.claude/settings.local.json` and the generated `CLAUDE.md`. Both are
+/// best-effort — a workspace with neither is still a usable workspace.
+async fn seed_workspace_root(
+    workspace: &Workspace,
+    registry: &RepoRegistry,
+    paths: &Paths,
+    tx: &JobTx,
+) {
+    let Some(workspace_root) = workspace.root_buf() else {
+        return;
+    };
+
+    let repo_keys: Vec<String> = workspace
+        .repo_links
+        .iter()
+        .map(|r| r.repo_key.clone())
+        .collect();
+    if let Err(e) =
+        claude_local::write_workspace_root_settings(&workspace_root, &repo_keys, paths).await
+    {
+        warn!(
+            workspace = %workspace.id,
+            error = %e,
+            "failed to seed workspace-root settings.local.json"
+        );
+        tx.status(format!("workspace-root settings seed failed: {e}"), None);
+    }
+
+    match workspace_doc::regenerate(workspace, registry, paths).await {
+        Ok(Some(path)) => tx.status(format!("wrote {}", path.display()), None),
+        Ok(None) => {}
+        Err(e) => {
+            warn!(
+                workspace = %workspace.id,
+                error = %e,
+                "failed to write workspace-root CLAUDE.md"
+            );
+            tx.status(format!("workspace CLAUDE.md write failed: {e}"), None);
         }
     }
 }

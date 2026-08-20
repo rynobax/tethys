@@ -33,6 +33,10 @@ pub struct Workspace {
     /// resolved at boot.
     #[serde(default)]
     pub claude_binary: Option<String>,
+    /// Where this workspace came from. Defaults to `Ui` for everything
+    /// persisted before handoffs existed, which is what those were.
+    #[serde(default)]
+    pub origin: Origin,
     /// Soft-delete marker. When set, the workspace is hidden from the
     /// sidebar and queued for the hourly purger. Cleared by
     /// `cancel_delete_workspace` to undo before the cron runs.
@@ -85,6 +89,23 @@ pub enum WorkspaceStatus {
     Creating,
     CreationFailed {
         error: String,
+    },
+}
+
+/// Who asked for this workspace. Recorded rather than displayed: a handoff is
+/// a normal workspace in every respect, and the only thing the origin is for
+/// is answering "where did this come from?" after the fact.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Origin {
+    /// The user, in the Tethys UI.
+    #[default]
+    Ui,
+    /// An agent, via the handoff MCP tool.
+    Handoff {
+        from_workspace: WorkspaceId,
+        #[serde(default)]
+        from_session: Option<SessionId>,
     },
 }
 
@@ -197,6 +218,35 @@ pub enum SessionRuntimeState {
 }
 
 impl Workspace {
+    /// A workspace that exists in state but not yet on disk.
+    ///
+    /// Both create paths insert one of these before doing any I/O, so the
+    /// sidebar row appears at its final position from t=0 and — for a handoff
+    /// — so the calling agent has an id to be told about. Provisioning flips
+    /// the status to `Ready` or `CreationFailed` in place; the id and position
+    /// never change.
+    pub fn draft(
+        id: WorkspaceId,
+        branch: String,
+        claude_binary: Option<String>,
+        origin: Origin,
+    ) -> Self {
+        Self {
+            id,
+            branch,
+            created_at: Utc::now(),
+            repo_links: Vec::new(),
+            sessions: Vec::new(),
+            claude_binary,
+            origin,
+            deleted_at: None,
+            archived_at: None,
+            status: WorkspaceStatus::Creating,
+            script_runs: Vec::new(),
+            notes: String::new(),
+        }
+    }
+
     /// `<worktree_root>/<workspace_dir>` — the directory every repo worktree
     /// sits under, and the cwd for a session started at the workspace root.
     ///
@@ -269,6 +319,7 @@ mod tests {
                 .collect(),
             sessions: Vec::new(),
             claude_binary: None,
+            origin: Origin::Ui,
             deleted_at: None,
             archived_at: None,
             status: WorkspaceStatus::Ready,
@@ -456,6 +507,34 @@ mod tests {
         }"#;
         let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
         assert!(matches!(parsed.workspaces[0].status, WorkspaceStatus::Ready));
+    }
+
+    #[test]
+    fn pre_origin_state_defaults_to_the_ui() {
+        // Every workspace persisted before handoffs existed was made by hand,
+        // so the absent field has to read as `Ui` and not as "unknown".
+        let raw = r#"{
+            "workspaces": [
+                {
+                    "id": "abc-123",
+                    "branch": "feat/foo",
+                    "created_at": "2026-04-01T12:00:00Z"
+                }
+            ]
+        }"#;
+        let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
+        assert_eq!(parsed.workspaces[0].origin, Origin::Ui);
+    }
+
+    #[test]
+    fn a_handoff_origin_round_trips() {
+        let origin = Origin::Handoff {
+            from_workspace: "ws-parent".into(),
+            from_session: Some("sess-parent".into()),
+        };
+        let bytes = serde_json::to_vec(&origin).expect("serialize");
+        let back: Origin = serde_json::from_slice(&bytes).expect("deserialize");
+        assert_eq!(origin, back);
     }
 
     #[test]

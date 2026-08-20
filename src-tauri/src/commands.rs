@@ -18,18 +18,19 @@ use crate::github::{
 };
 use crate::inprogress::InProgressWorkspaces;
 use crate::job::{JobEvent, JobTx};
+use crate::mcp::McpLaunch;
 use crate::paths::Paths;
 use crate::provision::{
-    provision_repo_worktree, teardown_repo_worktree, RepoProvision, RepoTeardown,
+    provision_repo_worktree, provision_workspace, teardown_repo_worktree, RepoProvision,
+    RepoTeardown, WorkspaceProvision,
 };
 use crate::purge::Purger;
 use crate::reconcile::{self, Discrepancies};
 use crate::registry::{self, starter_template, RegistryLoad, Repo, RepoRegistry};
 use crate::scripts::{ScriptInfo, ScriptSupervisor};
-use crate::sessions::{SessionInfo, SessionSupervisor};
+use crate::sessions::{start_session, SessionInfo, SessionSupervisor, StartSession};
 use crate::state::{
-    AttachedPr, ClaudeSessionMeta, RepoLink, ScriptRunMeta, SystemErrorEntry, Workspace,
-    WorkspaceId, WorkspaceStatus,
+    AttachedPr, Origin, ScriptRunMeta, SystemErrorEntry, Workspace, WorkspaceId,
 };
 use crate::store::Store;
 use crate::theme::Theme;
@@ -295,17 +296,11 @@ pub struct CreateWorkspaceArgs {
     pub claude_binary: Option<String>,
 }
 
-/// Orchestrates clone + worktree add + setup script for every selected repo,
-/// streaming progress to the frontend via `on_event`.
-///
-/// The workspace lands in `AppState` as `Creating` *before* any I/O so the
-/// sidebar row appears at its final position from t=0; on success it flips
-/// to `Ready`, on failure to `CreationFailed { error }` (and the worktrees
-/// get torn down). The boot-time prune in `Store::load` clears any non-Ready
-/// entries left by a crashed run.
+/// Validate the request, insert the `Creating` draft, then hand the actual
+/// provisioning to [`provision_workspace`], streaming its progress to the
+/// frontend via `on_event`.
 #[tauri::command]
 pub async fn create_workspace(
-    app: AppHandle,
     store: State<'_, Arc<Store>>,
     registry: State<'_, Arc<RegistryLoad>>,
     paths: State<'_, Paths>,
@@ -360,23 +355,7 @@ pub async fn create_workspace(
         )));
     }
 
-    // Insert the draft now so the sidebar row exists for the entire
-    // provisioning lifetime. `status=Creating` drives the spinner UI; later
-    // mutations flip it to `Ready` or `CreationFailed` in place — id and
-    // position never change.
-    let draft = Workspace {
-        id: id.clone(),
-        branch: branch.clone(),
-        created_at: Utc::now(),
-        repo_links: Vec::new(),
-        sessions: Vec::new(),
-        claude_binary: claude_binary.clone(),
-        deleted_at: None,
-        archived_at: None,
-        status: WorkspaceStatus::Creating,
-        script_runs: Vec::new(),
-        notes: String::new(),
-    };
+    let draft = Workspace::draft(id.clone(), branch.clone(), claude_binary, Origin::Ui);
     store
         .mutate(|s| {
             if s.workspaces.iter().any(|w| w.id == draft.id) {
@@ -389,101 +368,21 @@ pub async fn create_workspace(
             Ok(())
         })
         .await?;
-    emit_workspace_changed(&app, &id);
+    store.notify_changed(&id);
 
-    // Register as in-progress so the reconciler doesn't flag our worktree
-    // dirs as orphans mid-create. Guard removes the entry on drop — normal
-    // return, `?`, panic, or task cancellation.
-    let _in_progress_guard = in_progress.insert(workspace_dir.clone());
     let tx = spawn_event_forwarder(on_event);
-
-    // Provisioned links accumulate here so the rollback path can tear down
-    // exactly what succeeded (each carries whether Tethys created its branch).
-    // A failing repo self-cleans inside `provision_repo_worktree`, so it never
-    // appears here.
-    let mut created: Vec<RepoLink> = Vec::new();
-    let orchestrate = async {
-        for repo in &selected {
-            let worktree_path = reg.plan_worktree_path(&workspace_dir, &repo.key);
-            let link = provision_repo_worktree(RepoProvision {
-                repo,
-                worktree_path: &worktree_path,
-                branch: &branch,
-                paths: &paths,
-                tx: &tx,
-            })
-            .await?;
-            created.push(link);
-        }
-        Ok::<_, AppError>(())
-    }
-    .await;
-
-    match orchestrate {
-        Ok(()) => {
-            let stored = store
-                .update_workspace(&id, |ws| {
-                    ws.repo_links = created.clone();
-                    ws.status = WorkspaceStatus::Ready;
-                    Ok(ws.clone())
-                })
-                .await?;
-
-            regen_workspace_root_settings(&stored, &paths, &tx).await;
-            regen_workspace_claude_md(&stored, reg, &paths, &tx).await;
-
-            info!(id = %stored.id, branch = %stored.branch, repos = stored.repo_links.len(), "created workspace");
-            let _ = tx.0.send(JobEvent::Success);
-            Ok(stored)
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            warn!(error = %msg, "workspace create failed; rolling back worktrees");
-            tx.status(format!("tearing down partial workspace: {msg}"), None);
-
-            // Best-effort teardown of the repos we fully provisioned. Each link
-            // records whether Tethys created its branch, so a pre-existing
-            // branch we merely checked out (e.g. a PR branch) is left intact.
-            for link in created.iter().rev() {
-                teardown_repo_worktree(RepoTeardown {
-                    repo_key: &link.repo_key,
-                    worktree_path: &link.worktree_path,
-                    branch: &branch,
-                    created_branch: link.created_branch,
-                    paths: &paths,
-                    tx: &tx,
-                })
-                .await;
-            }
-
-            // Remove the now-empty parent dir so the reconciler doesn't
-            // flag it as an orphan on the next tick.
-            let parent = reg.worktree_root.join(&workspace_dir);
-            if parent.exists() && reconcile::is_under(&reg.worktree_root, &parent) {
-                if let Err(e) = tokio::fs::remove_dir_all(&parent).await {
-                    warn!(path = %parent.display(), error = %e, "failed to remove partial workspace dir");
-                }
-            }
-
-            // Flip the draft to CreationFailed so the row stays put with the
-            // error visible in the detail pane. The user dismisses via the
-            // existing `forget_workspace` command.
-            let mutate_result = store
-                .update_workspace(&id, |ws| {
-                    ws.status = WorkspaceStatus::CreationFailed {
-                        error: msg.clone(),
-                    };
-                    Ok(())
-                })
-                .await;
-            if let Err(mutate_err) = mutate_result {
-                warn!(error = %mutate_err, "failed to mark workspace as CreationFailed");
-            }
-
-            let _ = tx.0.send(JobEvent::Failed { error: msg });
-            Err(e)
-        }
-    }
+    provision_workspace(WorkspaceProvision {
+        workspace_id: &id,
+        branch: &branch,
+        workspace_dir: &workspace_dir,
+        repos: &selected,
+        registry: reg,
+        paths: &paths,
+        store: &store,
+        in_progress: &in_progress,
+        tx: &tx,
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -950,16 +849,21 @@ pub async fn start_claude_session(
     store: State<'_, Arc<Store>>,
     claude_bin: State<'_, ClaudeBin>,
     tmux_bin: State<'_, TmuxBin>,
+    mcp: State<'_, Option<McpLaunch>>,
     args: StartClaudeArgs,
 ) -> AppResult<SessionInfo> {
-    spawn_claude(
-        &supervisor,
-        &store,
-        &claude_bin,
-        &tmux_bin,
-        &args,
-        SpawnOpts::default(),
-    )
+    start_session(StartSession {
+        supervisor: &supervisor,
+        store: &store,
+        workspace_id: &args.workspace_id,
+        repo_key: args.repo_key,
+        claude_bin: &claude_bin.0,
+        tmux_bin: &tmux_bin.0,
+        mcp: mcp.inner().as_ref(),
+        resume_claude_sid: None,
+        session_binary: None,
+        brief: None,
+    })
     .await
 }
 
@@ -980,6 +884,7 @@ pub async fn resume_claude_session(
     store: State<'_, Arc<Store>>,
     claude_bin: State<'_, ClaudeBin>,
     tmux_bin: State<'_, TmuxBin>,
+    mcp: State<'_, Option<McpLaunch>>,
     args: ResumeClaudeArgs,
 ) -> AppResult<SessionInfo> {
     // Pull claude_session_id + cwd + binary override from the
@@ -1034,21 +939,18 @@ pub async fn resume_claude_session(
         )
     })?;
 
-    let start = StartClaudeArgs {
-        workspace_id: args.workspace_id,
+    start_session(StartSession {
+        supervisor: &supervisor,
+        store: &store,
+        workspace_id: &args.workspace_id,
         repo_key: args.repo_key,
-    };
-    spawn_claude(
-        &supervisor,
-        &store,
-        &claude_bin,
-        &tmux_bin,
-        &start,
-        SpawnOpts {
-            resume_claude_sid: Some(&claude_sid),
-            session_binary: session_binary.as_deref(),
-        },
-    )
+        claude_bin: &claude_bin.0,
+        tmux_bin: &tmux_bin.0,
+        mcp: mcp.inner().as_ref(),
+        resume_claude_sid: Some(&claude_sid),
+        session_binary: session_binary.as_deref(),
+        brief: None,
+    })
     .await
 }
 
@@ -1085,6 +987,7 @@ pub async fn switch_claude_binary(
     store: State<'_, Arc<Store>>,
     claude_bin: State<'_, ClaudeBin>,
     tmux_bin: State<'_, TmuxBin>,
+    mcp: State<'_, Option<McpLaunch>>,
     args: SwitchClaudeBinaryArgs,
 ) -> AppResult<SessionInfo> {
     let binary = args.claude_binary.trim().to_string();
@@ -1131,124 +1034,19 @@ pub async fn switch_claude_binary(
         tmux::kill_session(&tmux_bin.0, &args.session_meta_id);
     }
 
-    let start = StartClaudeArgs {
-        workspace_id: args.workspace_id,
+    start_session(StartSession {
+        supervisor: &supervisor,
+        store: &store,
+        workspace_id: &args.workspace_id,
         repo_key,
-    };
-    spawn_claude(
-        &supervisor,
-        &store,
-        &claude_bin,
-        &tmux_bin,
-        &start,
-        SpawnOpts {
-            resume_claude_sid: resume_sid,
-            session_binary: Some(&binary),
-        },
-    )
+        claude_bin: &claude_bin.0,
+        tmux_bin: &tmux_bin.0,
+        mcp: mcp.inner().as_ref(),
+        resume_claude_sid: resume_sid,
+        session_binary: Some(&binary),
+        brief: None,
+    })
     .await
-}
-
-/// Optional overrides applied when (re)spawning a claude session.
-#[derive(Default)]
-struct SpawnOpts<'a> {
-    /// Resume an existing conversation via `claude --resume <id>`.
-    resume_claude_sid: Option<&'a str>,
-    /// Per-session binary override to run under and persist onto the new meta.
-    /// Takes precedence over the workspace default; `None` falls back to it.
-    session_binary: Option<&'a str>,
-}
-
-async fn spawn_claude(
-    supervisor: &Arc<SessionSupervisor>,
-    store: &Arc<Store>,
-    claude_bin: &ClaudeBin,
-    tmux_bin: &TmuxBin,
-    args: &StartClaudeArgs,
-    opts: SpawnOpts<'_>,
-) -> AppResult<SessionInfo> {
-    if tmux_bin.0.as_os_str().is_empty() {
-        return Err(AppError::Other(
-            "tmux not found — install with `brew install tmux` and restart Tethys".into(),
-        ));
-    }
-
-    // Resolve the cwd: a specific repo's worktree, or — when repo_key is
-    // None — the workspace root (parent of every repo worktree).
-    // Also pull the per-workspace claude binary override, if any.
-    let (cwd, ws_binary) = store
-        .read(|s| {
-            let w = s.find_workspace(&args.workspace_id)?;
-            let cwd = match args.repo_key.as_deref() {
-                Some(key) => w.link(key).map(|r| r.worktree_path.clone()),
-                None => w.root_buf(),
-            }?;
-            Some((cwd, w.claude_binary.clone()))
-        })
-        .await
-        .ok_or_else(|| {
-            AppError::Other(match args.repo_key.as_deref() {
-                Some(key) => format!(
-                    "no worktree for {}/{} in state",
-                    args.workspace_id, key
-                ),
-                None => format!(
-                    "workspace {} has no repos — can't resolve a root dir",
-                    args.workspace_id
-                ),
-            })
-        })?;
-
-    // Session override wins over the workspace default, which wins over the
-    // app-wide binary resolved at boot.
-    let resolved_bin = match opts.session_binary.or(ws_binary.as_deref()) {
-        Some(bin) => claude::resolve_named(bin)?,
-        None => claude_bin.0.clone(),
-    };
-
-    let (info, _token) = supervisor.spawn_claude(
-        args.workspace_id.clone(),
-        args.repo_key.clone(),
-        &cwd,
-        &tmux_bin.0,
-        &resolved_bin,
-        opts.resume_claude_sid,
-    )?;
-
-    // Persist a ClaudeSessionMeta entry so resume works across restarts.
-    // claude_session_id is filled in by the SessionStart hook once it
-    // arrives. We key on the Tethys-internal `id` (== SessionSupervisor id)
-    // so the UI and supervisor use a shared identifier.
-    let meta = ClaudeSessionMeta {
-        id: info.id.clone(),
-        repo_key: args.repo_key.clone(),
-        cwd: cwd.clone(),
-        claude_session_id: None,
-        transcript_path: None,
-        claude_binary: opts.session_binary.map(str::to_string),
-        hidden: false,
-        runtime_state: None,
-        notification_type: None,
-        turn_acknowledged: false,
-    };
-
-    store
-        .update_workspace(&args.workspace_id, |ws| {
-            // Resuming? Drop the prior meta for this Claude conversation so
-            // we don't accumulate dormant duplicates with the same
-            // claude_session_id across runs.
-            if let Some(csid) = opts.resume_claude_sid {
-                ws.sessions
-                    .retain(|m| m.claude_session_id.as_deref() != Some(csid));
-            }
-            // Defensive: no dupes of the new tethys id either.
-            ws.sessions.retain(|m| m.id != meta.id);
-            ws.sessions.push(meta);
-            Ok(())
-        })
-        .await?;
-
-    Ok(info)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1582,30 +1380,6 @@ JSON.stringify(paths);"#;
 /// current set of repo links. Called once at workspace create; the file is
 /// not regenerated thereafter. Best-effort: failures are surfaced as a
 /// status event but never fail the parent command.
-async fn regen_workspace_root_settings(workspace: &Workspace, paths: &Paths, tx: &JobTx) {
-    let Some(workspace_root) = workspace.root_buf() else {
-        return;
-    };
-    let repo_keys: Vec<String> = workspace
-        .repo_links
-        .iter()
-        .map(|r| r.repo_key.clone())
-        .collect();
-    if let Err(e) =
-        claude_local::write_workspace_root_settings(&workspace_root, &repo_keys, paths).await
-    {
-        warn!(
-            workspace = %workspace.id,
-            error = %e,
-            "failed to seed workspace-root settings.local.json"
-        );
-        tx.status(
-            format!("workspace-root settings seed failed: {e}"),
-            None,
-        );
-    }
-}
-
 /// Extend an existing workspace-root settings.local.json with the entries
 /// of a newly-added repo. Best-effort.
 async fn append_repo_to_workspace_root_settings(

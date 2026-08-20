@@ -71,6 +71,13 @@ impl Paths {
         self.data_dir.join("hook.sock")
     }
 
+    /// Socket the handoff MCP server talks to. Separate from `hook.sock`
+    /// because the traffic is request/reply and its failures must surface —
+    /// the hook's whole contract is the opposite.
+    pub fn mcp_socket(&self) -> PathBuf {
+        self.data_dir.join("mcp.sock")
+    }
+
     pub fn claude_settings_lock(&self) -> PathBuf {
         self.data_dir.join("claude-settings.lock")
     }
@@ -93,13 +100,21 @@ pub fn claude_settings_path() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".claude").join("settings.json"))
 }
 
-/// Resolve the tethys-hook companion binary next to the current executable.
-/// In dev, Cargo places both at `<workspace>/target/debug/`; in a bundled
-/// app they'd need to sit side by side too.
-pub fn tethys_hook_bin() -> std::io::Result<PathBuf> {
+/// Resolve a companion binary sitting next to the current executable. In dev,
+/// Cargo places them all at `<workspace>/target/debug/`; in a bundled app
+/// they'd need to sit side by side too.
+fn companion_bin(name: &str) -> std::io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let parent = exe.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "no parent for current exe")
     })?;
-    Ok(parent.join("tethys-hook"))
+    Ok(parent.join(name))
+}
+
+pub fn tethys_hook_bin() -> std::io::Result<PathBuf> {
+    companion_bin("tethys-hook")
+}
+
+pub fn tethys_mcp_bin() -> std::io::Result<PathBuf> {
+    companion_bin("tethys-mcp")
 }

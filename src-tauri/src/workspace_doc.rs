@@ -261,7 +261,7 @@ fn render(doc: &WorkspaceDoc<'_>) -> String {
 mod tests {
     use super::*;
     use crate::registry::{Repo, WorkspaceDocConfig};
-    use crate::state::{RepoLink, WorkspaceStatus};
+    use crate::state::{Origin, RepoLink, WorkspaceStatus};
     use chrono::Utc;
 
     fn repo(key: &str, notes: Option<&str>) -> Repo {
@@ -296,6 +296,7 @@ mod tests {
                 .collect(),
             sessions: Vec::new(),
             claude_binary: None,
+            origin: Origin::Ui,
             deleted_at: None,
             archived_at: None,
             status: WorkspaceStatus::Ready,

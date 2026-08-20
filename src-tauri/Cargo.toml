@@ -14,6 +14,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tethys-hook = { path = "../crates/tethys-hook" }
+# Wire format only — `default-features = false` keeps the MCP protocol stack
+# (rmcp) in the companion binary and out of the app build.
+tethys-mcp = { path = "../crates/tethys-mcp", default-features = false }
 tauri = { version = "2", features = [] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"

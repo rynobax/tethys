@@ -1,3 +1,3 @@
 [workspace]
-members = ["src-tauri", "crates/tethys-hook"]
+members = ["src-tauri", "crates/tethys-hook", "crates/tethys-mcp"]
 resolver = "2"

@@ -8,7 +8,7 @@ This repo has no branches — work directly on `main` and commit there. Don't cr
 
 ## Stack
 
-Tauri 2.x shell · Rust core (`src-tauri/`) · React + TypeScript frontend (`src/`) · xterm.js (DOM renderer) for terminal rendering · `portable-pty` for PTY spawning · JSON file persistence (no SQLite) · `tethys-hook` companion binary (`crates/tethys-hook/`) that forwards Claude Code hooks over a Unix socket.
+Tauri 2.x shell · Rust core (`src-tauri/`) · React + TypeScript frontend (`src/`) · xterm.js (DOM renderer) for terminal rendering · `portable-pty` for PTY spawning · JSON file persistence (no SQLite) · `tethys-hook` companion binary (`crates/tethys-hook/`) that forwards Claude Code hooks over a Unix socket · `tethys-mcp` companion binary (`crates/tethys-mcp/`, built on the `rmcp` SDK) that gives each session one MCP tool for handing work off to a new workspace.
 
 ## Running
 
@@ -16,13 +16,23 @@ Tauri 2.x shell · Rust core (`src-tauri/`) · React + TypeScript frontend (`src
 pnpm tauri dev
 ```
 
-State lives at `~/Library/Application Support/app.tethys.dev/` (`state.json`, `logs/`, `repos.toml`, auto-generated `repos.schema.json`, `hook.sock`).
+State lives at `~/Library/Application Support/app.tethys.dev/` (`state.json`, `logs/`, `repos.toml`, auto-generated `repos.schema.json`, `hook.sock`, `mcp.sock`).
 
 Tethys writes its hook entries into `~/.claude/settings.json` on every boot (keyed by `description: "Tethys session monitor"`). They're idempotent — safe to leave across reinstalls.
 
 It also generates a `CLAUDE.md` at each workspace root (`workspace_doc.rs`) explaining the worktree layout and telling sessions to ask for a missing repo rather than reading some other checkout. Rewritten on create, on repo-add, and at every boot. Claude Code reads CLAUDE.md from every parent dir, so the root file also applies to per-repo sessions.
 
 The prose lives in `repos.toml`, not in Rust: `[workspace_doc].body` (with `{branch}` / `{repo_list}` / `{available_repos}` / `{workspace_root}` / `{clone_dir}` placeholders) falling back to `DEFAULT_BODY`, plus per-repo `claude_notes`. Rust owns only the marker line and the "Repo notes" section.
+
+## Handoffs
+
+A session can create a *new* workspace — a **handoff** — through one MCP tool, `mcp__tethys__create_workspace`. Tethys renders a `--mcp-config` per session at spawn time (inline JSON, nothing on disk) pointing at `tethys-mcp`, and pairs it with `--allowed-tools` so the call can't stall on a permission dialog. Never `--strict-mcp-config`, which would cut the session off from every other MCP server.
+
+The calling workspace and session ids are baked into that config's `env` block, not passed as tool arguments — that's what makes the recorded `Origin` unforgeable. The new workspace inherits the caller's `claude_binary`, so work can't drift out of a `claude-hipaa` workspace by accident.
+
+The tool returns as soon as the `Creating` draft is in state: provisioning runs in the background and the calling agent never hears how it went, so a failure shows up only as a `CreationFailed` row in the UI. Every Tethys-spawned session gets the tool, including handoff-created ones — chains are possible and there is no concurrency cap yet.
+
+One trap worth remembering: Claude Code negotiates MCP protocol `2026-07-28`, which requires `ttlMs` on a `tools/list` reply. `rmcp`'s `with_all_items` omits it, and a reply without it is silently rejected and retried until the client reports "tools fetch failed". `tools_result()` sets it, and a test in `crates/tethys-mcp` holds it there.
 
 ## Logging & diagnostics
 

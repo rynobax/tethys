@@ -6,11 +6,13 @@ mod commands;
 mod error;
 mod git;
 mod github;
+mod handoff;
 mod hook_install;
 mod hook_listener;
 mod inprogress;
 mod job;
 mod logging;
+mod mcp;
 mod paths;
 mod pending_permissions;
 mod probe;
@@ -114,17 +116,16 @@ pub fn run() {
             handle.manage::<Arc<Store>>(store.clone());
 
             // --- claude binary (non-fatal if missing; surface to UI later) --
-            match claude::resolve() {
-                Ok(path) => {
-                    app.manage(ClaudeBin(path));
-                }
+            let claude_bin_path = match claude::resolve() {
+                Ok(path) => path,
                 Err(e) => {
                     warn!(error = %e, "claude binary not resolved at startup");
                     // Still manage a placeholder so commands can surface
                     // the error at spawn time rather than panicking.
-                    app.manage(ClaudeBin(std::path::PathBuf::new()));
+                    std::path::PathBuf::new()
                 }
-            }
+            };
+            app.manage(ClaudeBin(claude_bin_path.clone()));
 
             // --- tmux binary (claude sessions run inside a tmux server so
             // they survive app restarts until reboot).
@@ -189,6 +190,36 @@ pub fn run() {
             // state against Claude Code's own `~/.claude/sessions/*.json`.
             probe::spawn(supervisor.clone());
 
+            // --- handoff MCP server ----------------------------------------
+            // `McpLaunch` is the spawn side (the `--mcp-config` every session
+            // is launched with); the listener is the other end of it. Resolved
+            // once here because both halves are fixed for the run: the registry
+            // only reloads at boot, and the companion binary doesn't move.
+            let in_progress = inprogress::InProgressWorkspaces::new();
+            app.manage(in_progress.clone());
+
+            let registry_for_handoff: Arc<RegistryLoad> =
+                app.state::<Arc<RegistryLoad>>().inner().clone();
+            let mcp_launch = mcp::McpLaunch::resolve(&paths, &registry_for_handoff);
+            app.manage::<Option<mcp::McpLaunch>>(mcp_launch.clone());
+
+            let handoff = Arc::new(handoff::Handoff::new(
+                store.clone(),
+                registry_for_handoff,
+                paths.clone(),
+                in_progress,
+                supervisor.clone(),
+                tmux_bin_path.clone().unwrap_or_default(),
+                claude_bin_path,
+                mcp_launch,
+            ));
+            let mcp_socket = paths.mcp_socket();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = mcp::listen(&mcp_socket, handoff).await {
+                    error!(error = %e, "mcp listener failed to start");
+                }
+            });
+
             // --- github poller ---------------------------------------------
             let registry_for_poller: Arc<RegistryLoad> = app.state::<Arc<RegistryLoad>>().inner().clone();
             let poller = Arc::new(GithubPoller::new(
@@ -228,7 +259,6 @@ pub fn run() {
             });
 
             app.manage(paths);
-            app.manage(inprogress::InProgressWorkspaces::new());
 
             // --- menu (append Theme items under the default View submenu) --
             if let Err(e) = install_menu(&handle) {

@@ -221,7 +221,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{Workspace, WorkspaceStatus};
+    use crate::state::{Origin, Workspace, WorkspaceStatus};
     use chrono::Utc;
     use std::sync::Mutex;
 
@@ -244,6 +244,7 @@ mod tests {
             repo_links: Vec::new(),
             sessions: Vec::new(),
             claude_binary: None,
+            origin: Origin::Ui,
             deleted_at: None,
             archived_at: None,
             status,
