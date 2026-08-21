@@ -8,6 +8,12 @@ pub enum AppError {
     #[error("that would make the two workspaces wait on each other")]
     BlockerWouldCycle,
 
+    #[error("a workspace can only wait on one in the same folder")]
+    BlockerInAnotherFolder,
+
+    #[error("folder not found: {0}")]
+    FolderNotFound(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

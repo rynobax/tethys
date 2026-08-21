@@ -1,4 +1,5 @@
 export type WorkspaceId = string;
+export type FolderId = string;
 export type SessionId = string;
 
 export type SessionRuntimeState =
@@ -76,6 +77,17 @@ export interface ClaudeSessionMeta {
   hidden: boolean;
 }
 
+/** A named place in the sidebar holding workspaces. Flat, and purely
+ *  organisational — membership decides where a row is drawn, nothing else.
+ *  The Default folder is not one of these: it's `Workspace.folder === null`,
+ *  which is what makes it always present and impossible to rename or delete. */
+export interface Folder {
+  id: FolderId;
+  name: string;
+  /** Persisted, so the folder you work out of stays open across restarts. */
+  collapsed: boolean;
+}
+
 export type WorkspaceStatus =
   | { kind: "ready" }
   | { kind: "creating" }
@@ -93,9 +105,8 @@ export interface Workspace {
   /** Soft-delete marker. The workspace is hidden from the sidebar until the
    *  hourly purger runs (only purges entries older than 1 hour). */
   deleted_at: string | null;
-  /** Archive marker. Archived workspaces render in a collapsed group at
-   *  the bottom of the sidebar. */
-  archived_at: string | null;
+  /** Which folder the workspace sits in; `null` is the Default folder. */
+  folder: FolderId | null;
   /** Lifecycle state. `creating` rows render as a spinner row in the sidebar
    *  and a JobLogPane in the detail; `creation_failed` rows render the
    *  failed log so the user can read the error before dismissing. */
@@ -139,6 +150,8 @@ export interface CreateWorkspaceArgs {
   branch: string;
   repo_selections: string[];
   claude_binary?: string | null;
+  /** Folder the new workspace lands in; `null`/absent is Default. */
+  folder?: FolderId | null;
 }
 
 export interface Repo {

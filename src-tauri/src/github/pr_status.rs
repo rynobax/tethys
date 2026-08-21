@@ -1339,13 +1339,13 @@ mod tests {
                 claude_binary: None,
                 origin: crate::state::Origin::Ui,
                 deleted_at: None,
-                archived_at: None,
+                folder: None,
                 status: Default::default(),
                 script_runs: Vec::new(),
                 notes: String::new(),
             blocked_by: None,
             }],
-            system_errors: Vec::new(),
+            ..Default::default()
         }
     }
 

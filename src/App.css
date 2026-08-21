@@ -753,7 +753,7 @@ button.danger.primary:hover:not(:disabled) {
   font-family: "SF Mono", ui-monospace, monospace;
 }
 
-.archive-banner {
+.ready-banner {
   background: color-mix(in oklab, #a371f7 14%, var(--bg));
   border: 1px solid color-mix(in oklab, #a371f7 40%, transparent);
   border-radius: 6px;
@@ -1528,11 +1528,6 @@ button.danger.primary:hover:not(:disabled) {
   color: var(--muted);
 }
 
-.workspace-list > li.is-archived .workspace-name,
-.workspace-list > li.is-archived .workspace-prs {
-  opacity: 0.55;
-}
-
 /* `.is-dragging` is matched without the `.workspace-list >` prefix so the
    styles still apply when dnd-kit's DragOverlay wraps the row in its own
    positioning div, breaking the direct-child relationship. */
@@ -1545,7 +1540,7 @@ li.is-dragging {
   border-radius: 8px;
 }
 
-.archive-header {
+.folder-header {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1560,22 +1555,53 @@ li.is-dragging {
   margin-top: 4px;
 }
 
-.archive-header:hover {
+.folder-header:hover {
   background: rgba(125, 125, 125, 0.08);
   color: var(--fg);
 }
 
-.archive-header .disclosure {
+/* Default is a label, not a thing you drag or fold away. */
+.folder-header.is-default {
+  cursor: default;
+}
+
+/* Drop target under the pointer. Also the only feedback a collapsed folder
+   can give, since its rows aren't on screen to shift out of the way. */
+.folder-header.is-over {
+  background: color-mix(in oklab, var(--accent, #58a6ff) 18%, transparent);
+  color: var(--fg);
+}
+
+.folder-header .disclosure {
   display: inline-block;
   width: 10px;
   transition: transform 0.12s ease;
 }
 
-.archive-header .disclosure.open {
+.folder-header .disclosure.open {
   transform: rotate(90deg);
 }
 
-.archive-count {
+.folder-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-name-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: none;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+.folder-count {
   margin-left: auto;
   font-family: "SF Mono", ui-monospace, monospace;
   font-size: 10px;
@@ -1584,6 +1610,42 @@ li.is-dragging {
   border-radius: 8px;
   letter-spacing: 0;
   text-transform: none;
+}
+
+/* Sits below the scrolling list, at the foot of the card. Quieter than
+   New workspace above it — creating a folder is housekeeping, not the thing
+   the sidebar is for. */
+.sidebar-newfolder {
+  padding: 4px 8px 8px;
+  border-top: 1px solid var(--border);
+}
+
+.sidebar-newfolder button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  border-color: transparent;
+  background: transparent;
+}
+
+.sidebar-newfolder button:hover {
+  color: var(--fg);
+  background: rgba(125, 125, 125, 0.1);
+}
+
+.new-folder-plus {
+  font-weight: 700;
+}
+
+.sidebar-newfolder .folder-name-input {
+  width: 100%;
+  font-size: 11px;
 }
 
 .context-menu {

@@ -1,4 +1,5 @@
 import type {
+  Folder,
   GithubPrStatus,
   RepoLink,
   Workspace,
@@ -52,14 +53,16 @@ export function isReadyToDelete(ws: Workspace): boolean {
 export type WorkspaceRow = { workspace: Workspace; depth: number };
 
 /**
- * Flatten the active workspaces into the order the sidebar draws them, with a
- * blocked workspace tucked under the one it's waiting on.
+ * Flatten one folder's workspaces into the order the sidebar draws them, with
+ * a blocked workspace tucked under the one it's waiting on.
  *
  * Blocked-ness is decided *here* rather than stored, so it can only ever mean
- * "my blocker is one of the rows on screen". Archiving or soft-deleting a
- * blocker drops it out of `workspaces`, which un-nests everything waiting on
- * it without touching a single `blocked_by` field — and undoing either brings
- * the nesting straight back.
+ * "my blocker is one of the rows I'm being drawn with". Soft-deleting a
+ * blocker drops it out of `workspaces`, and moving it to another folder drops
+ * it out of *this* call, which un-nests everything waiting on it without
+ * touching a single `blocked_by` field — and undoing either brings the nesting
+ * straight back. That the folder boundary works this way is why `folderSections`
+ * calls this once per folder rather than passing folders in.
  *
  * Fan-out is ordinary: a blocker holding up three workspaces gets three
  * children. Fan-in can't happen, because `blocked_by` is a single field.
@@ -106,20 +109,54 @@ export function workspaceTree(workspaces: Workspace[]): WorkspaceRow[] {
   return out;
 }
 
+/** A folder and the rows the sidebar draws under it. `folder: null` is the
+ *  Default folder — the absence of a folder rather than one of them. */
+export type FolderSection = { folder: Folder | null; rows: WorkspaceRow[] };
+
+/**
+ * Cut the sidebar's workspaces into their folders: Default first, then the
+ * folders in their stored order, each one's rows nested by blocker.
+ *
+ * Empty sections are kept — an empty folder still needs a header to drop onto.
+ * A workspace naming a folder that isn't in `folders` lands in Default, which
+ * mirrors the boot-time prune in Rust rather than making the row disappear
+ * until the next restart.
+ */
+export function folderSections(
+  workspaces: Workspace[],
+  folders: Folder[],
+): FolderSection[] {
+  const known = new Set(folders.map((f) => f.id));
+  const members = (id: string | null) =>
+    workspaces.filter((w) =>
+      id === null ? w.folder === null || !known.has(w.folder) : w.folder === id,
+    );
+  return [
+    { folder: null, rows: workspaceTree(members(null)) },
+    ...folders.map((folder) => ({
+      folder,
+      rows: workspaceTree(members(folder.id)),
+    })),
+  ];
+}
+
 /**
  * The workspaces that may legally become `workspaceId`'s blocker: everything
- * on screen except itself and anything already waiting on it, directly or
- * through a chain. Picking one of those would close a cycle.
+ * in the same folder except itself and anything already waiting on it, directly
+ * or through a chain. Picking one of those would close a cycle.
  *
- * The Rust command enforces this too — this exists so an illegal choice is
- * never offered, not to be the only guard. A cycle already present in
- * `state.json` bounds the walk and excludes the candidate.
+ * Same folder, because nesting is only ever drawn within one — a cross-folder
+ * link would be stored and then never appear. The Rust command enforces both
+ * rules too; this exists so an illegal choice is never offered, not to be the
+ * only guard. A cycle already present in `state.json` bounds the walk and
+ * excludes the candidate.
  */
 export function blockerCandidates(
   workspaces: Workspace[],
   workspaceId: WorkspaceId,
 ): Workspace[] {
   const byId = new Map(workspaces.map((w) => [w.id, w]));
+  const folder = byId.get(workspaceId)?.folder ?? null;
   const waitsOnTarget = (start: WorkspaceId): boolean => {
     let cursor: WorkspaceId | null = start;
     for (let hops = 0; hops <= workspaces.length; hops++) {
@@ -129,5 +166,8 @@ export function blockerCandidates(
     }
     return true;
   };
-  return workspaces.filter((w) => w.id !== workspaceId && !waitsOnTarget(w.id));
+  return workspaces.filter(
+    (w) =>
+      w.id !== workspaceId && w.folder === folder && !waitsOnTarget(w.id),
+  );
 }

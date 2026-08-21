@@ -9,6 +9,8 @@ export { Channel };
 
 import type {
   Discrepancies,
+  Folder,
+  FolderId,
   GithubAuthSnapshot,
   GithubPrStatus,
   JobEvent,
@@ -61,12 +63,6 @@ export const cancelDeleteWorkspace = (id: WorkspaceId) =>
 export const forgetWorkspace = (id: WorkspaceId) =>
   invoke<void>("forget_workspace", { id });
 
-export const archiveWorkspace = (id: WorkspaceId) =>
-  invoke<void>("archive_workspace", { id });
-
-export const unarchiveWorkspace = (id: WorkspaceId) =>
-  invoke<void>("unarchive_workspace", { id });
-
 export const setWorkspaceNotes = (workspaceId: WorkspaceId, notes: string) =>
   invoke<void>("set_workspace_notes", {
     args: { workspace_id: workspaceId, notes },
@@ -83,6 +79,38 @@ export const setWorkspaceBlocker = (
 
 export const openInVscode = (id: WorkspaceId) =>
   invoke<void>("open_in_vscode", { id });
+
+// ── folders ────────────────────────────────────────────────────────────────
+
+export const listFolders = () => invoke<Folder[]>("list_folders");
+
+export const createFolder = (name: string) =>
+  invoke<Folder>("create_folder", { name });
+
+export const renameFolder = (folderId: FolderId, name: string) =>
+  invoke<void>("rename_folder", { args: { folder_id: folderId, name } });
+
+/** Contents fall back to the Default folder. */
+export const deleteFolder = (id: FolderId) =>
+  invoke<void>("delete_folder", { id });
+
+export const setFolderCollapsed = (folderId: FolderId, collapsed: boolean) =>
+  invoke<void>("set_folder_collapsed", {
+    args: { folder_id: folderId, collapsed },
+  });
+
+export const reorderFolders = (ids: FolderId[]) =>
+  invoke<void>("reorder_folders", { ids });
+
+/** `folder: null` files them into Default. A blocker stack moves as a unit,
+ *  so this normally carries every id in the stack at once. */
+export const moveWorkspacesToFolder = (
+  workspaceIds: WorkspaceId[],
+  folder: FolderId | null,
+) =>
+  invoke<void>("move_workspaces_to_folder", {
+    args: { workspace_ids: workspaceIds, folder },
+  });
 
 // ── claude sessions ────────────────────────────────────────────────────────
 

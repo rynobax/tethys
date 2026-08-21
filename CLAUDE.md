@@ -34,11 +34,23 @@ The tool returns as soon as the `Creating` draft is in state: provisioning runs 
 
 One trap worth remembering: Claude Code negotiates MCP protocol `2026-07-28`, which requires `ttlMs` on a `tools/list` reply. `rmcp`'s `with_all_items` omits it, and a reply without it is silently rejected and retried until the client reports "tools fetch failed". `tools_result()` sets it, and a test in `crates/tethys-mcp` holds it there.
 
+## Folders
+
+The sidebar is a partition: every workspace sits in exactly one folder, and `folder: None` *is* the **Default** folder — deliberately not a `Folder` at all, which is what makes it always present, unnameable, and impossible to delete or drag off the top. Folders are flat and inert: membership decides where a row is drawn and nothing else. Create none and the sidebar looks exactly as it did before they existed — headers appear only once a real folder does.
+
+They replaced an `archived_at` marker that was the same idea wearing behaviour it didn't need. Archiving used to mute "your turn" notifications, drop the row from keyboard navigation, and suppress the "ready to delete" banner; none of that survived, so a workspace in a folder named Archived pings like any other. `Store::load` migrates any `archived_at` still in the file into an ordinary (collapsed) folder called "Archived", reading it off a `serde_json::Value` rather than the struct so `Workspace` carries no trace of the retired concept. The first flush without the field ends the migration for good.
+
+Ordering is two Vecs — `AppState.folders` and the existing `AppState.workspaces`. Rendering re-groups the flat workspace order by folder, so only *relative* order within a folder can be observed; the drag handler leans on that, which is why its index math doesn't bother producing a globally tidy list.
+
+Drag does all the moving. Headers drag to reorder folders; a workspace drops between rows or onto a header, where it appends — the only target a collapsed or empty folder can offer. Grabbing any row of a blocker stack moves the whole stack, so dragging can't split a blocker from its dependents. Deleting a folder sends its contents to Default rather than refusing or destroying anything. `move_workspaces_to_folder` and `reorder_folders` emit no events, for the same reason `reorder_workspaces` doesn't: the sidebar has already drawn the result. Folders are only ever written from the UI, so `App` mirrors each mutation into local state instead of round-tripping.
+
+Deliberately absent: nesting, multi-membership, any agent-facing folder argument (a handoff inherits the caller's folder, like the binary), and any per-folder behaviour at all — including a rollup badge on a collapsed header, so a session wanting attention inside one is genuinely out of sight.
+
 ## Blockers
 
 A workspace can be marked as waiting on another — its **blocker** — and the sidebar draws it inset beneath that row, joined by an elbow. Display only: nothing is paused, gated, or notified.
 
-The link is a single `blocked_by: Option<WorkspaceId>` on `Workspace`. Everything else is derived. `workspaceTree` (`src/workspaceDerived.ts`) is the only place that decides whether a workspace *counts* as blocked, and its answer is "my blocker is one of the rows on screen" — so archiving or soft-deleting a blocker un-nests its dependents without touching a field, and undoing either brings the nesting back. The field is erased only where the id stops meaning anything: purge, `forget_workspace`, and the boot-time prune of non-`Ready` drafts in `Store::load`. Miss that last one and an agent-created blocker leaves a dangling pointer after a restart.
+The link is a single `blocked_by: Option<WorkspaceId>` on `Workspace`. Everything else is derived. `workspaceTree` (`src/workspaceDerived.ts`) is the only place that decides whether a workspace *counts* as blocked, and its answer is "my blocker is one of the rows I'm drawn with" — it runs once per folder, so soft-deleting a blocker *or* moving it to another folder un-nests its dependents without touching a field, and undoing either brings the nesting back. Same-folder is enforced at both ends, in `blockerCandidates` and in `set_workspace_blocker`: a cross-folder link would be stored and then never drawn. The field is erased only where the id stops meaning anything: purge, `forget_workspace`, and the boot-time prune of non-`Ready` drafts in `Store::load`. Miss that last one and an agent-created blocker leaves a dangling pointer after a restart.
 
 Cardinality falls out of the field's shape rather than being enforced: fan-in is capped at one because it's a single `Option`, and fan-out is free because the blocker is the *parent* row, so several dependents are just several children. Cycles are the one real invariant — `AppState::blocker_would_cycle` walks up the chain with a hop limit, because `state.json` is hand-editable and a file already carrying a cycle has to be survivable rather than hang the walk.
 

@@ -6,7 +6,7 @@ use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::error::{AppError, AppResult};
-use crate::state::{AppState, Workspace, WorkspaceStatus};
+use crate::state::{AppState, Folder, Workspace, WorkspaceStatus};
 
 /// Where the `Store` announces that a workspace changed so the UI can refresh.
 ///
@@ -48,8 +48,18 @@ impl Store {
         tmp_path: PathBuf,
         notifier: Box<dyn WorkspaceNotifier>,
     ) -> AppResult<Arc<Self>> {
-        let mut initial = match tokio::fs::read(&state_path).await {
-            Ok(bytes) if !bytes.is_empty() => match serde_json::from_slice::<AppState>(&bytes) {
+        let raw = match tokio::fs::read(&state_path).await {
+            Ok(bytes) if !bytes.is_empty() => Some(bytes),
+            Ok(_) => None,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                info!("no state.json yet; starting empty");
+                None
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        let mut initial = match raw.as_deref() {
+            Some(bytes) => match serde_json::from_slice::<AppState>(bytes) {
                 Ok(s) => {
                     info!(workspaces = s.workspaces.len(), "loaded state.json");
                     s
@@ -59,13 +69,20 @@ impl Store {
                     AppState::default()
                 }
             },
-            Ok(_) => AppState::default(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                info!("no state.json yet; starting empty");
-                AppState::default()
-            }
-            Err(e) => return Err(e.into()),
+            None => AppState::default(),
         };
+
+        if let Some(bytes) = raw.as_deref() {
+            migrate_archived_to_folder(&mut initial, bytes);
+        }
+
+        let stranded = initial.prune_missing_folders();
+        if stranded > 0 {
+            warn!(
+                count = stranded,
+                "workspaces named a folder that doesn't exist; moved to Default"
+            );
+        }
 
         // A `Creating` entry means the previous run crashed mid-provision;
         // a `CreationFailed` entry means the user never dismissed it before
@@ -226,6 +243,52 @@ impl Store {
     }
 }
 
+/// Fold the retired `archived_at` marker into an ordinary folder named
+/// "Archived".
+///
+/// Reads the field straight out of the raw JSON rather than off `Workspace`,
+/// so the type carries no trace of a concept that no longer exists. The first
+/// flush after this rewrites the file without the field, which makes every
+/// later boot a no-op — there is nothing to keep, and nothing to undo.
+///
+/// The folder starts collapsed, because that is how the archive drawer it
+/// replaces always looked on launch.
+fn migrate_archived_to_folder(state: &mut AppState, raw: &[u8]) {
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(raw) else {
+        return;
+    };
+    let archived: Vec<String> = json
+        .get("workspaces")
+        .and_then(|w| w.as_array())
+        .map(|list| {
+            list.iter()
+                .filter(|w| w.get("archived_at").is_some_and(|a| !a.is_null()))
+                .filter_map(|w| w.get("id").and_then(|i| i.as_str()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if archived.is_empty() {
+        return;
+    }
+
+    let mut folder = Folder::new("Archived");
+    folder.collapsed = true;
+    let folder_id = folder.id.clone();
+    let mut moved = 0;
+    for ws in &mut state.workspaces {
+        if archived.contains(&ws.id) {
+            ws.folder = Some(folder_id.clone());
+            moved += 1;
+        }
+    }
+    if moved == 0 {
+        return;
+    }
+    state.folders.push(folder);
+    info!(count = moved, "migrated archived workspaces into a folder");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,7 +317,7 @@ mod tests {
             claude_binary: None,
             origin: Origin::Ui,
             deleted_at: None,
-            archived_at: None,
+            folder: None,
             status,
             script_runs: Vec::new(),
             notes: String::new(),
@@ -293,6 +356,58 @@ mod tests {
         fixture_with(None).await
     }
 
+    /// Boots from literal file contents, for the migration — whose whole job is
+    /// reading a field `Workspace` no longer has.
+    async fn fixture_with_raw(raw: &str) -> Fixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("state.json");
+        std::fs::write(&state_path, raw).unwrap();
+        let notified = Arc::new(Mutex::new(Vec::new()));
+        let store = Store::load(
+            state_path,
+            tmp.path().join("state.json.tmp"),
+            Box::new(RecordingNotifier(notified.clone())),
+        )
+        .await
+        .unwrap();
+        Fixture {
+            store,
+            notified,
+            _tmp: tmp,
+        }
+    }
+
+    fn archived_state_json() -> String {
+        r#"{
+            "workspaces": [
+                {
+                    "id": "kept",
+                    "branch": "feat/kept",
+                    "created_at": "2026-04-01T12:00:00Z",
+                    "repo_links": [],
+                    "status": {"kind": "ready"}
+                },
+                {
+                    "id": "shelved",
+                    "branch": "feat/shelved",
+                    "created_at": "2026-04-01T12:00:00Z",
+                    "repo_links": [],
+                    "status": {"kind": "ready"},
+                    "archived_at": "2026-05-01T09:00:00Z"
+                },
+                {
+                    "id": "also-shelved",
+                    "branch": "feat/also",
+                    "created_at": "2026-04-01T12:00:00Z",
+                    "repo_links": [],
+                    "status": {"kind": "ready"},
+                    "archived_at": "2026-05-02T09:00:00Z"
+                }
+            ]
+        }"#
+        .to_string()
+    }
+
     #[tokio::test]
     async fn starts_empty_when_there_is_no_state_file() {
         let f = fixture().await;
@@ -315,7 +430,7 @@ mod tests {
                     },
                 ),
             ],
-            system_errors: Vec::new(),
+            ..Default::default()
         };
         let f = fixture_with(Some(state)).await;
 
@@ -333,7 +448,7 @@ mod tests {
     async fn update_workspace_mutates_and_notifies() {
         let state = AppState {
             workspaces: vec![workspace("ws-1", WorkspaceStatus::Ready)],
-            system_errors: Vec::new(),
+            ..Default::default()
         };
         let f = fixture_with(Some(state)).await;
 
@@ -370,7 +485,7 @@ mod tests {
     async fn a_failing_closure_does_not_notify() {
         let state = AppState {
             workspaces: vec![workspace("ws-1", WorkspaceStatus::Ready)],
-            system_errors: Vec::new(),
+            ..Default::default()
         };
         let f = fixture_with(Some(state)).await;
 
@@ -392,7 +507,7 @@ mod tests {
     async fn the_quiet_variant_persists_without_notifying() {
         let state = AppState {
             workspaces: vec![workspace("ws-1", WorkspaceStatus::Ready)],
-            system_errors: Vec::new(),
+            ..Default::default()
         };
         let f = fixture_with(Some(state)).await;
 
@@ -469,4 +584,79 @@ mod tests {
         .unwrap();
         assert_eq!(store.read(|s| s.workspaces.len()).await, 0);
     }
+
+    /// The archive marker retires into an ordinary folder. It starts collapsed
+    /// because that is how the drawer it replaces always looked on launch.
+    #[tokio::test]
+    async fn boot_migrates_archived_workspaces_into_a_folder() {
+        let f = fixture_with_raw(&archived_state_json()).await;
+
+        let (folders, membership) = f
+            .store
+            .read(|s| {
+                (
+                    s.folders.clone(),
+                    s.workspaces
+                        .iter()
+                        .map(|w| (w.id.clone(), w.folder.clone()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .await;
+
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].name, "Archived");
+        assert!(folders[0].collapsed, "migrated folder starts collapsed");
+
+        let archived = Some(folders[0].id.clone());
+        assert_eq!(
+            membership,
+            vec![
+                ("kept".to_string(), None),
+                ("shelved".to_string(), archived.clone()),
+                ("also-shelved".to_string(), archived),
+            ]
+        );
+    }
+
+    /// The migration is driven by the file, so the first flush without the
+    /// field ends it. A second boot must not mint an empty second "Archived".
+    #[tokio::test]
+    async fn the_migration_does_not_run_twice() {
+        let f = fixture_with_raw(&archived_state_json()).await;
+        let migrated = f.store.read(|s| s.clone()).await;
+
+        let again = fixture_with(Some(migrated)).await;
+        let folders = again.store.read(|s| s.folders.clone()).await;
+        assert_eq!(folders.len(), 1, "one Archived folder, not two");
+    }
+
+    #[tokio::test]
+    async fn nothing_archived_means_no_folder() {
+        let state = AppState {
+            workspaces: vec![workspace("ws-1", WorkspaceStatus::Ready)],
+            ..Default::default()
+        };
+        let f = fixture_with(Some(state)).await;
+        assert!(f.store.read(|s| s.folders.is_empty()).await);
+    }
+
+    /// `state.json` is hand-editable, so a workspace can name a folder that
+    /// isn't there. It lands in Default rather than dropping off the sidebar.
+    #[tokio::test]
+    async fn boot_sends_workspaces_in_missing_folders_back_to_default() {
+        let mut ws = workspace("ws-1", WorkspaceStatus::Ready);
+        ws.folder = Some("folder-that-went-away".into());
+        let state = AppState {
+            workspaces: vec![ws],
+            ..Default::default()
+        };
+        let f = fixture_with(Some(state)).await;
+
+        assert_eq!(
+            f.store.with_workspace("ws-1", |w| w.folder.clone()).await.unwrap(),
+            None
+        );
+    }
 }
+

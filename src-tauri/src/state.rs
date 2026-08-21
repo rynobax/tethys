@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::github::GithubPrStatus;
 
 pub type WorkspaceId = String;
+pub type FolderId = String;
 pub type SessionId = String;
 pub type ScriptRunId = String;
 
@@ -13,6 +14,14 @@ pub type ScriptRunId = String;
 pub struct AppState {
     #[serde(default)]
     pub workspaces: Vec<Workspace>,
+    /// User-created folders, in the order the sidebar draws them. Ordering
+    /// lives in the Vec, exactly as it does for `workspaces`.
+    ///
+    /// The Default folder is deliberately not in here: it *is* the absence of
+    /// a folder (`Workspace::folder == None`), which is what makes it always
+    /// present, unnameable, and impossible to delete.
+    #[serde(default)]
+    pub folders: Vec<Folder>,
     /// Errors raised by the background purger when it failed to tear down
     /// a soft-deleted workspace. Surfaced in the system status modal.
     #[serde(default)]
@@ -42,10 +51,18 @@ pub struct Workspace {
     /// `cancel_delete_workspace` to undo before the cron runs.
     #[serde(default)]
     pub deleted_at: Option<DateTime<Utc>>,
-    /// Archive marker. Archived workspaces render in the collapsed
-    /// "Archived" section at the bottom of the sidebar.
+    /// Which folder this workspace sits in; `None` is the Default folder.
+    ///
+    /// Purely organisational — a workspace behaves identically wherever it
+    /// sits. Stored per workspace rather than as a list on the folder so that
+    /// membership has exactly one home, which is also why purging a workspace
+    /// needs no folder bookkeeping.
+    ///
+    /// A folder id that no longer resolves is pruned to `None` at boot, so a
+    /// hand-edited `state.json` naming a stranger lands in Default instead of
+    /// dropping the row out of the sidebar entirely.
     #[serde(default)]
-    pub archived_at: Option<DateTime<Utc>>,
+    pub folder: Option<FolderId>,
     /// Lifecycle state of the workspace itself. Newly-submitted entries land
     /// in state as `Creating` so the sidebar row appears at the user's
     /// chosen position from t=0; provisioning then flips it to `Ready` (or
@@ -72,6 +89,33 @@ pub struct Workspace {
     /// unfinished drafts.
     #[serde(default)]
     pub blocked_by: Option<WorkspaceId>,
+}
+
+/// A named place in the sidebar that holds workspaces.
+///
+/// Flat — folders never contain folders — and inert: membership decides where
+/// a row is drawn and nothing else. It replaced the archive marker, which was
+/// the same idea wearing behaviour it didn't need.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Folder {
+    pub id: FolderId,
+    pub name: String,
+    /// Whether the sidebar hides this folder's rows. Persisted, unlike the
+    /// archive drawer's expand state that came before it: with one drawer,
+    /// forgetting was fine, but the folder you're working out of should still
+    /// be open after a restart.
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
+impl Folder {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.into(),
+            collapsed: false,
+        }
+    }
 }
 
 /// A live script process attached to a workspace+repo. The Tethys `id` is
@@ -240,6 +284,7 @@ impl Workspace {
         branch: String,
         claude_binary: Option<String>,
         origin: Origin,
+        folder: Option<FolderId>,
     ) -> Self {
         Self {
             id,
@@ -250,7 +295,7 @@ impl Workspace {
             claude_binary,
             origin,
             deleted_at: None,
-            archived_at: None,
+            folder,
             status: WorkspaceStatus::Creating,
             script_runs: Vec::new(),
             notes: String::new(),
@@ -333,6 +378,55 @@ impl AppState {
         true
     }
 
+    /// True when two workspaces sit in different folders.
+    ///
+    /// A blocker link across that boundary can never draw — nesting only
+    /// happens within a folder — so it is refused at the door rather than
+    /// stored as a pointer with no visible effect. A workspace that isn't in
+    /// state counts as different from everything, which errs towards refusing.
+    pub fn folders_differ(&self, a: &str, b: &str) -> bool {
+        let folder_of = |id: &str| self.find_workspace(id).map(|w| w.folder.clone());
+        folder_of(a) != folder_of(b)
+    }
+
+    pub fn find_folder_mut(&mut self, id: &str) -> Option<&mut Folder> {
+        self.folders.iter_mut().find(|f| f.id == id)
+    }
+
+    pub fn folder_exists(&self, id: &str) -> bool {
+        self.folders.iter().any(|f| f.id == id)
+    }
+
+    /// Move every workspace in `folder_id` to Default. Used when the folder
+    /// is deleted: contents fall back rather than the delete being refused.
+    pub fn empty_folder(&mut self, folder_id: &str) {
+        for ws in &mut self.workspaces {
+            if ws.folder.as_deref() == Some(folder_id) {
+                ws.folder = None;
+            }
+        }
+    }
+
+    /// Send workspaces naming a folder that isn't there back to Default,
+    /// returning how many moved.
+    ///
+    /// `state.json` is hand-editable, so this is the same shape of tolerance
+    /// as the cycle hop limit: a file that breaks the invariant still has to
+    /// boot.
+    pub fn prune_missing_folders(&mut self) -> usize {
+        let known: Vec<FolderId> = self.folders.iter().map(|f| f.id.clone()).collect();
+        let mut moved = 0;
+        for ws in &mut self.workspaces {
+            if let Some(id) = &ws.folder {
+                if !known.contains(id) {
+                    ws.folder = None;
+                    moved += 1;
+                }
+            }
+        }
+        moved
+    }
+
     /// Drops every link pointing at `blocker_id`. For the moments where the id
     /// stops meaning anything, as opposed to merely leaving the sidebar.
     pub fn clear_links_to(&mut self, blocker_id: &str) {
@@ -369,7 +463,7 @@ mod tests {
             claude_binary: None,
             origin: Origin::Ui,
             deleted_at: None,
-            archived_at: None,
+            folder: None,
             status: WorkspaceStatus::Ready,
             script_runs: Vec::new(),
             notes: String::new(),
@@ -459,7 +553,7 @@ mod tests {
         assert!(ws.repo_links[0].attached_prs.is_empty());
         assert!(ws.claude_binary.is_none());
         assert!(ws.deleted_at.is_none());
-        assert!(ws.archived_at.is_none());
+        assert!(ws.folder.is_none());
         assert!(parsed.system_errors.is_empty());
     }
 
@@ -586,12 +680,13 @@ mod tests {
                         format!("branch/{id}"),
                         None,
                         Origin::Ui,
+                        None,
                     );
                     ws.blocked_by = blocker.map(str::to_string);
                     ws
                 })
                 .collect(),
-            system_errors: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -719,5 +814,68 @@ mod tests {
         let bytes = serde_json::to_vec(&failed).expect("serialize");
         let back: WorkspaceStatus = serde_json::from_slice(&bytes).expect("deserialize");
         assert_eq!(failed, back);
+    }
+
+    fn folder_state(members: &[(&str, Option<&str>)]) -> AppState {
+        AppState {
+            workspaces: members
+                .iter()
+                .map(|(id, folder)| {
+                    Workspace::draft(
+                        (*id).into(),
+                        format!("branch/{id}"),
+                        None,
+                        Origin::Ui,
+                        folder.map(str::to_string),
+                    )
+                })
+                .collect(),
+            folders: vec![
+                Folder {
+                    id: "f1".into(),
+                    name: "Later".into(),
+                    collapsed: false,
+                },
+                Folder {
+                    id: "f2".into(),
+                    name: "Archived".into(),
+                    collapsed: true,
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// The Default folder is the *absence* of a folder, so two unfiled
+    /// workspaces are in the same one — not merely both unfiled.
+    #[test]
+    fn default_folder_counts_as_a_folder_for_blocking() {
+        let s = folder_state(&[("a", None), ("b", None), ("c", Some("f1"))]);
+        assert!(!s.folders_differ("a", "b"));
+        assert!(s.folders_differ("a", "c"));
+    }
+
+    /// Errs towards refusing: a blocker that isn't in state can't be shown to
+    /// share a folder with anything.
+    #[test]
+    fn a_missing_workspace_differs_from_everything() {
+        let s = folder_state(&[("a", None)]);
+        assert!(s.folders_differ("a", "ghost"));
+    }
+
+    #[test]
+    fn deleting_a_folder_sends_its_contents_to_default() {
+        let mut s = folder_state(&[("a", Some("f1")), ("b", Some("f1")), ("c", Some("f2"))]);
+        s.empty_folder("f1");
+        let filed: Vec<Option<String>> = s.workspaces.iter().map(|w| w.folder.clone()).collect();
+        assert_eq!(filed, vec![None, None, Some("f2".to_string())]);
+    }
+
+    #[test]
+    fn pruning_only_moves_workspaces_whose_folder_is_gone() {
+        let mut s = folder_state(&[("a", Some("f1")), ("b", Some("stranger")), ("c", None)]);
+        assert_eq!(s.prune_missing_folders(), 1);
+        let filed: Vec<Option<String>> = s.workspaces.iter().map(|w| w.folder.clone()).collect();
+        assert_eq!(filed, vec![Some("f1".to_string()), None, None]);
     }
 }

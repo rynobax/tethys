@@ -298,7 +298,7 @@ mod tests {
             claude_binary: None,
             origin: Origin::Ui,
             deleted_at: None,
-            archived_at: None,
+            folder: None,
             status: WorkspaceStatus::Ready,
             script_runs: Vec::new(),
             notes: "private scratchpad".into(),

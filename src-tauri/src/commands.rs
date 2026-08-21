@@ -30,7 +30,7 @@ use crate::registry::{self, starter_template, RegistryLoad, Repo, RepoRegistry};
 use crate::scripts::{ScriptInfo, ScriptSupervisor};
 use crate::sessions::{start_session, SessionInfo, SessionSupervisor, StartSession};
 use crate::state::{
-    AttachedPr, Origin, ScriptRunMeta, SystemErrorEntry, Workspace, WorkspaceId,
+    AttachedPr, Folder, FolderId, Origin, ScriptRunMeta, SystemErrorEntry, Workspace, WorkspaceId,
 };
 use crate::store::Store;
 use crate::theme::Theme;
@@ -294,6 +294,9 @@ pub struct CreateWorkspaceArgs {
     /// Resolved on the login-shell PATH at spawn time.
     #[serde(default)]
     pub claude_binary: Option<String>,
+    /// Folder the new workspace lands in; `None` is the Default folder.
+    #[serde(default)]
+    pub folder: Option<FolderId>,
 }
 
 /// Validate the request, insert the `Creating` draft, then hand the actual
@@ -355,9 +358,23 @@ pub async fn create_workspace(
         )));
     }
 
-    let draft = Workspace::draft(id.clone(), branch.clone(), claude_binary, Origin::Ui);
+    let draft = Workspace::draft(
+        id.clone(),
+        branch.clone(),
+        claude_binary,
+        Origin::Ui,
+        args.folder.clone(),
+    );
     store
         .mutate(|s| {
+            // A folder that vanished between the dialog opening and Create
+            // being clicked would otherwise strand the row: `folder` is
+            // pruned to Default at boot, but not before.
+            if let Some(folder) = &draft.folder {
+                if !s.folder_exists(folder) {
+                    return Err(AppError::FolderNotFound(folder.clone()));
+                }
+            }
             if s.workspaces.iter().any(|w| w.id == draft.id) {
                 return Err(AppError::Other(format!(
                     "workspace_id collision: {} is already in state",
@@ -561,9 +578,6 @@ pub async fn delete_workspace(
             // Idempotent: re-deleting an already-soft-deleted workspace
             // refreshes the timestamp, which extends the grace window.
             ws.deleted_at = Some(Utc::now());
-            // Archive + delete are mutually exclusive views; clear archive
-            // so the entry doesn't double-count if someone unarchives later.
-            ws.archived_at = None;
             Ok(())
         })
         .await?;
@@ -591,38 +605,11 @@ pub async fn cancel_delete_workspace(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn archive_workspace(
-    store: State<'_, Arc<Store>>,
-    id: WorkspaceId,
-) -> AppResult<()> {
-    store
-        .update_workspace(&id, |ws| {
-            ws.archived_at = Some(Utc::now());
-            Ok(())
-        })
-        .await?;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn unarchive_workspace(
-    store: State<'_, Arc<Store>>,
-    id: WorkspaceId,
-) -> AppResult<()> {
-    store
-        .update_workspace(&id, |ws| {
-            ws.archived_at = None;
-            Ok(())
-        })
-        .await?;
-    Ok(())
-}
-
-/// Reorder the active workspaces (everything not soft-deleted and not
-/// archived). The frontend computes a new ordering by drag-and-drop and
-/// posts the resulting ID list. Workspaces not in the list keep their
-/// current relative position in `AppState.workspaces`.
+/// Reorder the workspaces the sidebar is showing. The frontend computes a new
+/// ordering by drag-and-drop and posts the resulting ID list — the whole
+/// *visual* order, folders and blocker nesting flattened, not just the rows
+/// that moved. Workspaces not in the list keep their current relative
+/// position in `AppState.workspaces`.
 #[tauri::command]
 pub async fn reorder_workspaces(
     store: State<'_, Arc<Store>>,
@@ -644,8 +631,8 @@ pub async fn reorder_workspaces(
                     moved.push(s.workspaces.remove(pos));
                 }
             }
-            // Re-insert at the front. Archived/soft-deleted entries that
-            // weren't included keep their positions after the moved block.
+            // Re-insert at the front. Soft-deleted entries that weren't
+            // included keep their positions after the moved block.
             for ws in moved.into_iter().rev() {
                 s.workspaces.insert(0, ws);
             }
@@ -655,6 +642,179 @@ pub async fn reorder_workspaces(
     // No event: the frontend reorders optimistically so the dropped row
     // doesn't flicker, and re-broadcasting the order would undo that.
     Ok(())
+}
+
+#[tauri::command]
+pub async fn list_folders(store: State<'_, Arc<Store>>) -> AppResult<Vec<Folder>> {
+    Ok(store.read(|s| s.folders.clone()).await)
+}
+
+/// Create an empty folder at the end of the list.
+///
+/// Duplicate names are allowed: identity is the id, and refusing them would
+/// buy an error path in exchange for nothing.
+#[tauri::command]
+pub async fn create_folder(store: State<'_, Arc<Store>>, name: String) -> AppResult<Folder> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(AppError::Other("a folder needs a name".into()));
+    }
+    let folder = Folder::new(name);
+    let created = folder.clone();
+    store
+        .mutate(move |s| {
+            s.folders.push(folder);
+            Ok(())
+        })
+        .await?;
+    Ok(created)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RenameFolderArgs {
+    pub folder_id: FolderId,
+    pub name: String,
+}
+
+#[tauri::command]
+pub async fn rename_folder(
+    store: State<'_, Arc<Store>>,
+    args: RenameFolderArgs,
+) -> AppResult<()> {
+    let name = args.name.trim().to_string();
+    if name.is_empty() {
+        return Err(AppError::Other("a folder needs a name".into()));
+    }
+    store
+        .mutate(|s| {
+            let folder = s
+                .find_folder_mut(&args.folder_id)
+                .ok_or_else(|| AppError::FolderNotFound(args.folder_id.clone()))?;
+            folder.name = name;
+            Ok(())
+        })
+        .await
+}
+
+/// Delete a folder; its workspaces fall back to Default.
+///
+/// Contents are never destroyed and the delete is never refused for being
+/// non-empty — emptying a folder by hand first would be busywork.
+#[tauri::command]
+pub async fn delete_folder(store: State<'_, Arc<Store>>, id: FolderId) -> AppResult<()> {
+    store
+        .mutate(|s| {
+            if !s.folder_exists(&id) {
+                return Err(AppError::FolderNotFound(id.clone()));
+            }
+            s.empty_folder(&id);
+            s.folders.retain(|f| f.id != id);
+            Ok(())
+        })
+        .await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SetFolderCollapsedArgs {
+    pub folder_id: FolderId,
+    pub collapsed: bool,
+}
+
+#[tauri::command]
+pub async fn set_folder_collapsed(
+    store: State<'_, Arc<Store>>,
+    args: SetFolderCollapsedArgs,
+) -> AppResult<()> {
+    store
+        .mutate(|s| {
+            let folder = s
+                .find_folder_mut(&args.folder_id)
+                .ok_or_else(|| AppError::FolderNotFound(args.folder_id.clone()))?;
+            folder.collapsed = args.collapsed;
+            Ok(())
+        })
+        .await
+}
+
+/// Reorder folders. Same contract as [`reorder_workspaces`]: the named ids are
+/// pulled out in the given order and re-inserted at the front, so anything
+/// left out keeps its relative position behind them.
+#[tauri::command]
+pub async fn reorder_folders(
+    store: State<'_, Arc<Store>>,
+    ids: Vec<FolderId>,
+) -> AppResult<()> {
+    store
+        .mutate(|s| {
+            for id in &ids {
+                if !s.folder_exists(id) {
+                    return Err(AppError::FolderNotFound(id.clone()));
+                }
+            }
+            let mut moved: Vec<Folder> = Vec::with_capacity(ids.len());
+            for id in &ids {
+                if let Some(pos) = s.folders.iter().position(|f| &f.id == id) {
+                    moved.push(s.folders.remove(pos));
+                }
+            }
+            for folder in moved.into_iter().rev() {
+                s.folders.insert(0, folder);
+            }
+            Ok(())
+        })
+        .await
+    // No event, for the same reason `reorder_workspaces` sends none: the
+    // frontend already moved the row locally and a round-trip would flicker it.
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MoveWorkspacesToFolderArgs {
+    /// Every workspace being moved. A drag carries a whole blocker stack, so
+    /// this is usually more than one id and always all of them at once.
+    pub workspace_ids: Vec<WorkspaceId>,
+    /// Destination; `None` is the Default folder.
+    pub folder: Option<FolderId>,
+}
+
+/// File workspaces into a folder.
+///
+/// Blocker links are left alone. A stack always moves as a unit, so a move
+/// can't split one, and whether a link *draws* is derived from the two ending
+/// up in the same folder rather than stored.
+#[tauri::command]
+pub async fn move_workspaces_to_folder(
+    store: State<'_, Arc<Store>>,
+    args: MoveWorkspacesToFolderArgs,
+) -> AppResult<()> {
+    let MoveWorkspacesToFolderArgs {
+        workspace_ids,
+        folder,
+    } = args;
+    store
+        .mutate(|s| {
+            if let Some(folder) = &folder {
+                if !s.folder_exists(folder) {
+                    return Err(AppError::FolderNotFound(folder.clone()));
+                }
+            }
+            for id in &workspace_ids {
+                if !s.workspaces.iter().any(|w| &w.id == id) {
+                    return Err(AppError::WorkspaceNotFound(id.clone()));
+                }
+            }
+            for id in &workspace_ids {
+                if let Some(ws) = s.find_workspace_mut(id) {
+                    ws.folder = folder.clone();
+                }
+            }
+            Ok(())
+        })
+        .await
+    // Silent, like the reorder it arrives with: the sidebar has already drawn
+    // the row in its new folder.
 }
 
 #[derive(Deserialize)]
@@ -693,6 +853,13 @@ pub async fn set_workspace_blocker(
                 }
                 if s.blocker_would_cycle(&workspace_id, blocker) {
                     return Err(AppError::BlockerWouldCycle);
+                }
+                // The sidebar only nests within a folder, so a cross-folder
+                // link would be stored and then never drawn. The frontend
+                // already filters the candidates it offers; this is the door,
+                // not the only lock.
+                if s.folders_differ(&workspace_id, blocker) {
+                    return Err(AppError::BlockerInAnotherFolder);
                 }
             }
             if let Some(ws) = s.find_workspace_mut(&workspace_id) {

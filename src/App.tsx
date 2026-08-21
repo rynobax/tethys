@@ -3,6 +3,8 @@ import * as api from "./ipc/commands";
 import type {
   CreateWorkspaceArgs,
   Discrepancies,
+  Folder,
+  FolderId,
   RegistryStatus,
   Repo,
   RepoLink,
@@ -22,7 +24,7 @@ import { SystemStatus } from "./SystemStatus";
 import { applyTheme, ThemeContext } from "./theme";
 import { useBackendJob, type JobDescriptor } from "./useBackendJob";
 import { useAppEvent } from "./ipc/events";
-import { isReadyToDelete, workspaceTree } from "./workspaceDerived";
+import { isReadyToDelete } from "./workspaceDerived";
 import "./App.css";
 
 /** Selectable claude entry-point binaries, shared by the new-workspace form
@@ -41,6 +43,7 @@ const DRAFT_PROMPT_SETTLE_MS = 500;
 
 function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [folders, setFolders] = useState<Folder[]>([]);
   const [registry, setRegistry] = useState<RegistryStatus | null>(null);
   const [discrepancies, setDiscrepancies] = useState<Discrepancies | null>(null);
   const [selectedId, setSelectedId] = useState<WorkspaceId | null>(null);
@@ -202,7 +205,6 @@ function App() {
 
   const workspaceNeedsTurn = useCallback(
     (w: Workspace): boolean =>
-      !w.archived_at &&
       [...turnStates.values()].some(
         (info) => info.workspaceId === w.id && info.needsTurn,
       ),
@@ -211,7 +213,6 @@ function App() {
 
   const workspaceWorking = useCallback(
     (w: Workspace): boolean =>
-      !w.archived_at &&
       [...turnStates.values()].some(
         (info) => info.workspaceId === w.id && info.working,
       ),
@@ -304,12 +305,14 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [list, reg, disc] = await Promise.all([
+      const [list, folderList, reg, disc] = await Promise.all([
         api.listWorkspaces(),
+        api.listFolders(),
         api.registryStatus(),
         api.listDiscrepancies(),
       ]);
       setWorkspaces(list);
+      setFolders(folderList);
       setRegistry(reg);
       setDiscrepancies(disc);
       setError(null);
@@ -386,97 +389,6 @@ function App() {
     () => workspaces.filter((w) => !w.deleted_at),
     [workspaces],
   );
-  // Navigable list for hotkeys: same set the sidebar's main "active" section
-  // shows (drops archived), flattened through the same blocker tree so the
-  // order matches what's on screen rather than the stored order.
-  const navigableWorkspaces = useMemo(
-    () =>
-      workspaceTree(visibleWorkspaces.filter((w) => !w.archived_at)).map(
-        (r) => r.workspace,
-      ),
-    [visibleWorkspaces],
-  );
-
-  // Keep the latest values reachable from a stable keydown handler so we
-  // don't re-bind (and tear down) the window listener on every render.
-  const navRef = useRef({
-    list: navigableWorkspaces,
-    selectedId,
-    needsTurn: workspaceNeedsTurn,
-    workspaces,
-    clearTurn: handleClearTurn,
-  });
-  navRef.current = {
-    list: navigableWorkspaces,
-    selectedId,
-    needsTurn: workspaceNeedsTurn,
-    workspaces,
-    clearTurn: handleClearTurn,
-  };
-
-  useEffect(() => {
-    const step = (direction: 1 | -1, attentionOnly: boolean) => {
-      const { list, selectedId: cur, needsTurn } = navRef.current;
-      const pool = attentionOnly ? list.filter((w) => needsTurn(w)) : list;
-      if (pool.length === 0) return;
-      // Find the anchor inside the pool. When attentionOnly and the
-      // current selection has no dot, anchor by its position in the full
-      // list so direction still feels right.
-      let anchor = pool.findIndex((w) => w.id === cur);
-      if (anchor === -1 && attentionOnly && cur) {
-        const fullIdx = list.findIndex((w) => w.id === cur);
-        if (fullIdx !== -1) {
-          // Walk in `direction` until we hit a pool member.
-          for (
-            let i = direction === 1 ? fullIdx + 1 : fullIdx - 1;
-            i >= 0 && i < list.length;
-            i += direction
-          ) {
-            const hit = pool.findIndex((w) => w.id === list[i].id);
-            if (hit !== -1) {
-              setSelectedId(pool[hit].id);
-              return;
-            }
-          }
-          // Nothing in that direction — wrap.
-          setSelectedId(
-            direction === 1 ? pool[0].id : pool[pool.length - 1].id,
-          );
-          return;
-        }
-      }
-      if (anchor === -1) anchor = direction === 1 ? -1 : 0;
-      const next = (anchor + direction + pool.length) % pool.length;
-      setSelectedId(pool[next].id);
-    };
-
-    const handler = (e: KeyboardEvent) => {
-      // Cmd+Alt(+Shift) + J/K to navigate; Cmd+Alt+. to clear the
-      // current workspace's "your turn" dot. `e.code` ignores Option's
-      // character remapping on macOS (Alt+J → ˝), so bindings survive layout.
-      if (!e.metaKey || !e.altKey || e.ctrlKey) return;
-      if (e.code === "KeyJ" || e.code === "KeyK") {
-        const direction: 1 | -1 = e.code === "KeyK" ? 1 : -1;
-        e.preventDefault();
-        e.stopPropagation();
-        step(direction, e.shiftKey);
-        return;
-      }
-      if (e.code === "Period") {
-        const { selectedId: cur, workspaces, clearTurn } = navRef.current;
-        if (!cur) return;
-        const ws = workspaces.find((w) => w.id === cur);
-        if (!ws) return;
-        e.preventDefault();
-        e.stopPropagation();
-        clearTurn(ws);
-      }
-    };
-    window.addEventListener("keydown", handler, { capture: true });
-    return () =>
-      window.removeEventListener("keydown", handler, { capture: true });
-  }, []);
-
   const selected = useMemo(() => {
     const ws = workspaces.find((w) => w.id === selectedId);
     if (!ws) return null;
@@ -554,13 +466,71 @@ function App() {
     }
   }, []);
 
-  const handleArchiveToggle = useCallback(async (workspace: Workspace) => {
+  // Folders are only ever written from here, so the local list is kept in
+  // step by hand rather than by a round-trip: same reason `handleReorder`
+  // does it, and it means a rename or a collapse repaints instantly.
+  const handleCreateFolder = useCallback(async (name: string) => {
     try {
-      await (workspace.archived_at
-        ? api.unarchiveWorkspace(workspace.id)
-        : api.archiveWorkspace(workspace.id));
+      const folder = await api.createFolder(name);
+      setFolders((prev) => [...prev, folder]);
     } catch (e) {
-      setError(`archive failed: ${String(e)}`);
+      setError(`could not create folder: ${String(e)}`);
+    }
+  }, []);
+
+  const handleRenameFolder = useCallback(
+    async (id: FolderId, name: string) => {
+      setFolders((prev) =>
+        prev.map((f) => (f.id === id ? { ...f, name } : f)),
+      );
+      try {
+        await api.renameFolder(id, name);
+      } catch (e) {
+        setError(`could not rename folder: ${String(e)}`);
+      }
+    },
+    [],
+  );
+
+  const handleDeleteFolder = useCallback(async (id: FolderId) => {
+    // Its workspaces fall back to Default — mirrored locally so the rows
+    // reappear at the top rather than vanishing until the next refresh.
+    setFolders((prev) => prev.filter((f) => f.id !== id));
+    setWorkspaces((prev) =>
+      prev.map((w) => (w.folder === id ? { ...w, folder: null } : w)),
+    );
+    try {
+      await api.deleteFolder(id);
+    } catch (e) {
+      setError(`could not delete folder: ${String(e)}`);
+    }
+  }, []);
+
+  const handleSetFolderCollapsed = useCallback(
+    async (id: FolderId, collapsed: boolean) => {
+      setFolders((prev) =>
+        prev.map((f) => (f.id === id ? { ...f, collapsed } : f)),
+      );
+      try {
+        await api.setFolderCollapsed(id, collapsed);
+      } catch (e) {
+        setError(`could not collapse folder: ${String(e)}`);
+      }
+    },
+    [],
+  );
+
+  const handleReorderFolders = useCallback(async (ids: FolderId[]) => {
+    setFolders((prev) => {
+      const byId = new Map(prev.map((f) => [f.id, f]));
+      const moved = ids.flatMap((id) => byId.get(id) ?? []);
+      const seen = new Set(ids);
+      return [...moved, ...prev.filter((f) => !seen.has(f.id))];
+    });
+    try {
+      await api.reorderFolders(ids);
+    } catch (e) {
+      setError(`could not reorder folders: ${String(e)}`);
     }
   }, []);
 
@@ -598,6 +568,33 @@ function App() {
     }
   }, []);
 
+  /** A drag that crossed a folder boundary: the same optimistic-then-tell-the-
+   *  backend shape as a plain reorder, with the membership write alongside. */
+  const handleMoveToFolder = useCallback(
+    async (
+      ids: WorkspaceId[],
+      folder: FolderId | null,
+      order: WorkspaceId[],
+    ) => {
+      const movedSet = new Set(ids);
+      setWorkspaces((prev) => {
+        const byId = new Map(
+          prev.map((w) => [w.id, movedSet.has(w.id) ? { ...w, folder } : w]),
+        );
+        const moved = order.flatMap((id) => byId.get(id) ?? []);
+        const seen = new Set(order);
+        return [...moved, ...prev.filter((w) => !seen.has(w.id))];
+      });
+      try {
+        await api.moveWorkspacesToFolder(ids, folder);
+        await api.reorderWorkspaces(order);
+      } catch (e) {
+        setError(`could not move workspace: ${String(e)}`);
+      }
+    },
+    [],
+  );
+
   const registryOk = registry?.kind === "ok";
   const selectedRun = selectedId ? creationRuns.get(selectedId) ?? null : null;
 
@@ -627,10 +624,16 @@ function App() {
           </div>
           <Sidebar
             workspaces={visibleWorkspaces}
+            folders={folders}
             selectedId={selectedId}
             onSelect={setSelectedId}
             onReorder={handleReorder}
-            onArchiveToggle={handleArchiveToggle}
+            onMoveToFolder={handleMoveToFolder}
+            onReorderFolders={handleReorderFolders}
+            onCreateFolder={handleCreateFolder}
+            onRenameFolder={handleRenameFolder}
+            onDeleteFolder={handleDeleteFolder}
+            onSetFolderCollapsed={handleSetFolderCollapsed}
             onDelete={handleDelete}
             onClearTurn={handleClearTurn}
             onSetBlocker={handleSetBlocker}
@@ -704,7 +707,6 @@ function App() {
               })
             }
             onRequestDelete={() => handleDelete(selected)}
-            onRequestArchive={() => handleArchiveToggle(selected)}
             onRepoAdded={refresh}
           />
         )}
@@ -718,6 +720,7 @@ function App() {
       {creating && registry?.kind === "ok" && (
         <CreateWorkspaceDialog
           repos={registry.registry.repos}
+          folders={folders}
           onClose={() => setCreating(false)}
           onSubmit={(partial) => {
             setCreating(false);
@@ -970,7 +973,6 @@ function WorkspaceDetail({
   notes,
   onNotesChange,
   onRequestDelete,
-  onRequestArchive,
   onRepoAdded,
 }: {
   workspace: Workspace;
@@ -985,7 +987,6 @@ function WorkspaceDetail({
   notes: string;
   onNotesChange: (notes: string) => void;
   onRequestDelete: () => void;
-  onRequestArchive: () => void;
   onRepoAdded: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -1245,13 +1246,6 @@ function WorkspaceDetail({
           </button>
           <button
             type="button"
-            onClick={onRequestArchive}
-            disabled={busy}
-          >
-            {workspace.archived_at ? "Unarchive" : "Archive"}
-          </button>
-          <button
-            type="button"
             className="danger"
             onClick={onRequestDelete}
             disabled={busy}
@@ -1266,8 +1260,8 @@ function WorkspaceDetail({
           />
         </div>
       </header>
-      {!workspace.archived_at && isReadyToDelete(workspace) && (
-        <div className="archive-banner">
+      {isReadyToDelete(workspace) && (
+        <div className="ready-banner">
           <div>
             <strong>Ready to delete.</strong>{" "}
             <span className="muted">
@@ -1504,19 +1498,11 @@ function SessionChip({
     .join(" ");
   return (
     <div
-      role="button"
-      tabIndex={0}
       className={chipClass}
       onClick={() => onSelect(meta.id)}
       onContextMenu={(e) => {
         e.preventDefault();
         onContextMenu(meta.id, e.clientX, e.clientY);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onSelect(meta.id);
-        }
       }}
     >
       <span className={`chip-repo${meta.repo_key === null ? " root" : ""}`}>
@@ -1562,16 +1548,8 @@ function ScriptChip({
   const stateClass = running ? "running" : exited ? "exited" : "idle";
   return (
     <div
-      role="button"
-      tabIndex={0}
       className={`session-chip script-chip ${stateClass}${selected ? " active" : ""}`}
       onClick={() => onClick(chip)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onClick(chip);
-        }
-      }}
       title={chip.command}
     >
       <span className="script-indicator" aria-hidden="true">
@@ -1833,15 +1811,8 @@ function SessionChipMenu({
     const handle = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
     document.addEventListener("mousedown", handle);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", handle);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("mousedown", handle);
   }, [onClose]);
 
   // Keep the menu inside the viewport.
@@ -2209,16 +2180,32 @@ function loadLastRepoSelection(repos: Repo[]): Set<string> {
   return available;
 }
 
+const LAST_FOLDER_KEY = "tethys.createWorkspace.lastFolder";
+
+/** The folder the last workspace was created into, if it's still there.
+ *  Falls back to Default — which is also what an unset preference means. */
+function loadLastFolder(folders: Folder[]): FolderId | null {
+  try {
+    const raw = localStorage.getItem(LAST_FOLDER_KEY);
+    if (raw && folders.some((f) => f.id === raw)) return raw;
+  } catch {
+    // fall through to Default
+  }
+  return null;
+}
+
 /** Dialog emits everything *except* the workspace id — App mints that and
  *  merges it in before invoking. */
 type CreateWorkspaceFormArgs = Omit<CreateWorkspaceArgs, "workspace_id">;
 
 function CreateWorkspaceDialog({
   repos,
+  folders,
   onClose,
   onSubmit,
 }: {
   repos: Repo[];
+  folders: Folder[];
   onClose: () => void;
   onSubmit: (args: CreateWorkspaceFormArgs) => void;
 }) {
@@ -2227,6 +2214,9 @@ function CreateWorkspaceDialog({
     loadLastRepoSelection(repos),
   );
   const [claudeBinary, setClaudeBinary] = useState("claude");
+  const [folder, setFolder] = useState<FolderId | null>(() =>
+    loadLastFolder(folders),
+  );
 
   const toggle = (key: string) => {
     setSelected((prev) => {
@@ -2247,6 +2237,7 @@ function CreateWorkspaceDialog({
         LAST_REPO_SELECTION_KEY,
         JSON.stringify(repoSelections),
       );
+      localStorage.setItem(LAST_FOLDER_KEY, folder ?? "");
     } catch {
       // non-fatal: preference just won't persist
     }
@@ -2254,6 +2245,7 @@ function CreateWorkspaceDialog({
       branch: branch.trim(),
       repo_selections: repoSelections,
       claude_binary: claudeBinary === "claude" ? null : claudeBinary,
+      folder,
     });
   };
 
@@ -2300,6 +2292,22 @@ function CreateWorkspaceDialog({
             </ul>
           )}
         </div>
+        {folders.length > 0 && (
+          <label>
+            Folder
+            <select
+              value={folder ?? ""}
+              onChange={(e) => setFolder(e.target.value || null)}
+            >
+              <option value="">Default</option>
+              {folders.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label>
           Claude binary
           <select

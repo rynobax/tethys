@@ -145,6 +145,10 @@ impl Handoff {
                 from_workspace: caller.id.clone(),
                 from_session: req.from_session.clone(),
             },
+            // Lands beside the session that asked for it. Agents get no say in
+            // the folder for the same reason they get no say in the binary:
+            // work shouldn't drift out of where the user put it.
+            caller.folder.clone(),
         );
         // Setting the link in the same mutation as the insert is what makes a
         // `Creating` draft a legal blocker: the caller points at the new

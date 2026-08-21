@@ -22,6 +22,15 @@ A Claude Code CLI process attached to a workspace, either inside one repo's work
 **Notes**:
 Freeform per-workspace text the user writes in the UI.
 
+### Folders
+
+**Folder**:
+A named place in the sidebar holding workspaces, so they can be grouped and collapsed out of the way. A workspace is in exactly one folder, folders don't nest, and being in one changes nothing about how a workspace behaves.
+_Avoid_: Tag, label, group
+
+**Default Folder**:
+Where a workspace sits when the user hasn't filed it anywhere. Always present, and not named by the user the way the folders they create are. New workspaces land wherever the user picks; a handoff lands in the same folder as the session that asked for it.
+
 ### Blocking
 
 **Blocker**:
@@ -29,7 +38,7 @@ The workspace another workspace is waiting on before its own work can continue. 
 _Avoid_: Dependency, upstream, parent
 
 **Blocked**:
-A workspace that has a blocker: at most one at a time, though one blocker can hold up several workspaces. It stops being blocked once its blocker leaves the sidebar, or the link is cleared.
+A workspace that has a blocker: at most one at a time, though one blocker can hold up several workspaces. It stops being blocked once its blocker leaves the sidebar, ends up in a different folder, or the link is cleared.
 
 ### Lifecycle
 
