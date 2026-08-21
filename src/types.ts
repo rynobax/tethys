@@ -103,6 +103,10 @@ export interface Workspace {
   /** Freeform user notes, edited via the notes overlay in the detail pane.
    *  Empty string when unset. */
   notes: string;
+  /** The workspace this one is waiting on. A pointer, not a state — whether
+   *  it counts as blocked depends on the blocker still being on screen, which
+   *  is why `workspaceTree` decides that and not this field. */
+  blocked_by: WorkspaceId | null;
 }
 
 export interface SystemErrorEntry {

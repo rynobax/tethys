@@ -294,6 +294,7 @@ pub fn run() {
             commands::archive_workspace,
             commands::unarchive_workspace,
             commands::reorder_workspaces,
+            commands::set_workspace_blocker,
             commands::run_purge_now,
             commands::list_system_errors,
             commands::dismiss_system_error,

@@ -22,6 +22,15 @@ A Claude Code CLI process attached to a workspace, either inside one repo's work
 **Notes**:
 Freeform per-workspace text the user writes in the UI.
 
+### Blocking
+
+**Blocker**:
+The workspace another workspace is waiting on before its own work can continue. Always declared — by the user, or by an agent at handoff — never inferred from branch or PR topology.
+_Avoid_: Dependency, upstream, parent
+
+**Blocked**:
+A workspace that has a blocker: at most one at a time, though one blocker can hold up several workspaces. It stops being blocked once its blocker leaves the sidebar, or the link is cleared.
+
 ### Lifecycle
 
 **Soft Delete**:

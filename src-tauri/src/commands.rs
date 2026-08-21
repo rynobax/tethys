@@ -657,6 +657,54 @@ pub async fn reorder_workspaces(
     Ok(())
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SetWorkspaceBlockerArgs {
+    pub workspace_id: WorkspaceId,
+    /// The workspace to wait on, or `None` to clear the link.
+    pub blocker_id: Option<WorkspaceId>,
+}
+
+/// Point a workspace at the blocker it is waiting on, or clear the link.
+///
+/// Goes through `mutate` rather than `update_workspace` because the cycle
+/// check has to read the whole graph, not just the row being written. Unlike
+/// `reorder_workspaces` it does emit `workspace:changed` — the sidebar's
+/// nesting is derived from this field, so a silent write would leave the
+/// tree stale.
+#[tauri::command]
+pub async fn set_workspace_blocker(
+    store: State<'_, Arc<Store>>,
+    args: SetWorkspaceBlockerArgs,
+) -> AppResult<()> {
+    let SetWorkspaceBlockerArgs {
+        workspace_id,
+        blocker_id,
+    } = args;
+    let target = workspace_id.clone();
+    store
+        .mutate(|s| {
+            if !s.workspaces.iter().any(|w| w.id == workspace_id) {
+                return Err(AppError::WorkspaceNotFound(workspace_id.clone()));
+            }
+            if let Some(blocker) = &blocker_id {
+                if !s.workspaces.iter().any(|w| &w.id == blocker) {
+                    return Err(AppError::WorkspaceNotFound(blocker.clone()));
+                }
+                if s.blocker_would_cycle(&workspace_id, blocker) {
+                    return Err(AppError::BlockerWouldCycle);
+                }
+            }
+            if let Some(ws) = s.find_workspace_mut(&workspace_id) {
+                ws.blocked_by = blocker_id;
+            }
+            Ok(())
+        })
+        .await?;
+    store.notify_changed(&target);
+    Ok(())
+}
+
 /// Trigger the background purger immediately. Used by the "Run cleanup
 /// now" button on the system status page. Still respects the 1-hour
 /// grace window — entries deleted under an hour ago stay put.
@@ -791,6 +839,7 @@ pub async fn forget_workspace(
         .mutate(|s| {
             let before = s.workspaces.len();
             s.workspaces.retain(|w| w.id != id);
+            s.clear_links_to(&id);
             Ok(s.workspaces.len() < before)
         })
         .await?;

@@ -154,6 +154,42 @@ html,
   background: var(--accent);
 }
 
+/*
+ * A blocked row sits under the workspace it is waiting on, indented by its
+ * depth in the chain and joined to it by an elbow. `--depth` comes from the
+ * row itself, so nesting is one number rather than a class per level.
+ *
+ * Deliberately uncapped: a deep chain eats into the name, and the name is
+ * already ellipsised, so it degrades rather than breaking.
+ */
+.workspace-list > li.is-blocked {
+  margin-left: calc(var(--depth, 1) * 14px);
+}
+
+/*
+ * The elbow: down from the blocker's left edge, then right toward this row.
+ * Drawn outside the row's own background, in the space the indent opened up.
+ *
+ * It descends from -15px and stops at -7px, which is exactly where the
+ * selection bar begins — so a nested row can be selected and the two marks sit
+ * side by side instead of on top of each other.
+ *
+ * The arm is pinned 15px from the row's top rather than to its centre, so it
+ * meets the branch name whether or not the row also carries a PR line.
+ */
+.workspace-list > li.is-blocked::after {
+  content: "";
+  position: absolute;
+  left: -15px;
+  top: -5px;
+  bottom: calc(100% - 15px);
+  width: 8px;
+  border-left: 1.5px solid color-mix(in oklab, var(--fg) 28%, transparent);
+  border-bottom: 1.5px solid color-mix(in oklab, var(--fg) 28%, transparent);
+  border-bottom-left-radius: 5px;
+  pointer-events: none;
+}
+
 .workspace-list > li.empty {
   color: var(--muted);
   cursor: default;
@@ -1554,6 +1590,10 @@ li.is-dragging {
   position: fixed;
   z-index: 200;
   min-width: 160px;
+  /* The blocker picker expands inline, so the menu can outgrow its estimated
+     height. Clamping here means it scrolls instead of running off screen. */
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1580,6 +1620,38 @@ li.is-dragging {
 
 .context-menu button.danger {
   color: var(--danger);
+}
+/* Candidate blockers. Indented under the disclosure that opened them, and
+   scrollable on its own so a long list doesn't push Delete off the menu. */
+.context-menu-picker {
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  overflow-y: auto;
+  margin: 2px 0 2px 10px;
+  padding-left: 4px;
+  border-left: 1px solid var(--border);
+}
+.context-menu-picker button {
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-size: 11px;
+  padding: 4px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+.context-menu-picker button.is-current {
+  color: var(--accent);
+}
+.context-menu button .disclosure {
+  display: inline-block;
+  width: 10px;
+  margin-right: 4px;
+  transition: transform 0.12s ease;
+}
+.context-menu button .disclosure.open {
+  transform: rotate(90deg);
 }
 
 .context-menu button:disabled {

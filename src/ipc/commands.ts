@@ -72,6 +72,15 @@ export const setWorkspaceNotes = (workspaceId: WorkspaceId, notes: string) =>
     args: { workspace_id: workspaceId, notes },
   });
 
+/** `blockerId: null` clears the link. Rejects on a cycle. */
+export const setWorkspaceBlocker = (
+  workspaceId: WorkspaceId,
+  blockerId: WorkspaceId | null,
+) =>
+  invoke<void>("set_workspace_blocker", {
+    args: { workspace_id: workspaceId, blocker_id: blockerId },
+  });
+
 export const openInVscode = (id: WorkspaceId) =>
   invoke<void>("open_in_vscode", { id });
 

@@ -42,6 +42,8 @@ struct CreateWorkspaceArgs {
     repos: Vec<String>,
     branch: String,
     brief: String,
+    #[serde(default)]
+    blocks_caller: bool,
 }
 
 /// The server: a socket to talk to, an identity to stamp on requests, and the
@@ -111,6 +113,15 @@ impl HandoffServer {
                         this conversation: what to do, why, and anything it cannot \
                         discover from the code. This is the only thing carried \
                         across — you cannot follow up.",
+                },
+                "blocks_caller": {
+                    "type": "boolean",
+                    "description": "Set true when you cannot continue until this \
+                        work lands. Marks the workspace you are in as waiting on \
+                        the new one, which shows up in Tethys as a nested row. \
+                        Purely a visual reminder — nothing is paused or gated, and \
+                        you will not be told when it clears. Leave it out for work \
+                        that runs alongside yours.",
                 },
             },
             "required": ["repos", "branch", "brief"],
@@ -214,6 +225,7 @@ impl ServerHandler for HandoffServer {
             repos: args.repos,
             branch: args.branch,
             brief: args.brief,
+            blocks_caller: args.blocks_caller,
         });
 
         // Everything past here is a tool-level error rather than a protocol

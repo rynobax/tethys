@@ -22,7 +22,7 @@ import { SystemStatus } from "./SystemStatus";
 import { applyTheme, ThemeContext } from "./theme";
 import { useBackendJob, type JobDescriptor } from "./useBackendJob";
 import { useAppEvent } from "./ipc/events";
-import { isReadyToDelete } from "./workspaceDerived";
+import { isReadyToDelete, workspaceTree } from "./workspaceDerived";
 import "./App.css";
 
 /** Selectable claude entry-point binaries, shared by the new-workspace form
@@ -386,10 +386,14 @@ function App() {
     () => workspaces.filter((w) => !w.deleted_at),
     [workspaces],
   );
-  // Navigable list for hotkeys: same set the sidebar's main "active"
-  // section shows (drops archived). Order matches the sidebar.
+  // Navigable list for hotkeys: same set the sidebar's main "active" section
+  // shows (drops archived), flattened through the same blocker tree so the
+  // order matches what's on screen rather than the stored order.
   const navigableWorkspaces = useMemo(
-    () => visibleWorkspaces.filter((w) => !w.archived_at),
+    () =>
+      workspaceTree(visibleWorkspaces.filter((w) => !w.archived_at)).map(
+        (r) => r.workspace,
+      ),
     [visibleWorkspaces],
   );
 
@@ -560,6 +564,17 @@ function App() {
     }
   }, []);
 
+  const handleSetBlocker = useCallback(
+    async (workspace: Workspace, blockerId: WorkspaceId | null) => {
+      try {
+        await api.setWorkspaceBlocker(workspace.id, blockerId);
+      } catch (e) {
+        setError(`could not set blocker: ${String(e)}`);
+      }
+    },
+    [],
+  );
+
   const handleReorder = useCallback(async (ids: WorkspaceId[]) => {
     // Optimistically reorder so the drop animation lands on the right row,
     // then fire the backend command. This local update is the only thing that
@@ -618,6 +633,7 @@ function App() {
             onArchiveToggle={handleArchiveToggle}
             onDelete={handleDelete}
             onClearTurn={handleClearTurn}
+            onSetBlocker={handleSetBlocker}
             workspaceNeedsTurn={workspaceNeedsTurn}
             workspaceWorking={workspaceWorking}
             runningScriptNames={runningScriptNamesFor}

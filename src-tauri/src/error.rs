@@ -5,6 +5,9 @@ pub enum AppError {
     #[error("workspace not found: {0}")]
     WorkspaceNotFound(String),
 
+    #[error("that would make the two workspaces wait on each other")]
+    BlockerWouldCycle,
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

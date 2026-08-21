@@ -302,6 +302,7 @@ mod tests {
             status: WorkspaceStatus::Ready,
             script_runs: Vec::new(),
             notes: "private scratchpad".into(),
+            blocked_by: None,
         }
     }
 

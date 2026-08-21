@@ -34,6 +34,20 @@ The tool returns as soon as the `Creating` draft is in state: provisioning runs 
 
 One trap worth remembering: Claude Code negotiates MCP protocol `2026-07-28`, which requires `ttlMs` on a `tools/list` reply. `rmcp`'s `with_all_items` omits it, and a reply without it is silently rejected and retried until the client reports "tools fetch failed". `tools_result()` sets it, and a test in `crates/tethys-mcp` holds it there.
 
+## Blockers
+
+A workspace can be marked as waiting on another — its **blocker** — and the sidebar draws it inset beneath that row, joined by an elbow. Display only: nothing is paused, gated, or notified.
+
+The link is a single `blocked_by: Option<WorkspaceId>` on `Workspace`. Everything else is derived. `workspaceTree` (`src/workspaceDerived.ts`) is the only place that decides whether a workspace *counts* as blocked, and its answer is "my blocker is one of the rows on screen" — so archiving or soft-deleting a blocker un-nests its dependents without touching a field, and undoing either brings the nesting back. The field is erased only where the id stops meaning anything: purge, `forget_workspace`, and the boot-time prune of non-`Ready` drafts in `Store::load`. Miss that last one and an agent-created blocker leaves a dangling pointer after a restart.
+
+Cardinality falls out of the field's shape rather than being enforced: fan-in is capped at one because it's a single `Option`, and fan-out is free because the blocker is the *parent* row, so several dependents are just several children. Cycles are the one real invariant — `AppState::blocker_would_cycle` walks up the chain with a hop limit, because `state.json` is hand-editable and a file already carrying a cycle has to be survivable rather than hang the walk.
+
+Ordering stays a single source of truth. `reorder_workspaces` still takes a flat id list, and the sidebar sends the whole *visual* order after a drag, not just the roots — so a workspace that later stops being blocked stays where it already appeared. Dragging moves a blocker together with everything nested under it; nested rows aren't draggable, and re-pointing is context-menu only.
+
+Agents get at this through one extra `create_workspace` argument, `blocks_caller`. It's why drafts have to be legal blockers: the tool returns while the new workspace is still `Creating`, so the caller points at a row that won't finish provisioning for minutes. It overwrites any blocker already set.
+
+Deliberately absent: no derivation from PR base branches (`baseRefName` is still not fetched), no notification when a blocker clears, no coupling to PR state, and no second blocker.
+
 ## Logging & diagnostics
 
 Two log sinks, filtered independently (`logging.rs`):

@@ -146,13 +146,28 @@ impl Handoff {
                 from_session: req.from_session.clone(),
             },
         );
+        // Setting the link in the same mutation as the insert is what makes a
+        // `Creating` draft a legal blocker: the caller points at the new
+        // workspace minutes before it finishes provisioning. Overwrites any
+        // blocker already there — fan-in is capped at one, and the most recent
+        // declaration is the one to honour.
+        let blocks_caller = req.blocks_caller;
+        let caller_id = caller.id.clone();
         self.store
             .mutate(|s| {
                 s.workspaces.insert(0, draft.clone());
+                if blocks_caller {
+                    if let Some(ws) = s.find_workspace_mut(&caller_id) {
+                        ws.blocked_by = Some(draft.id.clone());
+                    }
+                }
                 Ok(())
             })
             .await?;
         self.store.notify_changed(&id);
+        if blocks_caller {
+            self.store.notify_changed(&caller.id);
+        }
 
         info!(
             workspace = %id,

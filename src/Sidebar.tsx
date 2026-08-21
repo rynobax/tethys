@@ -21,7 +21,12 @@ import { CSS } from "@dnd-kit/utilities";
 
 import type { Workspace, WorkspaceId } from "./types";
 import { GithubChip } from "./GithubChip";
-import { linkPrs } from "./workspaceDerived";
+import {
+  blockerCandidates,
+  linkPrs,
+  workspaceTree,
+  type WorkspaceRow as TreeRow,
+} from "./workspaceDerived";
 
 type Props = {
   /** Workspaces that should appear in the sidebar (soft-deleted already filtered out). */
@@ -32,6 +37,8 @@ type Props = {
   onArchiveToggle: (ws: Workspace) => void;
   onDelete: (ws: Workspace) => void;
   onClearTurn: (ws: Workspace) => void;
+  /** `blockerId: null` clears the link. */
+  onSetBlocker: (ws: Workspace, blockerId: WorkspaceId | null) => void;
   workspaceNeedsTurn: (ws: Workspace) => boolean;
   /** True when a session in the workspace is actively processing (Claude working). */
   workspaceWorking: (ws: Workspace) => boolean;
@@ -47,6 +54,7 @@ export function Sidebar({
   onArchiveToggle,
   onDelete,
   onClearTurn,
+  onSetBlocker,
   workspaceNeedsTurn,
   workspaceWorking,
   runningScriptNames,
@@ -63,6 +71,27 @@ export function Sidebar({
     );
     return { active, archived };
   }, [workspaces]);
+
+  // The order the rows are drawn in, blocked workspaces tucked under their
+  // blocker.
+  const rows = useMemo(() => workspaceTree(active), [active]);
+
+  // The same rows cut into subtrees — one per top-level row, followed by
+  // everything nested beneath it. Dragging moves a whole block, so a blocker
+  // takes the workspaces waiting on it along.
+  const blocks = useMemo(() => {
+    const out: TreeRow[][] = [];
+    for (const row of rows) {
+      if (row.depth === 0 || out.length === 0) out.push([row]);
+      else out[out.length - 1].push(row);
+    }
+    return out;
+  }, [rows]);
+
+  const rootIds = useMemo(
+    () => blocks.map((b) => b[0].workspace.id),
+    [blocks],
+  );
 
   const [archivedExpanded, setArchivedExpanded] = useState(false);
   const [menu, setMenu] = useState<{
@@ -103,10 +132,17 @@ export function Sidebar({
     setActiveId(null);
     const { active: dragged, over } = event;
     if (!over || dragged.id === over.id) return;
-    const from = active.findIndex((w) => w.id === dragged.id);
-    const to = active.findIndex((w) => w.id === over.id);
+    const from = rootIds.indexOf(dragged.id as WorkspaceId);
+    const to = rootIds.indexOf(over.id as WorkspaceId);
     if (from < 0 || to < 0) return;
-    onReorder(arrayMove(active, from, to).map((w) => w.id));
+    // Emitting every id, not just the roots, keeps the stored order identical
+    // to the visual one — so a workspace that later stops being blocked stays
+    // where it already appeared instead of jumping to the end.
+    onReorder(
+      arrayMove(blocks, from, to)
+        .flat()
+        .map((r) => r.workspace.id),
+    );
   };
 
   const activeWorkspace = activeId
@@ -127,21 +163,35 @@ export function Sidebar({
           onDragCancel={() => setActiveId(null)}
         >
           <SortableContext
-            items={active.map((w) => w.id)}
+            items={rootIds}
             strategy={verticalListSortingStrategy}
           >
-            {active.map((w) => (
-              <SortableWorkspaceRow
-                key={w.id}
-                workspace={w}
-                selected={w.id === selectedId}
-                needsTurn={workspaceNeedsTurn(w)}
-                working={workspaceWorking(w)}
-                runningScripts={runningScriptNames(w)}
-                onSelect={() => onSelect(w.id)}
-                onContextMenu={(x, y) => setMenu({ ws: w, x, y })}
-              />
-            ))}
+            {rows.map(({ workspace: w, depth }) =>
+              depth === 0 ? (
+                <SortableWorkspaceRow
+                  key={w.id}
+                  workspace={w}
+                  selected={w.id === selectedId}
+                  needsTurn={workspaceNeedsTurn(w)}
+                  working={workspaceWorking(w)}
+                  runningScripts={runningScriptNames(w)}
+                  onSelect={() => onSelect(w.id)}
+                  onContextMenu={(x, y) => setMenu({ ws: w, x, y })}
+                />
+              ) : (
+                <WorkspaceRow
+                  key={w.id}
+                  workspace={w}
+                  selected={w.id === selectedId}
+                  needsTurn={workspaceNeedsTurn(w)}
+                  working={workspaceWorking(w)}
+                  runningScripts={runningScriptNames(w)}
+                  depth={depth}
+                  onSelect={() => onSelect(w.id)}
+                  onContextMenu={(x, y) => setMenu({ ws: w, x, y })}
+                />
+              ),
+            )}
           </SortableContext>
           <DragOverlay>
             {activeWorkspace ? (
@@ -192,10 +242,12 @@ export function Sidebar({
           y={menu.y}
           workspace={menu.ws}
           hasTurn={workspaceNeedsTurn(menu.ws)}
+          blockerOptions={blockerCandidates(active, menu.ws.id)}
           onClose={() => setMenu(null)}
           onArchiveToggle={onArchiveToggle}
           onDelete={onDelete}
           onClearTurn={onClearTurn}
+          onSetBlocker={onSetBlocker}
         />
       )}
     </>
@@ -263,6 +315,7 @@ function WorkspaceRow({
   runningScripts,
   isArchived = false,
   isDragging = false,
+  depth = 0,
   onSelect,
   onContextMenu,
   dndProps,
@@ -274,6 +327,8 @@ function WorkspaceRow({
   runningScripts: string[];
   isArchived?: boolean;
   isDragging?: boolean;
+  /** How deep in the blocker tree. 0 is a normal, unblocked row. */
+  depth?: number;
   onSelect: () => void;
   onContextMenu: (x: number, y: number) => void;
   dndProps?: DndProps;
@@ -292,6 +347,7 @@ function WorkspaceRow({
       : "";
   const classes = [
     selected ? "selected" : "",
+    depth > 0 ? "is-blocked" : "",
     isArchived ? "is-archived" : "",
     isDragging ? "is-dragging" : "",
     status === "creating" ? "pending" : "",
@@ -311,7 +367,11 @@ function WorkspaceRow({
   return (
     <li
       ref={dndProps?.ref}
-      style={dndProps?.style}
+      style={
+        depth > 0
+          ? { ...dndProps?.style, "--depth": depth } as React.CSSProperties
+          : dndProps?.style
+      }
       {...(dndProps?.attributes ?? {})}
       {...(dndProps?.listeners ?? {})}
       className={classes}
@@ -366,22 +426,28 @@ function ContextMenu({
   y,
   workspace,
   hasTurn,
+  blockerOptions,
   onClose,
   onArchiveToggle,
   onDelete,
   onClearTurn,
+  onSetBlocker,
 }: {
   x: number;
   y: number;
   workspace: Workspace;
   hasTurn: boolean;
+  /** Legal blockers for this workspace — cycles already filtered out. */
+  blockerOptions: Workspace[];
   onClose: () => void;
   onArchiveToggle: (ws: Workspace) => void;
   onDelete: (ws: Workspace) => void;
   onClearTurn: (ws: Workspace) => void;
+  onSetBlocker: (ws: Workspace, blockerId: WorkspaceId | null) => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const isReady = workspace.status.kind === "ready";
+  const [pickingBlocker, setPickingBlocker] = useState(false);
 
   useEffect(() => {
     const handle = (e: MouseEvent) => {
@@ -426,6 +492,48 @@ function ContextMenu({
         >
           Clear notification
         </button>
+      )}
+      {workspace.blocked_by && (
+        <button
+          type="button"
+          role="menuitem"
+          onClick={wrap(() => onSetBlocker(workspace, null))}
+        >
+          Clear blocker
+        </button>
+      )}
+      {/* An archived workspace is already out of the blocking picture — its row
+          renders flat in the archived drawer — so offering to give it a blocker
+          would set a link with nothing to show for it. Clearing a stale one
+          stays available. */}
+      {blockerOptions.length > 0 && !workspace.archived_at && (
+        <button
+          type="button"
+          role="menuitem"
+          aria-expanded={pickingBlocker}
+          onClick={() => setPickingBlocker((v) => !v)}
+        >
+          <span className={`disclosure${pickingBlocker ? " open" : ""}`}>▸</span>
+          Blocked by…
+        </button>
+      )}
+      {pickingBlocker && (
+        <div className="context-menu-picker" role="group">
+          {blockerOptions.map((candidate) => (
+            <button
+              key={candidate.id}
+              type="button"
+              role="menuitem"
+              className={
+                candidate.id === workspace.blocked_by ? "is-current" : undefined
+              }
+              title={candidate.branch}
+              onClick={wrap(() => onSetBlocker(workspace, candidate.id))}
+            >
+              {candidate.branch}
+            </button>
+          ))}
+        </div>
       )}
       {isReady && (
         <button

@@ -83,6 +83,14 @@ impl Store {
             initial
                 .workspaces
                 .retain(|w| matches!(w.status, WorkspaceStatus::Ready));
+            // A pruned draft can still be somebody's blocker: an agent handing
+            // off with `blocks_caller` points the caller at a workspace that is
+            // a `Creating` draft for as long as provisioning takes. Once the
+            // draft is gone the id means nothing, so drop the link rather than
+            // leave a pointer nothing can resolve.
+            for id in &pruned {
+                initial.clear_links_to(id);
+            }
         }
 
         let store = Arc::new(Self {
@@ -250,6 +258,7 @@ mod tests {
             status,
             script_runs: Vec::new(),
             notes: String::new(),
+            blocked_by: None,
         }
     }
 

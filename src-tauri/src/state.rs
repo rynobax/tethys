@@ -62,6 +62,16 @@ pub struct Workspace {
     /// the detail pane. Empty string when unset.
     #[serde(default)]
     pub notes: String,
+    /// The workspace this one is waiting on before its own work can continue.
+    ///
+    /// A pointer, not a state: whether this workspace is *actually* blocked is
+    /// derived from whether the blocker is still on screen, so soft-deleting or
+    /// archiving the blocker frees this one without touching the field — and
+    /// undoing either restores the link. It is only cleared for real where the
+    /// id stops meaning anything: purge, forget, and the boot-time prune of
+    /// unfinished drafts.
+    #[serde(default)]
+    pub blocked_by: Option<WorkspaceId>,
 }
 
 /// A live script process attached to a workspace+repo. The Tethys `id` is
@@ -244,6 +254,7 @@ impl Workspace {
             status: WorkspaceStatus::Creating,
             script_runs: Vec::new(),
             notes: String::new(),
+            blocked_by: None,
         }
     }
 
@@ -294,6 +305,43 @@ impl AppState {
     pub fn find_workspace_mut(&mut self, id: &str) -> Option<&mut Workspace> {
         self.workspaces.iter_mut().find(|w| w.id == id)
     }
+
+    /// True when pointing `workspace_id` at `blocker_id` would close a cycle —
+    /// i.e. the proposed blocker is already waiting, directly or transitively,
+    /// on the workspace being changed.
+    ///
+    /// The hop limit is not a performance guard. `state.json` is hand-editable
+    /// and a *parse* failure there is already non-fatal, so a file carrying a
+    /// pre-existing cycle has to be survivable: walking it must terminate even
+    /// though the invariant this function protects was never true.
+    pub fn blocker_would_cycle(&self, workspace_id: &str, blocker_id: &str) -> bool {
+        if workspace_id == blocker_id {
+            return true;
+        }
+        let mut cursor = Some(blocker_id);
+        for _ in 0..self.workspaces.len() + 1 {
+            let Some(id) = cursor else { return false };
+            if id == workspace_id {
+                return true;
+            }
+            cursor = self
+                .find_workspace(id)
+                .and_then(|w| w.blocked_by.as_deref());
+        }
+        // Ran out of hops with the chain still going: the existing links are
+        // already cyclic. Refuse to add to them.
+        true
+    }
+
+    /// Drops every link pointing at `blocker_id`. For the moments where the id
+    /// stops meaning anything, as opposed to merely leaving the sidebar.
+    pub fn clear_links_to(&mut self, blocker_id: &str) {
+        for ws in &mut self.workspaces {
+            if ws.blocked_by.as_deref() == Some(blocker_id) {
+                ws.blocked_by = None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -325,6 +373,7 @@ mod tests {
             status: WorkspaceStatus::Ready,
             script_runs: Vec::new(),
             notes: String::new(),
+            blocked_by: None,
         }
     }
 
@@ -507,6 +556,82 @@ mod tests {
         }"#;
         let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
         assert!(matches!(parsed.workspaces[0].status, WorkspaceStatus::Ready));
+    }
+
+    #[test]
+    fn pre_blocked_by_state_defaults_to_unblocked() {
+        // Nothing was waiting on anything before blockers existed, so the
+        // absent field has to read as "no blocker" rather than failing the
+        // parse — a parse failure here silently discards every workspace.
+        let raw = r#"{
+            "workspaces": [
+                {
+                    "id": "abc-123",
+                    "branch": "feat/foo",
+                    "created_at": "2026-04-01T12:00:00Z"
+                }
+            ]
+        }"#;
+        let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
+        assert_eq!(parsed.workspaces[0].blocked_by, None);
+    }
+
+    fn blocking_state(links: &[(&str, Option<&str>)]) -> AppState {
+        AppState {
+            workspaces: links
+                .iter()
+                .map(|(id, blocker)| {
+                    let mut ws = Workspace::draft(
+                        (*id).into(),
+                        format!("branch/{id}"),
+                        None,
+                        Origin::Ui,
+                    );
+                    ws.blocked_by = blocker.map(str::to_string);
+                    ws
+                })
+                .collect(),
+            system_errors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_workspace_cannot_block_itself() {
+        let state = blocking_state(&[("a", None)]);
+        assert!(state.blocker_would_cycle("a", "a"));
+    }
+
+    #[test]
+    fn an_unrelated_blocker_is_allowed() {
+        // a <- b (a blocks b). Pointing c at b is a fan-out onto b's chain,
+        // not a cycle.
+        let state = blocking_state(&[("a", None), ("b", Some("a")), ("c", None)]);
+        assert!(!state.blocker_would_cycle("c", "b"));
+    }
+
+    #[test]
+    fn a_blocker_downstream_of_the_target_would_cycle() {
+        // a <- b <- c. Pointing a at c would close the loop.
+        let state = blocking_state(&[("a", None), ("b", Some("a")), ("c", Some("b"))]);
+        assert!(state.blocker_would_cycle("a", "c"));
+        assert!(state.blocker_would_cycle("a", "b"));
+    }
+
+    #[test]
+    fn a_preexisting_cycle_does_not_hang_the_walk() {
+        // Only reachable from a hand-edited state.json, and it has to
+        // terminate rather than spin.
+        let state = blocking_state(&[("a", Some("b")), ("b", Some("a")), ("c", None)]);
+        assert!(state.blocker_would_cycle("c", "a"));
+    }
+
+    #[test]
+    fn clearing_links_drops_every_dependent() {
+        // Fan-out: one blocker, several waiting on it.
+        let mut state = blocking_state(&[("a", None), ("b", Some("a")), ("c", Some("a"))]);
+        state.clear_links_to("a");
+        assert_eq!(state.workspaces[1].blocked_by, None);
+        assert_eq!(state.workspaces[2].blocked_by, None);
     }
 
     #[test]

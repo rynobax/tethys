@@ -68,6 +68,10 @@ pub struct CreateWorkspace {
     pub branch: String,
     /// The Brief — first message for the session that gets the work.
     pub brief: String,
+    /// When true, the calling workspace is marked as waiting on the new one.
+    /// Default false so a config or client predating the field still parses.
+    #[serde(default)]
+    pub blocks_caller: bool,
 }
 
 /// The app's answer. A handoff is accepted or refused; there is deliberately
@@ -131,6 +135,22 @@ where
 mod tests {
     use super::*;
 
+    /// A config or client predating `blocks_caller` sends the frame without
+    /// it. Rejecting that would break every handoff, not just blocking ones.
+    #[test]
+    fn a_frame_without_blocks_caller_parses_as_non_blocking() {
+        let raw = r#"{
+            "op": "create_workspace",
+            "from_workspace": "ws-1",
+            "repos": ["nl-backend"],
+            "branch": "feat/handoff",
+            "brief": "Do the thing."
+        }"#;
+        let Request::CreateWorkspace(req) = serde_json::from_str(raw).expect("must deserialize");
+        assert!(!req.blocks_caller);
+        assert_eq!(req.from_session, None);
+    }
+
     #[tokio::test]
     async fn a_frame_round_trips() {
         let req = Request::CreateWorkspace(CreateWorkspace {
@@ -139,6 +159,7 @@ mod tests {
             repos: vec!["nl-backend".into()],
             branch: "feat/handoff".into(),
             brief: "Port the poller to the new seam.".into(),
+            blocks_caller: true,
         });
 
         let mut buf = Vec::new();

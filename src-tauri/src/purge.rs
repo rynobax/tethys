@@ -99,6 +99,9 @@ pub async fn purge_workspace(
     store
         .mutate(|s| {
             s.workspaces.retain(|w| w.id != id);
+            // Past the grace window the id is unrecoverable, so anything still
+            // waiting on it is waiting on nothing.
+            s.clear_links_to(&id);
             Ok(())
         })
         .await
