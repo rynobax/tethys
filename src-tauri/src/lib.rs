@@ -214,8 +214,13 @@ pub fn run() {
                 mcp_launch,
             ));
             let mcp_socket = paths.mcp_socket();
+            let mcp_services = mcp::McpServices {
+                handoff,
+                store: store.clone(),
+                registry: app.state::<Arc<RegistryLoad>>().inner().clone(),
+            };
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = mcp::listen(&mcp_socket, handoff).await {
+                if let Err(e) = mcp::listen(&mcp_socket, mcp_services).await {
                     error!(error = %e, "mcp listener failed to start");
                 }
             });

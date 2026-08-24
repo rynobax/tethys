@@ -1,8 +1,9 @@
-//! MCP server companion binary — the handoff tool.
+//! MCP server companion binary — the tools a session gets over Tethys itself.
 //!
 //! Claude Code spawns one of these per session, from the `--mcp-config` Tethys
-//! renders at spawn time. It exposes a single tool, `create_workspace`, and
-//! forwards each call to the running Tethys app over `mcp.sock`.
+//! renders at spawn time. It exposes two tools — `create_workspace` to hand
+//! work off, and `link_pr` to point the current workspace at a pull request —
+//! and forwards each call to the running Tethys app over `mcp.sock`.
 //!
 //! Two things about this process are worth knowing:
 //!
@@ -31,8 +32,8 @@ use serde_json::json;
 use tokio::net::UnixStream;
 
 use tethys_mcp::{
-    read_frame, write_frame, CreateWorkspace, Request, Response, ENV_REPO_KEYS, ENV_SESSION_ID,
-    ENV_SOCKET, ENV_WORKSPACE_ID, TOOL_CREATE_WORKSPACE,
+    read_frame, write_frame, CreateWorkspace, LinkPr, Request, Response, ENV_REPO_KEYS,
+    ENV_SESSION_ID, ENV_SOCKET, ENV_WORKSPACE_ID, TOOL_CREATE_WORKSPACE, TOOL_LINK_PR,
 };
 
 /// What the calling agent supplies. Everything else — who is calling, which
@@ -46,17 +47,26 @@ struct CreateWorkspaceArgs {
     blocks_caller: bool,
 }
 
+/// What the calling agent supplies to `link_pr`. The workspace it lands on
+/// comes from the environment, so an agent can only ever link to its own.
+#[derive(Debug, Deserialize)]
+struct LinkPrArgs {
+    reference: String,
+    #[serde(default)]
+    repo_key: Option<String>,
+}
+
 /// The server: a socket to talk to, an identity to stamp on requests, and the
 /// repo keys that make up the `repos` enum.
 #[derive(Debug, Clone)]
-struct HandoffServer {
+struct TethysServer {
     socket: PathBuf,
     from_workspace: String,
     from_session: Option<String>,
     repo_keys: Vec<String>,
 }
 
-impl HandoffServer {
+impl TethysServer {
     /// Read the config Tethys baked into our environment. A missing socket or
     /// workspace id means we were launched by something other than Tethys, and
     /// there is nothing useful we could do.
@@ -80,11 +90,11 @@ impl HandoffServer {
         })
     }
 
-    /// The tool's input schema, built at runtime so `repos` can enumerate the
-    /// registry. An enum means a calling agent cannot name a repo Tethys has
+    /// `create_workspace`'s input schema, built at runtime so `repos` can
+    /// enumerate the registry. An enum means a calling agent cannot name a repo Tethys has
     /// never heard of — the failure it would otherwise learn about minutes
     /// later, from a workspace that failed to provision.
-    fn input_schema(&self) -> JsonObject {
+    fn create_workspace_schema(&self) -> JsonObject {
         let repo_items = if self.repo_keys.is_empty() {
             json!({ "type": "string" })
         } else {
@@ -133,7 +143,7 @@ impl HandoffServer {
             .expect("input schema literal is an object")
     }
 
-    fn tool(&self) -> Tool {
+    fn create_workspace_tool(&self) -> Tool {
         Tool::new(
             Cow::Borrowed(TOOL_CREATE_WORKSPACE),
             Cow::Borrowed(
@@ -150,7 +160,60 @@ impl HandoffServer {
                  parallel with what you are doing. It is the wrong tool for work \
                  belonging on the current branch, which you should just do.",
             ),
-            self.input_schema(),
+            self.create_workspace_schema(),
+        )
+    }
+
+    /// `link_pr`'s input schema. `repo_key` enumerates the registry for the
+    /// same reason `repos` does above, but it stays optional: naming a repo is
+    /// only ever disambiguation, and a workspace with one GitHub repo — or a
+    /// pasted URL that names its own — needs none.
+    fn link_pr_schema(&self) -> JsonObject {
+        let mut repo_key = json!({
+            "type": "string",
+            "description": "Which of this workspace's repos the PR belongs to. \
+                Only needed when the workspace spans more than one GitHub repo \
+                and you are passing a bare number.",
+        });
+        if !self.repo_keys.is_empty() {
+            repo_key["enum"] = json!(self.repo_keys);
+        }
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "reference": {
+                    "type": "string",
+                    "description": "The pull request: a full GitHub URL, \
+                        `owner/repo#123`, or just the number.",
+                },
+                "repo_key": repo_key,
+            },
+            "required": ["reference"],
+            "additionalProperties": false,
+        });
+        schema
+            .as_object()
+            .cloned()
+            .expect("input schema literal is an object")
+    }
+
+    fn link_pr_tool(&self) -> Tool {
+        Tool::new(
+            Cow::Borrowed(TOOL_LINK_PR),
+            Cow::Borrowed(
+                "Show a pull request on the Tethys workspace this session belongs \
+                 to, so Ryan sees its state — CI, reviews, conflicts — on the row \
+                 for this work without going looking for it.\n\n\
+                 Call it right after you open a PR. Tethys finds the PR for the \
+                 workspace's own branch by itself, so the case this exists for is a \
+                 PR you opened from some other branch in the same worktree — a \
+                 stacked PR, a follow-up, a fix cut off main. Calling it for the \
+                 branch PR anyway is harmless and simply makes it appear sooner.\n\n\
+                 The PR must already exist on GitHub: this records it, it does not \
+                 create or modify anything. Fails if the number is wrong or the \
+                 repo isn't one this workspace spans.",
+            ),
+            self.link_pr_schema(),
         )
     }
 
@@ -164,7 +227,7 @@ impl HandoffServer {
     /// is baked in when Tethys spawns this process, so a cached list must not
     /// outlive the session it was built for.
     fn tools_result(&self) -> ListToolsResult {
-        ListToolsResult::with_all_items(vec![self.tool()])
+        ListToolsResult::with_all_items(vec![self.create_workspace_tool(), self.link_pr_tool()])
             .with_ttl_ms(0)
             .with_cache_scope(CacheScope::Private)
     }
@@ -184,7 +247,7 @@ impl HandoffServer {
     }
 }
 
-impl ServerHandler for HandoffServer {
+impl ServerHandler for TethysServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("tethys", env!("CARGO_PKG_VERSION")))
@@ -208,17 +271,30 @@ impl ServerHandler for HandoffServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        if request.name != TOOL_CREATE_WORKSPACE {
-            return Err(ErrorData::invalid_params(
-                format!("unknown tool: {}", request.name),
+        match request.name.as_ref() {
+            TOOL_CREATE_WORKSPACE => self.create_workspace(request.arguments).await,
+            TOOL_LINK_PR => self.link_pr(request.arguments).await,
+            other => Err(ErrorData::invalid_params(
+                format!("unknown tool: {other}"),
                 None,
-            ));
+            )),
         }
+    }
+}
 
-        let raw = request.arguments.unwrap_or_default();
-        let args: CreateWorkspaceArgs = serde_json::from_value(serde_json::Value::Object(raw))
-            .map_err(|e| ErrorData::invalid_params(format!("bad arguments: {e}"), None))?;
-
+/// The two calls. Both follow the same shape: parse the agent's arguments,
+/// stamp the identity from the environment onto them, and turn whatever comes
+/// back into words.
+///
+/// Everything past the parse is a *tool-level* error rather than a protocol
+/// one. A protocol error can be swallowed by the client; the agent has to read
+/// the reason it didn't get what it asked for, or it will assume it did.
+impl TethysServer {
+    async fn create_workspace(
+        &self,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let args: CreateWorkspaceArgs = parse_args(arguments)?;
         let request = Request::CreateWorkspace(CreateWorkspace {
             from_workspace: self.from_workspace.clone(),
             from_session: self.from_session.clone(),
@@ -228,17 +304,11 @@ impl ServerHandler for HandoffServer {
             blocks_caller: args.blocks_caller,
         });
 
-        // Everything past here is a tool-level error rather than a protocol
-        // one: the message has to reach the agent, or it will assume the
-        // handoff landed.
         let response = match self.send(&request).await {
             Ok(response) => response,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "handoff failed, no workspace was created: {e}"
-                ))])
-                .into())
-            }
+            Err(e) => return Ok(failed(format!(
+                "handoff failed, no workspace was created: {e}"
+            ))),
         };
 
         Ok(match response {
@@ -252,17 +322,74 @@ impl ServerHandler for HandoffServer {
                  Ryan sees it in Tethys."
             ))])
             .into(),
-            Response::Rejected { message } => CallToolResult::error(vec![ContentBlock::text(
-                format!("handoff refused, no workspace was created: {message}"),
-            )])
-            .into(),
+            Response::Rejected { message } => failed(format!(
+                "handoff refused, no workspace was created: {message}"
+            )),
+            other => failed(format!("Tethys answered a handoff with {other:?}")),
+        })
+    }
+
+    async fn link_pr(
+        &self,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let args: LinkPrArgs = parse_args(arguments)?;
+        let request = Request::LinkPr(LinkPr {
+            from_workspace: self.from_workspace.clone(),
+            from_session: self.from_session.clone(),
+            repo_key: args.repo_key,
+            reference: args.reference,
+        });
+
+        let response = match self.send(&request).await {
+            Ok(response) => response,
+            Err(e) => return Ok(failed(format!("link failed, nothing was linked: {e}"))),
+        };
+
+        Ok(match response {
+            Response::Linked {
+                repo_key,
+                number,
+                url,
+                is_branch_pr,
+            } => {
+                let role = if is_branch_pr {
+                    "this workspace's branch PR"
+                } else {
+                    "an extra PR on that repo"
+                };
+                CallToolResult::success(vec![ContentBlock::text(format!(
+                    "Linked PR #{number} ({url}) to this workspace's {repo_key} repo, as \
+                     {role}. Tethys polls it from here on, so its CI and review state \
+                     show up on the workspace row."
+                ))])
+                .into()
+            }
+            Response::Rejected { message } => {
+                failed(format!("link refused, nothing was linked: {message}"))
+            }
+            other => failed(format!("Tethys answered a link with {other:?}")),
         })
     }
 }
 
+/// Deserialize a tool call's arguments. The one place a bad call is a protocol
+/// error: the agent sent something the schema said it couldn't.
+fn parse_args<T: serde::de::DeserializeOwned>(
+    arguments: Option<JsonObject>,
+) -> Result<T, ErrorData> {
+    serde_json::from_value(serde_json::Value::Object(arguments.unwrap_or_default()))
+        .map_err(|e| ErrorData::invalid_params(format!("bad arguments: {e}"), None))
+}
+
+/// A tool-level failure: an error the agent reads, not one the client eats.
+fn failed(message: String) -> CallToolResponse {
+    CallToolResult::error(vec![ContentBlock::text(message)]).into()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let server = HandoffServer::from_env()?;
+    let server = TethysServer::from_env()?;
     let running = server.serve(stdio()).await?;
     running.waiting().await?;
     Ok(())
@@ -272,8 +399,8 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn server() -> HandoffServer {
-        HandoffServer {
+    fn server() -> TethysServer {
+        TethysServer {
             socket: PathBuf::from("/tmp/mcp.sock"),
             from_workspace: "ws-1".into(),
             from_session: Some("sess-1".into()),
@@ -295,7 +422,7 @@ mod tests {
     /// key that isn't in it can't be expressed at all.
     #[test]
     fn the_repos_argument_enumerates_the_registry() {
-        let schema = serde_json::to_value(server().input_schema()).expect("serialize");
+        let schema = serde_json::to_value(server().create_workspace_schema()).expect("serialize");
         assert_eq!(
             schema["properties"]["repos"]["items"]["enum"],
             serde_json::json!(["nl-frontend", "nl-backend"])
@@ -306,13 +433,50 @@ mod tests {
         );
     }
 
+    /// Both tools have to be listed, or the one that isn't never reaches the
+    /// agent.
+    #[test]
+    fn the_tools_reply_carries_both_tools() {
+        let raw = serde_json::to_value(server().tools_result()).expect("serialize");
+        let names: Vec<&str> = raw["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .map(|t| t["name"].as_str().expect("name"))
+            .collect();
+        assert_eq!(names, vec![TOOL_CREATE_WORKSPACE, TOOL_LINK_PR]);
+    }
+
+    /// Only the reference is required: a workspace with one GitHub repo, or a
+    /// pasted URL that names its own, gives Tethys enough to resolve the rest.
+    #[test]
+    fn link_pr_requires_only_the_reference() {
+        let schema = serde_json::to_value(server().link_pr_schema()).expect("serialize");
+        assert_eq!(schema["required"], serde_json::json!(["reference"]));
+        assert_eq!(
+            schema["properties"]["repo_key"]["enum"],
+            serde_json::json!(["nl-frontend", "nl-backend"])
+        );
+    }
+
+    /// Same rule as `repos`: an empty registry must not render an `enum` that
+    /// nothing can satisfy.
+    #[test]
+    fn an_empty_registry_leaves_the_link_pr_enum_out() {
+        let mut server = server();
+        server.repo_keys.clear();
+        let schema = serde_json::to_value(server.link_pr_schema()).expect("serialize");
+        assert!(schema["properties"]["repo_key"]["enum"].is_null());
+        assert_eq!(schema["properties"]["repo_key"]["type"], "string");
+    }
+
     /// An empty registry means there is nothing to enumerate — the schema has
     /// to stay valid rather than offering an empty `enum` that matches nothing.
     #[test]
     fn an_empty_registry_leaves_the_enum_out() {
         let mut server = server();
         server.repo_keys.clear();
-        let schema = serde_json::to_value(server.input_schema()).expect("serialize");
+        let schema = serde_json::to_value(server.create_workspace_schema()).expect("serialize");
         assert!(schema["properties"]["repos"]["items"]["enum"].is_null());
         assert_eq!(schema["properties"]["repos"]["items"]["type"], "string");
     }

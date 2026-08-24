@@ -61,3 +61,12 @@ Where a workspace came from — the user's own hand, or a handoff, and which ses
 
 **Brief**:
 The instruction an agent writes for the session it hands work to. Unlike Notes, it is written by an agent, for an agent, and only at the moment of handoff.
+
+### Pull requests
+
+**Branch PR**:
+The pull request open on a workspace's own branch. Tethys finds it by itself, by branch name, and there is at most one per repo link.
+
+**Attached PR**:
+Any other pull request a workspace should show — a stacked PR, a follow-up, something cut off main in the same worktree. Named by the user in the attach dialog or by an agent linking one it opened, since nothing about the workspace implies it.
+_Avoid_: Extra PR, secondary PR

@@ -1,4 +1,4 @@
-//! Both halves of the seam in front of the handoff MCP server.
+//! Both halves of the seam in front of the Tethys MCP server.
 //!
 //! [`McpLaunch`] is the spawn side: it renders the `--mcp-config` a Claude
 //! session is launched with. [`listen`] is the receiving side: the socket that
@@ -16,11 +16,13 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
 
 use crate::error::AppResult;
+use crate::github;
 use crate::handoff::Handoff;
 use crate::paths::Paths;
 use crate::registry::RegistryLoad;
+use crate::store::Store;
 
-pub use tethys_mcp::{CreateWorkspace, Request, Response};
+pub use tethys_mcp::{CreateWorkspace, LinkPr, Request, Response};
 
 /// Everything needed to render a session's `--mcp-config`, resolved once at
 /// boot: the companion binary, the socket it should dial, and the registry repo
@@ -64,7 +66,7 @@ impl McpLaunch {
         })
     }
 
-    /// The `claude` flags that put the handoff tool in a session's hands.
+    /// The `claude` flags that put the Tethys tools in a session's hands.
     ///
     /// `--mcp-config` takes JSON inline, so nothing is written to disk. The
     /// calling identity rides in the server's `env` block rather than being
@@ -82,7 +84,7 @@ impl McpLaunch {
     pub fn claude_args(&self, workspace_id: &str, session_id: &str) -> Vec<String> {
         vec![
             format!("--mcp-config={}", self.config_json(workspace_id, session_id)),
-            format!("--allowed-tools={}", tethys_mcp::ALLOWED_TOOL),
+            format!("--allowed-tools={}", tethys_mcp::ALLOWED_TOOLS.join(",")),
         ]
     }
 
@@ -104,9 +106,19 @@ impl McpLaunch {
     }
 }
 
+/// What the socket can reach — one field per thing an agent is allowed to ask
+/// Tethys for. Bundled rather than passed loose so a third tool costs a field
+/// here and nothing at the call site.
+#[derive(Clone)]
+pub struct McpServices {
+    pub handoff: Arc<Handoff>,
+    pub store: Arc<Store>,
+    pub registry: Arc<RegistryLoad>,
+}
+
 /// Bind `mcp.sock` and spawn an accept loop. If the socket already exists (a
 /// prior run died without cleanup) it's removed first.
-pub async fn listen(socket_path: &Path, handoff: Arc<Handoff>) -> AppResult<()> {
+pub async fn listen(socket_path: &Path, services: McpServices) -> AppResult<()> {
     if socket_path.exists() {
         tokio::fs::remove_file(socket_path).await.ok();
     }
@@ -121,9 +133,9 @@ pub async fn listen(socket_path: &Path, handoff: Arc<Handoff>) -> AppResult<()> 
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    let handoff = handoff.clone();
+                    let services = services.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = serve_connection(stream, handoff).await {
+                        if let Err(e) = serve_connection(stream, services).await {
                             warn!(error = %e, "mcp connection error");
                         }
                     });
@@ -139,33 +151,69 @@ pub async fn listen(socket_path: &Path, handoff: Arc<Handoff>) -> AppResult<()> 
 /// One request, one reply, then the peer hangs up.
 ///
 /// A rejection is a reply, not a dropped connection: the calling agent has to
-/// be told, in words, that no workspace was created.
-async fn serve_connection(mut stream: UnixStream, handoff: Arc<Handoff>) -> AppResult<()> {
+/// be told, in words, that nothing happened.
+async fn serve_connection(mut stream: UnixStream, services: McpServices) -> AppResult<()> {
     let request: Request = tethys_mcp::read_frame(&mut stream).await?;
     let response = match request {
-        Request::CreateWorkspace(req) => {
-            debug!(
-                from_workspace = %req.from_workspace,
-                branch = %req.branch,
-                repos = req.repos.len(),
-                "handoff requested"
-            );
-            match handoff.accept(req).await {
-                Ok(accepted) => Response::Accepted {
-                    workspace_id: accepted.workspace_id,
-                    branch: accepted.branch,
-                },
-                Err(e) => {
-                    warn!(error = %e, "handoff refused");
-                    Response::Rejected {
-                        message: e.to_string(),
-                    }
-                }
-            }
-        }
+        Request::CreateWorkspace(req) => create_workspace(&services, req).await,
+        Request::LinkPr(req) => link_pr(&services, req).await,
     };
     tethys_mcp::write_frame(&mut stream, &response).await?;
     Ok(())
+}
+
+async fn create_workspace(services: &McpServices, req: CreateWorkspace) -> Response {
+    debug!(
+        from_workspace = %req.from_workspace,
+        branch = %req.branch,
+        repos = req.repos.len(),
+        "handoff requested"
+    );
+    match services.handoff.accept(req).await {
+        Ok(accepted) => Response::Accepted {
+            workspace_id: accepted.workspace_id,
+            branch: accepted.branch,
+        },
+        Err(e) => {
+            warn!(error = %e, "handoff refused");
+            Response::Rejected {
+                message: e.to_string(),
+            }
+        }
+    }
+}
+
+/// The same door the attach dialog goes through — the agent only supplies the
+/// reference, and the workspace comes off the connection's baked-in identity.
+async fn link_pr(services: &McpServices, req: LinkPr) -> Response {
+    debug!(
+        from_workspace = %req.from_workspace,
+        from_session = ?req.from_session,
+        reference = %req.reference,
+        "pr link requested"
+    );
+    let attached = github::attach(
+        &services.store,
+        &services.registry,
+        &req.from_workspace,
+        req.repo_key.as_deref(),
+        &req.reference,
+    )
+    .await;
+    match attached {
+        Ok(attached) => Response::Linked {
+            repo_key: attached.repo_key,
+            number: attached.status.pr_number,
+            url: attached.status.url,
+            is_branch_pr: attached.slot == github::AttachSlot::BranchPr,
+        },
+        Err(e) => {
+            warn!(error = %e, "pr link refused");
+            Response::Rejected {
+                message: e.to_string(),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -217,7 +265,7 @@ mod tests {
         assert!(args[0].starts_with("--mcp-config={"));
         assert_eq!(
             args[1],
-            "--allowed-tools=mcp__tethys__create_workspace"
+            "--allowed-tools=mcp__tethys__create_workspace,mcp__tethys__link_pr"
         );
     }
 }

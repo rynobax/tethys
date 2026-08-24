@@ -12,10 +12,8 @@ use tauri::ipc::InvokeResponseBody;
 use crate::claude;
 use crate::claude_local;
 use crate::error::{AppError, AppResult};
-use crate::github::poller::{fetch_pr_status, AuthSnapshot, GithubPoller};
-use crate::github::{
-    parse_pr_reference, resolve_attach_target, GithubPrStatus, GithubSlug,
-};
+use crate::github::poller::{AuthSnapshot, GithubPoller};
+use crate::github::{self, GithubPrStatus};
 use crate::inprogress::InProgressWorkspaces;
 use crate::job::{JobEvent, JobTx};
 use crate::mcp::McpLaunch;
@@ -30,7 +28,7 @@ use crate::registry::{self, starter_template, RegistryLoad, Repo, RepoRegistry};
 use crate::scripts::{ScriptInfo, ScriptSupervisor};
 use crate::sessions::{start_session, SessionInfo, SessionSupervisor, StartSession};
 use crate::state::{
-    AttachedPr, Folder, FolderId, Origin, ScriptRunMeta, SystemErrorEntry, Workspace, WorkspaceId,
+    Folder, FolderId, Origin, ScriptRunMeta, SystemErrorEntry, Workspace, WorkspaceId,
 };
 use crate::store::Store;
 use crate::theme::Theme;
@@ -77,85 +75,23 @@ pub struct AttachPrArgs {
 ///
 /// The poller only ever discovers the PR for the workspace's own branch, so a
 /// second branch cut inside the same worktree needs its PR attached by hand.
-/// The status is fetched here rather than left to the next tick, so a typo'd
-/// number fails loudly instead of parking an empty chip in the UI.
+/// The work is in [`github::attach`], which an agent's `link_pr` call reaches
+/// through the same door.
 #[tauri::command]
 pub async fn attach_pr(
     store: State<'_, Arc<Store>>,
     registry: State<'_, Arc<RegistryLoad>>,
     args: AttachPrArgs,
 ) -> AppResult<GithubPrStatus> {
-    let pr = parse_pr_reference(&args.reference).ok_or_else(|| {
-        AppError::Other(format!(
-            "couldn't read a PR number from \"{}\" — paste a PR URL or a number",
-            args.reference.trim()
-        ))
-    })?;
-    let reg = registry.require()?;
-
-    let repo_keys: Vec<String> = store
-        .read(|s| {
-            s.find_workspace(&args.workspace_id)
-                .map(|w| w.repo_links.iter().map(|r| r.repo_key.clone()).collect())
-        })
-        .await
-        .ok_or_else(|| AppError::WorkspaceNotFound(args.workspace_id.clone()))?;
-    // Only GitHub-backed repos are attachable — the rest have no slug to query.
-    let mut candidates: Vec<(String, GithubSlug)> = Vec::new();
-    for key in repo_keys {
-        if let Some(slug) = reg.find_repo(&key).and_then(|r| r.github_slug.clone()) {
-            candidates.push((key, slug));
-        }
-    }
-
-    let (repo_key, slug) =
-        resolve_attach_target(&candidates, args.repo_key.as_deref(), &pr)
-            .map_err(|e| AppError::Other(e.to_string()))?;
-
-    let status = fetch_pr_status(&slug, pr.number)
-        .await
-        .map_err(|e| {
-            AppError::Other(format!(
-                "couldn't fetch PR #{} from {}/{}: {e}",
-                pr.number, slug.owner, slug.name
-            ))
-        })?
-        .ok_or_else(|| {
-            AppError::Other(format!(
-                "{}/{} has no PR #{}",
-                slug.owner, slug.name, pr.number
-            ))
-        })?;
-
-    let stored = status.clone();
-    let workspace_id = args.workspace_id.clone();
-    store
-        .update_workspace(&workspace_id, move |ws| {
-            let link = ws.link_mut(&repo_key).ok_or_else(|| {
-                AppError::Other(format!("workspace has no worktree for {repo_key}"))
-            })?;
-            if link.github.as_ref().is_some_and(|g| g.pr_number == pr.number) {
-                return Err(AppError::Other(format!(
-                    "PR #{} is already tracked as this workspace's branch PR",
-                    pr.number
-                )));
-            }
-            if link.attached_prs.iter().any(|a| a.number == pr.number) {
-                return Err(AppError::Other(format!(
-                    "PR #{} is already attached to {repo_key}",
-                    pr.number
-                )));
-            }
-            link.attached_prs.push(AttachedPr {
-                number: pr.number,
-                attached_at: Utc::now(),
-                status: Some(stored),
-            });
-            Ok(())
-        })
-        .await?;
-
-    Ok(status)
+    let attached = github::attach(
+        &store,
+        &registry,
+        &args.workspace_id,
+        args.repo_key.as_deref(),
+        &args.reference,
+    )
+    .await?;
+    Ok(attached.status)
 }
 
 #[derive(Debug, Deserialize)]

@@ -17,13 +17,19 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// `mcp__tethys__<tool>` in Claude's permission strings.
 pub const SERVER_NAME: &str = "tethys";
 
-/// The one tool. Named for what it does to Tethys, not for the concept —
-/// "handoff" is the word for the act, `create_workspace` is the effect the
-/// calling agent asks for.
+/// Hand work to a new workspace. Named for what it does to Tethys, not for the
+/// concept — "handoff" is the word for the act, `create_workspace` is the
+/// effect the calling agent asks for.
 pub const TOOL_CREATE_WORKSPACE: &str = "create_workspace";
 
-/// Fully-qualified tool name, as Claude's permission system spells it.
-pub const ALLOWED_TOOL: &str = "mcp__tethys__create_workspace";
+/// Point the calling workspace at a pull request. Same naming rule: the agent
+/// asks for the effect, and doesn't need the word "attach" the UI uses.
+pub const TOOL_LINK_PR: &str = "link_pr";
+
+/// Every tool, fully qualified the way Claude's permission system spells them.
+/// Each one has to be listed for `--allowed-tools`, or a call to it stalls on a
+/// permission dialog nobody is watching.
+pub const ALLOWED_TOOLS: &[&str] = &["mcp__tethys__create_workspace", "mcp__tethys__link_pr"];
 
 /// Env keys Tethys bakes into the generated `--mcp-config` at spawn time.
 /// The calling session's identity arrives this way rather than as tool
@@ -41,12 +47,13 @@ pub const ENV_REPO_KEYS: &str = "TETHYS_MCP_REPO_KEYS";
 /// way past this is a bug or a hostile caller.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
-/// One request from the MCP server to the app. An enum with a single variant
-/// today; the tag is what lets a second tool land without a second socket.
+/// One request from the MCP server to the app. One variant per tool — the tag
+/// is what lets them share a socket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     CreateWorkspace(CreateWorkspace),
+    LinkPr(LinkPr),
 }
 
 /// A handoff: everything the agent asked for, plus the identity Tethys baked
@@ -74,9 +81,34 @@ pub struct CreateWorkspace {
     pub blocks_caller: bool,
 }
 
-/// The app's answer. A handoff is accepted or refused; there is deliberately
-/// no third state, because the caller returns before provisioning starts and
-/// never learns how it went.
+/// A link request: the reference the agent typed, plus the identity Tethys
+/// baked into the server's environment.
+///
+/// The workspace the PR lands on is *not* an argument, for the same reason the
+/// origin isn't — an agent gets to say which PR, never whose workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkPr {
+    /// Workspace the calling session belongs to, and the one the PR is linked
+    /// to.
+    pub from_workspace: String,
+    /// Calling session's Tethys id. Unused today beyond logging, but the
+    /// handoff frame carries it and a link is just as worth tracing.
+    #[serde(default)]
+    pub from_session: Option<String>,
+    /// Which of the workspace's repos the PR belongs to. `None` leaves it to be
+    /// inferred, from the reference's own `owner/repo` or from there being only
+    /// one GitHub-linked repo to choose.
+    #[serde(default)]
+    pub repo_key: Option<String>,
+    /// `123`, `#123`, `owner/repo#123`, or a full GitHub PR URL.
+    pub reference: String,
+}
+
+/// The app's answer, one success variant per request plus a shared refusal.
+///
+/// A handoff is accepted or refused with no third state, because the caller
+/// returns before provisioning starts and never learns how it went. A link is
+/// the opposite: it isn't reported until GitHub has confirmed the PR exists.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response {
@@ -85,6 +117,15 @@ pub enum Response {
         /// The branch actually used, which differs from the one asked for when
         /// that name was already taken.
         branch: String,
+    },
+    Linked {
+        /// The repo the PR was resolved to, which the agent may not have named.
+        repo_key: String,
+        number: u32,
+        url: String,
+        /// True when this turned out to be the PR for the workspace's own
+        /// branch — the one Tethys tracks by itself — rather than an extra one.
+        is_branch_pr: bool,
     },
     Rejected {
         message: String,
@@ -146,7 +187,10 @@ mod tests {
             "branch": "feat/handoff",
             "brief": "Do the thing."
         }"#;
-        let Request::CreateWorkspace(req) = serde_json::from_str(raw).expect("must deserialize");
+        let Request::CreateWorkspace(req) = serde_json::from_str(raw).expect("must deserialize")
+        else {
+            panic!("must parse as a create_workspace request")
+        };
         assert!(!req.blocks_caller);
         assert_eq!(req.from_session, None);
     }
@@ -167,10 +211,52 @@ mod tests {
 
         let mut cursor = std::io::Cursor::new(buf);
         let back: Request = read_frame(&mut cursor).await.expect("read");
-        let Request::CreateWorkspace(back) = back;
+        let Request::CreateWorkspace(back) = back else {
+            panic!("must round-trip as a create_workspace request")
+        };
         assert_eq!(back.branch, "feat/handoff");
         assert_eq!(back.from_session.as_deref(), Some("sess-1"));
         assert_eq!(back.repos, vec!["nl-backend".to_string()]);
+    }
+
+    /// The op tag is what keeps two tools on one socket apart. A `link_pr`
+    /// frame must not be readable as anything else.
+    #[tokio::test]
+    async fn a_link_frame_round_trips_under_its_own_tag() {
+        let req = Request::LinkPr(LinkPr {
+            from_workspace: "ws-1".into(),
+            from_session: Some("sess-1".into()),
+            repo_key: Some("nl-backend".into()),
+            reference: "https://github.com/me/api/pull/12".into(),
+        });
+
+        let raw = serde_json::to_value(&req).expect("serialize");
+        assert_eq!(raw["op"], "link_pr");
+
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &req).await.expect("write");
+        let mut cursor = std::io::Cursor::new(buf);
+        let back: Request = read_frame(&mut cursor).await.expect("read");
+        let Request::LinkPr(back) = back else {
+            panic!("must round-trip as a link_pr request")
+        };
+        assert_eq!(back.reference, "https://github.com/me/api/pull/12");
+        assert_eq!(back.repo_key.as_deref(), Some("nl-backend"));
+    }
+
+    /// `repo_key` is only ever disambiguation, so the common call omits it.
+    #[test]
+    fn a_link_frame_without_a_repo_key_parses() {
+        let raw = r##"{
+            "op": "link_pr",
+            "from_workspace": "ws-1",
+            "reference": "#12"
+        }"##;
+        let Request::LinkPr(req) = serde_json::from_str(raw).expect("must deserialize") else {
+            panic!("must parse as a link_pr request")
+        };
+        assert_eq!(req.repo_key, None);
+        assert_eq!(req.from_session, None);
     }
 
     /// A truncated prefix must be an error, not a hang or a panic.
