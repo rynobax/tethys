@@ -48,6 +48,10 @@ Marking a workspace deleted without touching disk. Reversible for the grace wind
 **Purge**:
 The background teardown that runs after the grace window: worktrees removed, Tethys-created branches deleted, workspace dropped from state.
 
+**Setup Queue**:
+The line workspaces wait in to be provisioned, because Tethys sets up one at a time. First asked for, first built — and a workspace waiting its turn is **Queued**: asked for, nothing on disk yet, nothing running.
+_Avoid_: Job queue, build queue
+
 **Pending Permissions**:
 Workspace-local Claude permission grants captured at purge for the user to later fold into the shared per-repo settings or discard.
 

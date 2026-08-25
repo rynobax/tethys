@@ -28,6 +28,7 @@ use crate::job::JobTx;
 use crate::mcp::{CreateWorkspace, McpLaunch};
 use crate::paths::Paths;
 use crate::provision::{provision_workspace, WorkspaceProvision};
+use crate::provision_queue::ProvisionQueue;
 use crate::registry::{self, RegistryLoad, Repo};
 use crate::sessions::{self, SessionSupervisor, StartSession};
 use crate::state::{Origin, Workspace, WorkspaceId};
@@ -48,6 +49,9 @@ pub struct Handoff {
     registry: Arc<RegistryLoad>,
     paths: Paths,
     in_progress: InProgressWorkspaces,
+    /// Shared with the UI path, so a handoff queues behind a workspace the
+    /// user asked for by hand — and vice versa.
+    queue: ProvisionQueue,
     supervisor: Arc<SessionSupervisor>,
     /// Empty when tmux didn't resolve at boot, in which case the workspace
     /// still gets provisioned and only its session is skipped.
@@ -66,6 +70,7 @@ impl Handoff {
         registry: Arc<RegistryLoad>,
         paths: Paths,
         in_progress: InProgressWorkspaces,
+        queue: ProvisionQueue,
         supervisor: Arc<SessionSupervisor>,
         tmux_bin: PathBuf,
         claude_bin: PathBuf,
@@ -76,6 +81,7 @@ impl Handoff {
             registry,
             paths,
             in_progress,
+            queue,
             supervisor,
             tmux_bin,
             claude_bin,
@@ -222,6 +228,7 @@ impl Handoff {
             paths: &self.paths,
             store: &self.store,
             in_progress: &self.in_progress,
+            queue: &self.queue,
             tx: &tx,
         })
         .await;

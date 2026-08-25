@@ -153,7 +153,9 @@ impl TethysServer {
                  with your brief as its first message.\n\n\
                  Provisioning (clone, dependency install, setup scripts) takes \
                  minutes and happens in the background: this call returns as soon as \
-                 the handoff is accepted, not when the workspace is ready. You will \
+                 the handoff is accepted, not when the workspace is ready. Tethys \
+                 builds one workspace at a time, so a handoff asked for while others \
+                 are still setting up waits its turn. You will \
                  not hear back from it, cannot read its progress, and cannot send it \
                  anything further — so put everything it needs in the brief.\n\n\
                  Reach for it when work should proceed on its own branch, in \

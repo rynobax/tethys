@@ -18,6 +18,7 @@ use crate::git;
 use crate::inprogress::InProgressWorkspaces;
 use crate::job::{JobEvent, JobTx};
 use crate::paths::Paths;
+use crate::provision_queue::ProvisionQueue;
 use crate::reconcile;
 use crate::registry::{Repo, RepoRegistry};
 use crate::setup;
@@ -233,11 +234,20 @@ pub struct WorkspaceProvision<'a> {
     pub paths: &'a Paths,
     pub store: &'a Arc<Store>,
     pub in_progress: &'a InProgressWorkspaces,
+    /// The one-at-a-time gate. Held for the whole of provisioning, so a batch
+    /// of workspaces asked for at once is built one after another.
+    pub queue: &'a ProvisionQueue,
     pub tx: &'a JobTx,
 }
 
 /// Provision every repo of a workspace whose `Creating` draft is already in
 /// state, then seed the files a session expects to find at the root.
+///
+/// Waits its turn first: only one workspace is provisioned at a time, so
+/// asking for several at once builds them one after another instead of
+/// starving each other's setup scripts into their timeouts. A job that has to
+/// wait says so — on its log channel, and on its own row, which goes `Queued`
+/// until a slot frees up.
 ///
 /// On success the draft flips to `Ready` and the stored `Workspace` comes back.
 /// On failure every worktree that did land is torn down, the partial parent dir
@@ -251,8 +261,49 @@ pub struct WorkspaceProvision<'a> {
 pub async fn provision_workspace(ctx: WorkspaceProvision<'_>) -> AppResult<Workspace> {
     // Register as in-progress so the reconciler doesn't flag our worktree dirs
     // as orphans mid-create. The guard clears on any exit — normal return,
-    // `?`, panic, or task cancellation.
+    // `?`, panic, or task cancellation. Taken before the queue wait below, so
+    // a job parked in the queue still holds its directory name and a handoff
+    // landing meanwhile suffixes its branch instead of picking the same one.
     let _in_progress_guard = ctx.in_progress.insert(ctx.workspace_dir.to_string());
+
+    // Wait for the machine. The slot is held until this function returns, and
+    // released just as reliably on the failure paths below, since dropping the
+    // guard is what admits the next job.
+    let mut waited = false;
+    let _slot = match ctx.queue.try_acquire() {
+        Some(slot) => slot,
+        None => {
+            waited = true;
+            ctx.tx.status(ctx.queue.wait_message(), None);
+            // Say it on the row too. A handoff has no log pane to read, and a
+            // sidebar full of rows all claiming to be "creating" while one
+            // machine does the work one at a time is a lie worth not telling.
+            set_status(ctx.store, ctx.workspace_id, WorkspaceStatus::Queued).await;
+            ctx.queue.acquire().await
+        }
+    };
+
+    // Queueing turned "deleted mid-create" from a race into an ordinary thing
+    // to do — the row sits there for minutes, doing nothing, invitingly. Bail
+    // before the first clone: nothing is on disk yet, so there is nothing to
+    // roll back, and the row is left `Queued` rather than `CreationFailed` —
+    // it never failed, it was called off.
+    let live = ctx
+        .store
+        .with_workspace(ctx.workspace_id, |w| w.deleted_at.is_none())
+        .await
+        .unwrap_or(false);
+    if !live {
+        let msg = "workspace was deleted while it waited in the setup queue";
+        info!(workspace = %ctx.workspace_id, "{msg}");
+        let _ = ctx.tx.0.send(JobEvent::Failed { error: msg.into() });
+        return Err(AppError::Other(msg.into()));
+    }
+
+    // Only now does the row start telling the truth about being built.
+    if waited {
+        set_status(ctx.store, ctx.workspace_id, WorkspaceStatus::Creating).await;
+    }
 
     // Provisioned links accumulate here so the rollback path can tear down
     // exactly what succeeded (each carries whether Tethys created its branch).
@@ -348,6 +399,22 @@ pub async fn provision_workspace(ctx: WorkspaceProvision<'_>) -> AppResult<Works
             let _ = ctx.tx.0.send(JobEvent::Failed { error: msg });
             Err(e)
         }
+    }
+}
+
+/// Move a draft between its two waiting states. Best-effort by design: the
+/// only way this fails is the workspace being gone, and a row that no longer
+/// exists doesn't need its status corrected — the caller finds out for real at
+/// the liveness check.
+async fn set_status(store: &Arc<Store>, workspace_id: &str, status: WorkspaceStatus) {
+    if let Err(e) = store
+        .update_workspace(workspace_id, |ws| {
+            ws.status = status;
+            Ok(())
+        })
+        .await
+    {
+        warn!(workspace = %workspace_id, error = %e, "could not update draft status");
     }
 }
 
@@ -473,6 +540,69 @@ mod tests {
             origin,
             worktree_root,
             _tmp: tmp,
+        }
+    }
+
+    /// Everything `provision_workspace` needs beyond a `fixture`: a store
+    /// holding a `Creating` draft per workspace, and the queue they share.
+    struct TestCtx {
+        store: Arc<Store>,
+        registry: RepoRegistry,
+        queue: crate::provision_queue::ProvisionQueue,
+        in_progress: InProgressWorkspaces,
+    }
+
+    impl TestCtx {
+        async fn new(f: &Fixture, setup_script: &str) -> Self {
+            let store = Store::load(
+                f.paths.data_dir.join("state.json"),
+                f.paths.data_dir.join("state.json.tmp"),
+                Box::new(crate::store::NullNotifier),
+            )
+            .await
+            .unwrap();
+            store
+                .mutate(|s| {
+                    for id in ["ws-a", "ws-b"] {
+                        s.workspaces.push(Workspace::draft(
+                            id.into(),
+                            format!("feat/{}", &id[3..]),
+                            None,
+                            crate::state::Origin::Ui,
+                            None,
+                        ));
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+
+            Self {
+                store,
+                registry: RepoRegistry {
+                    worktree_root: f.worktree_root.clone(),
+                    repos: vec![repo("api", &f.origin, Some(setup_script))],
+                    workspace_doc: None,
+                },
+                queue: crate::provision_queue::ProvisionQueue::new(),
+                in_progress: InProgressWorkspaces::new(),
+            }
+        }
+
+        async fn provision(&self, f: &Fixture, id: &str, branch: &str) -> AppResult<Workspace> {
+            provision_workspace(WorkspaceProvision {
+                workspace_id: id,
+                branch,
+                workspace_dir: &crate::registry::sanitize_branch_for_dir(branch),
+                repos: &self.registry.repos,
+                registry: &self.registry,
+                paths: &f.paths,
+                store: &self.store,
+                in_progress: &self.in_progress,
+                queue: &self.queue,
+                tx: &JobTx::silent(),
+            })
+            .await
         }
     }
 
@@ -634,6 +764,82 @@ mod tests {
         .unwrap();
 
         assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "SECRET=1");
+    }
+
+    /// Two workspaces asked for at once, one machine: their setup scripts must
+    /// not overlap. The script writes a start/end pair into a shared log, so
+    /// interleaving would show up as `start start end end`.
+    #[tokio::test]
+    async fn two_workspaces_are_provisioned_one_after_the_other() {
+        let f = fixture();
+        let log = f.worktree_root.parent().unwrap().join("setup.log");
+        let script = format!(
+            "printf 'start\n' >> {log}; sleep 0.3; printf 'end\n' >> {log}",
+            log = log.display()
+        );
+        let ctx = TestCtx::new(&f, &script).await;
+
+        let (a, b) = tokio::join!(
+            ctx.provision(&f, "ws-a", "feat/a"),
+            ctx.provision(&f, "ws-b", "feat/b"),
+        );
+        a.unwrap();
+        b.unwrap();
+
+        let lines: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            lines,
+            vec!["start", "end", "start", "end"],
+            "setup scripts overlapped"
+        );
+    }
+
+    /// Waiting in the queue is long enough to change your mind in. A workspace
+    /// deleted while it waits is abandoned where it stands — nothing cloned,
+    /// nothing on disk for the purger to chase.
+    #[tokio::test]
+    async fn a_workspace_deleted_while_queued_is_never_built() {
+        let f = fixture();
+        let ctx = TestCtx::new(&f, "sleep 0.4").await;
+
+        let cancel = async {
+            // Long enough that "ws-b" is parked in the queue behind "ws-a".
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            ctx.store
+                .update_workspace("ws-b", |ws| {
+                    ws.deleted_at = Some(Utc::now());
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        };
+
+        let (a, b, ()) = tokio::join!(
+            ctx.provision(&f, "ws-a", "feat/a"),
+            ctx.provision(&f, "ws-b", "feat/b"),
+            cancel,
+        );
+
+        a.unwrap();
+        let err = b.unwrap_err().to_string();
+        assert!(err.contains("deleted"), "{err}");
+        assert!(
+            !f.worktree_root.join("feat-b").exists(),
+            "an abandoned workspace leaves nothing on disk"
+        );
+        let status = ctx
+            .store
+            .with_workspace("ws-b", |w| w.status.clone())
+            .await
+            .unwrap();
+        assert!(
+            matches!(status, WorkspaceStatus::Queued),
+            "left as it was — a deleted row has no failure to report: {status:?}"
+        );
     }
 
     /// Paths that could escape the worktree are rejected before any copying.

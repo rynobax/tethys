@@ -140,6 +140,11 @@ pub struct ScriptRunMeta {
 pub enum WorkspaceStatus {
     #[default]
     Ready,
+    /// Asked for, but waiting its turn in the provisioning queue — nothing on
+    /// disk yet and no process running for it. Distinct from `Creating` only
+    /// so the sidebar can tell the truth about which one of a batch is
+    /// actually being built; both are drafts, and both are pruned at boot.
+    Queued,
     Creating,
     CreationFailed {
         error: String,

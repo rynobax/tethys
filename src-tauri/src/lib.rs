@@ -17,6 +17,7 @@ mod paths;
 mod pending_permissions;
 mod probe;
 mod provision;
+mod provision_queue;
 mod pty;
 mod purge;
 mod reconcile;
@@ -198,6 +199,11 @@ pub fn run() {
             let in_progress = inprogress::InProgressWorkspaces::new();
             app.manage(in_progress.clone());
 
+            // One provisioning job at a time, shared by every path that starts
+            // one: the create dialog, adding a repo, and a handoff.
+            let provision_queue = provision_queue::ProvisionQueue::new();
+            app.manage(provision_queue.clone());
+
             let registry_for_handoff: Arc<RegistryLoad> =
                 app.state::<Arc<RegistryLoad>>().inner().clone();
             let mcp_launch = mcp::McpLaunch::resolve(&paths, &registry_for_handoff);
@@ -208,6 +214,7 @@ pub fn run() {
                 registry_for_handoff,
                 paths.clone(),
                 in_progress,
+                provision_queue,
                 supervisor.clone(),
                 tmux_bin_path.clone().unwrap_or_default(),
                 claude_bin_path,

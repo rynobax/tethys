@@ -22,6 +22,7 @@ use crate::provision::{
     provision_repo_worktree, provision_workspace, teardown_repo_worktree, RepoProvision,
     RepoTeardown, WorkspaceProvision,
 };
+use crate::provision_queue::ProvisionQueue;
 use crate::purge::Purger;
 use crate::reconcile::{self, Discrepancies};
 use crate::registry::{self, starter_template, RegistryLoad, Repo, RepoRegistry};
@@ -244,6 +245,7 @@ pub async fn create_workspace(
     registry: State<'_, Arc<RegistryLoad>>,
     paths: State<'_, Paths>,
     in_progress: State<'_, InProgressWorkspaces>,
+    queue: State<'_, ProvisionQueue>,
     args: CreateWorkspaceArgs,
     on_event: Channel<JobEvent>,
 ) -> AppResult<Workspace> {
@@ -333,6 +335,7 @@ pub async fn create_workspace(
         paths: &paths,
         store: &store,
         in_progress: &in_progress,
+        queue: &queue,
         tx: &tx,
     })
     .await
@@ -355,6 +358,7 @@ pub async fn add_repo_to_workspace(
     store: State<'_, Arc<Store>>,
     registry: State<'_, Arc<RegistryLoad>>,
     paths: State<'_, Paths>,
+    queue: State<'_, ProvisionQueue>,
     args: AddRepoArgs,
     on_event: Channel<JobEvent>,
 ) -> AppResult<Workspace> {
@@ -398,6 +402,11 @@ pub async fn add_repo_to_workspace(
     }
 
     let tx = spawn_event_forwarder(on_event);
+
+    // Same gate as a create: this runs the repo's setup script, which is the
+    // expensive part either way, and it has no business racing a workspace
+    // that's already installing.
+    let _slot = queue.acquire_announcing(&tx, Some(&args.repo_key)).await;
 
     let provision = provision_repo_worktree(RepoProvision {
         repo: &repo,

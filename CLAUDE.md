@@ -46,6 +46,18 @@ Deliberately absent: no creating or editing PRs (this records, it doesn't act on
 
 One trap worth remembering: Claude Code negotiates MCP protocol `2026-07-28`, which requires `ttlMs` on a `tools/list` reply. `rmcp`'s `with_all_items` omits it, and a reply without it is silently rejected and retried until the client reports "tools fetch failed". `tools_result()` sets it, and a test in `crates/tethys-mcp` holds it there.
 
+## The setup queue
+
+Provisioning runs **one workspace at a time** (`provision_queue.rs`). Asking for five at once used to start five clones and five `pnpm install`s on one machine, and a setup script that takes two minutes alone can run past its `setup_timeout_secs` when it's sharing the disk with four others — which isn't a slow workspace but a failed one, since a timeout rolls the whole thing back.
+
+The gate is a one-permit tokio semaphore, so admission is FIFO: the first workspace you asked for is the first you can start working in, rather than all five landing together at the end. Every path that provisions takes it — the create dialog, adding a repo to an existing workspace, and a handoff — which is why it's shared state rather than a field on any one of them. It is not a tuning knob; a concurrency budget is a different feature.
+
+A job that has to wait says so twice: a status line on its job channel, and `WorkspaceStatus::Queued` on its own row, so a sidebar full of pending rows can say which one the machine is actually building. `Queued` is a draft like `Creating` — same boot-time prune, no worktrees, nothing running.
+
+Waiting also made "deleted while creating" an ordinary thing to do rather than a race, so `provision_workspace` re-checks `deleted_at` the moment it gets the slot and abandons the job before the first clone. The row is left `Queued`, not `CreationFailed`: it never failed, it was called off.
+
+Deliberately absent: no persisted queue (quit with four waiting and they're gone, exactly like a workspace caught mid-provision), no priority, no way to reorder or cancel a queued job except by deleting the workspace, and no cap on how many can wait.
+
 ## Folders
 
 The sidebar is a partition: every workspace sits in exactly one folder, and `folder: None` *is* the **Default** folder — deliberately not a `Folder` at all, which is what makes it always present, unnameable, and impossible to delete or drag off the top. Folders are flat and inert: membership decides where a row is drawn and nothing else. Create none and the sidebar looks exactly as it did before they existed — headers appear only once a real folder does.

@@ -730,7 +730,7 @@ function WorkspaceRow({
     selected ? "selected" : "",
     depth > 0 ? "is-blocked" : "",
     isDragging ? "is-dragging" : "",
-    status === "creating" ? "pending" : "",
+    status === "creating" || status === "queued" ? "pending" : "",
     status === "creation_failed" ? "creation-failed" : "",
     statusEdge,
   ]
@@ -781,6 +781,11 @@ function WorkspaceRow({
         </div>
       )}
       {status === "creating" && <div className="pending-label">creating…</div>}
+      {status === "queued" && (
+        <div className="pending-label" title="Tethys sets up one workspace at a time">
+          queued…
+        </div>
+      )}
       {status === "creation_failed" && (
         <div className="pending-label">creation failed</div>
       )}

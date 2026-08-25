@@ -90,6 +90,9 @@ export interface Folder {
 
 export type WorkspaceStatus =
   | { kind: "ready" }
+  /** Asked for, but waiting its turn: Tethys provisions one workspace at a
+   *  time so a batch of setup scripts doesn't starve each other out. */
+  | { kind: "queued" }
   | { kind: "creating" }
   | { kind: "creation_failed"; error: string };
 
@@ -107,9 +110,10 @@ export interface Workspace {
   deleted_at: string | null;
   /** Which folder the workspace sits in; `null` is the Default folder. */
   folder: FolderId | null;
-  /** Lifecycle state. `creating` rows render as a spinner row in the sidebar
-   *  and a JobLogPane in the detail; `creation_failed` rows render the
-   *  failed log so the user can read the error before dismissing. */
+  /** Lifecycle state. `queued` and `creating` rows both render as pending
+   *  rows in the sidebar with a JobLogPane in the detail, and only `creating`
+   *  spins; `creation_failed` rows render the failed log so the user can read
+   *  the error before dismissing. */
   status: WorkspaceStatus;
   /** Freeform user notes, edited via the notes overlay in the detail pane.
    *  Empty string when unset. */
