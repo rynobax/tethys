@@ -82,7 +82,21 @@ Ordering stays a single source of truth. `reorder_workspaces` still takes a flat
 
 Agents get at this through one extra `create_workspace` argument, `blocks_caller`. It's why drafts have to be legal blockers: the tool returns while the new workspace is still `Creating`, so the caller points at a row that won't finish provisioning for minutes. It overwrites any blocker already set.
 
-Deliberately absent: no derivation from PR base branches (`baseRefName` is still not fetched), no notification when a blocker clears, no coupling to PR state, and no second blocker.
+Deliberately absent: no derivation from PR bases or `gh stack` membership — a stack is drawn inside one workspace's header and never nests one workspace under another — no notification when a blocker clears, no coupling to PR state, and no second blocker.
+
+## PR stacks
+
+The members of a **`gh stack`** are drawn wrapped in one outline in the workspace header, base-first, separated by a chevron. Each PR keeps its own chip — the container is the whole of what stacking adds. Ryan builds stacks with `gh stack` (`github/gh-stack`), so Tethys only has to recognize them, never create or restack them.
+
+Membership is GitHub's own, not inferred. `github/gh-stack` makes a stack a real object on GitHub's side, and GraphQL exposes it on `PullRequest` as `stack { number size }` plus `stackEntry { position }` (1 is closest to the base branch) — all added to the poller's `PR_FIELDS` and flattened into one `Option<PrStack>` on `GithubPrStatus`. `parse_stack` needs all three numbers or yields `None`: a stack we can't place the PR within groups chips it can't order.
+
+Chaining PRs by base branch instead was the obvious cheaper route and is wrong. A hand-made chain and a `gh stack` are indistinguishable from `baseRefName` alone, and only one of them is a thing you can `gh stack sync` — so grouping on bases would put an outline around PRs that have no stack to manage. Nothing fetches `baseRefName`.
+
+`prGroups` (`src/workspaceDerived.ts`) partitions a link's PRs by stack number, ordering each group by `position`, and hands back every PR exactly once with non-stacked ones as groups of one — so the header renders groups uniformly and a workspace with no stack looks exactly as it did before. Both PR slots feed in, the branch PR the poller found and anything hand-attached, since a stack's other branches are attached PRs from this workspace's point of view. Stack numbers are per repository and a link is one repo, so nothing can pull two repos' PRs into one group.
+
+A group is often *smaller* than `stack.size`: six stacked branches with one checked out here is one chip. That case still gets the outline — the PR is genuinely stacked and a bare chip would hide it — plus a `1 of 6` marker, which is the only thing distinguishing "this is the stack" from "this is what I have of it".
+
+Deliberately absent: no stacks in the sidebar (it keeps its flat chip list, so a stack is only visible once you open the workspace), no rollup of the stack's CI or review state onto the container, no `gh stack` invocation of any kind, no fetching the stack-mates the workspace doesn't already track, and no link between a stack and the blocker nesting — separate ideas that happen to look similar.
 
 ## Logging & diagnostics
 

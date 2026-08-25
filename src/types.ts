@@ -38,9 +38,22 @@ export interface GithubPrStatus {
   /** The PR's head branch. Tells manually-attached PRs on the same repo apart.
    *  `null` for statuses persisted before this field existed. */
   head_branch: string | null;
+  /** Where the PR sits in a `gh stack`, if it's in one. `null` both for a lone
+   *  PR and for PRs merely based on each other by hand. */
+  stack: PrStack | null;
   head_sha: string;
   fetched_at: string;
   last_error: string | null;
+}
+
+/** A PR's membership in a GitHub stack. A PR is in at most one. */
+export interface PrStack {
+  /** Identifies the stack within its repository — stack-mates share it. */
+  number: number;
+  /** Total PRs in the stack, including any this workspace doesn't track. */
+  size: number;
+  /** This PR's slot, where 1 is closest to the stack's base branch. */
+  position: number;
 }
 
 /** A PR the user attached by hand, for a branch other than the workspace's own. */

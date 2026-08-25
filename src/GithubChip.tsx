@@ -42,6 +42,28 @@ function ReviewIcon() {
   );
 }
 
+function DraftIcon() {
+  return (
+    <svg className="gh-sq-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M3 13 L3.7 10.5 L10.5 3.7 L12.3 5.5 L5.5 12.3 Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M9.1 5.1 L10.9 6.9"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 function BugbotIcon() {
   return (
     <svg className="gh-sq-icon" viewBox="0 0 16 16" aria-hidden="true">
@@ -69,7 +91,7 @@ function Square({
   tone,
   title,
 }: {
-  kind: "ci" | "review" | "bugbot";
+  kind: "ci" | "review" | "draft" | "bugbot";
   tone: SquareTone;
   title: string;
 }) {
@@ -81,6 +103,7 @@ function Square({
     >
       {kind === "ci" && <CiIcon />}
       {kind === "review" && <ReviewIcon />}
+      {kind === "draft" && <DraftIcon />}
       {kind === "bugbot" && <BugbotIcon />}
     </span>
   );
@@ -235,7 +258,7 @@ export function GithubChip({
 
   return (
     <span className={classes} title={baseTitle} onClick={onClick}>
-      <span className="gh-pr">#{status.pr_number}</span>
+      <span className="gh-pr">{status.pr_number}</span>
       {isOpen && (
         <span className="gh-squares">
           <Square
@@ -243,7 +266,9 @@ export function GithubChip({
             tone={ciTone(status.checks, status.has_merge_conflicts)}
             title={ciTitle(status.checks, status.has_merge_conflicts)}
           />
-          {!status.is_draft && (
+          {status.is_draft ? (
+            <Square kind="draft" tone="gray" title="Draft: not ready for review" />
+          ) : (
             <Square
               kind="review"
               tone={reviewTone(status.review_decision, status.unresolved_threads)}
@@ -263,7 +288,6 @@ export function GithubChip({
       {status.state === "closed" && (
         <span className="gh-merged-badge gh-closed-badge">closed</span>
       )}
-      {status.is_draft && <span className="gh-draft-badge">draft</span>}
       {onDetach && (
         <PrDetachButton prNumber={status.pr_number} onDetach={onDetach} />
       )}

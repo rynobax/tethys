@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use chrono::Utc;
 use serde_json::{json, Value};
 
-use crate::github::status::{ChecksRollup, GithubPrStatus, PrState, ReviewDecision};
+use crate::github::status::{ChecksRollup, GithubPrStatus, PrStack, PrState, ReviewDecision};
 use crate::github::GithubSlug;
 use crate::state::{AppState, WorkspaceId};
 
@@ -73,6 +73,13 @@ pub fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
           isDraft
           mergeable
           headRefName
+          stack {
+            number
+            size
+          }
+          stackEntry {
+            position
+          }
           reviewDecision
           latestOpinionatedReviews(first: 20) {
             nodes {
@@ -349,9 +356,23 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
             .get("headRefName")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        stack: parse_stack(pr),
         head_sha,
         fetched_at: Utc::now(),
         last_error: None,
+    })
+}
+
+/// Projects GraphQL's `stack` + `stackEntry` into one value. All three numbers
+/// have to be there: a stack we can't position the PR within would group chips
+/// without being able to order them.
+fn parse_stack(pr: &Value) -> Option<PrStack> {
+    let u32_at = |v: Option<&Value>| v.and_then(Value::as_u64).map(|n| n as u32);
+    let stack = pr.get("stack")?;
+    Some(PrStack {
+        number: u32_at(stack.get("number"))?,
+        size: u32_at(stack.get("size"))?,
+        position: u32_at(pr.get("stackEntry").and_then(|e| e.get("position")))?,
     })
 }
 
@@ -534,6 +555,7 @@ fn is_meaningful_change(old: Option<&GithubPrStatus>, new: Option<&GithubPrStatu
                 || a.review_decision != b.review_decision
                 || a.unresolved_threads != b.unresolved_threads
                 || a.head_branch != b.head_branch
+                || a.stack != b.stack
                 || a.head_sha != b.head_sha
                 || a.last_error != b.last_error
         }
@@ -846,6 +868,7 @@ mod tests {
             review_decision: ReviewDecision::None,
             unresolved_threads: 0,
             head_branch: Some("feat/foo".into()),
+            stack: None,
             head_sha: "sha".into(),
             fetched_at: Utc::now(),
             last_error: None,
@@ -1247,6 +1270,71 @@ mod tests {
         });
         let s = parse_one(&data).unwrap();
         assert_eq!(s.head_branch.as_deref(), Some("feat/foo-0"));
+        // A PR outside a `gh stack` reports no stack at all — which is what
+        // keeps the UI from grouping hand-based PRs.
+        assert_eq!(s.stack, None);
+    }
+
+    #[test]
+    fn parse_captures_gh_stack_membership() {
+        let data = json!({
+            "q0": {
+                "ref": {
+                    "associatedPullRequests": {
+                        "nodes": [{
+                            "number": 4240,
+                            "url": "u",
+                            "state": "OPEN",
+                            "isDraft": false,
+                            "headRefName": "mui-autonext-queue-item",
+                            "stack": {"number": 4245, "size": 6},
+                            "stackEntry": {"position": 2},
+                            "reviewThreads": {"nodes": []},
+                            "commits": {
+                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
+                            }
+                        }]
+                    }
+                }
+            }
+        });
+        let s = parse_one(&data).unwrap();
+        assert_eq!(
+            s.stack,
+            Some(PrStack {
+                number: 4245,
+                size: 6,
+                position: 2
+            })
+        );
+    }
+
+    /// A stack we can't place the PR within can't be ordered, so it's no more
+    /// use than no stack at all.
+    #[test]
+    fn parse_drops_a_stack_with_no_position() {
+        let data = json!({
+            "q0": {
+                "ref": {
+                    "associatedPullRequests": {
+                        "nodes": [{
+                            "number": 1,
+                            "url": "u",
+                            "state": "OPEN",
+                            "isDraft": false,
+                            "headRefName": "feat/foo-0",
+                            "stack": {"number": 9, "size": 2},
+                            "stackEntry": null,
+                            "reviewThreads": {"nodes": []},
+                            "commits": {
+                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
+                            }
+                        }]
+                    }
+                }
+            }
+        });
+        assert_eq!(parse_one(&data).unwrap().stack, None);
     }
 
     #[test]
@@ -1311,6 +1399,7 @@ mod tests {
             review_decision: ReviewDecision::None,
             unresolved_threads: 0,
             head_branch: None,
+            stack: None,
             head_sha: "sha".into(),
             fetched_at: Utc::now(),
             last_error: None,

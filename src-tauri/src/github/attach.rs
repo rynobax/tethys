@@ -179,6 +179,7 @@ mod tests {
             review_decision: ReviewDecision::None,
             unresolved_threads: 0,
             head_branch: Some(head_branch.into()),
+            stack: None,
             head_sha: "sha".into(),
             fetched_at: Utc::now(),
             last_error: None,

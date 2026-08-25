@@ -57,10 +57,29 @@ pub struct GithubPrStatus {
     /// `None` for statuses persisted before this field existed.
     #[serde(default)]
     pub head_branch: Option<String>,
+    /// Where the PR sits in a `gh stack`, if it's in one. `None` both for a
+    /// lone PR and for PRs merely based on each other by hand — GitHub reports
+    /// this only once the stack is a real object on its side.
+    #[serde(default)]
+    pub stack: Option<PrStack>,
     pub head_sha: String,
     pub fetched_at: DateTime<Utc>,
     #[serde(default)]
     pub last_error: Option<String>,
+}
+
+/// A PR's membership in a GitHub stack, flattened from GraphQL's `stack` +
+/// `stackEntry`. A PR is in at most one stack, and a position means nothing
+/// without the stack it indexes into, so the two travel together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrStack {
+    /// Identifies the stack within its repository — stack-mates share it. Not
+    /// a PR number, though GitHub draws both from one sequence.
+    pub number: u32,
+    /// Total PRs in the stack, including any this workspace doesn't track.
+    pub size: u32,
+    /// This PR's slot, where 1 is closest to the stack's base branch.
+    pub position: u32,
 }
 
 fn default_bugbot() -> ChecksRollup {

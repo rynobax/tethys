@@ -367,12 +367,50 @@ html,
   color: var(--muted);
 }
 
-.gh-draft-badge {
+.gh-note-badge {
   font-size: 9px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--muted);
   font-weight: 600;
+}
+
+/* Wraps the members of a `gh stack` so the header reads as "these three are one
+   stack" rather than three loose PRs. Drawn base-first, left to right. */
+.gh-stack {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 4px;
+  border: 1px solid rgba(125, 125, 125, 0.4);
+  border-radius: 12px;
+}
+
+.gh-stack-sep {
+  font-size: 10px;
+  line-height: 1;
+  color: var(--muted);
+}
+
+/* Only drawn when the stack has PRs this workspace doesn't track. */
+.gh-stack-count {
+  font-size: 9px;
+  color: var(--muted);
+  padding-left: 1px;
+  white-space: nowrap;
+}
+
+.workspace-detail h2 .gh-stack {
+  padding: 2px 5px;
+  border-radius: 15px;
+}
+
+.workspace-detail h2 .gh-stack-sep {
+  font-size: 12px;
+}
+
+.workspace-detail h2 .gh-stack-count {
+  font-size: 10px;
 }
 
 /* Keeps a repo's branch PR and its attached PRs together when the header wraps —

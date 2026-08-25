@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import * as api from "./ipc/commands";
 import type {
   CreateWorkspaceArgs,
@@ -24,7 +31,13 @@ import { SystemStatus } from "./SystemStatus";
 import { applyTheme, ThemeContext } from "./theme";
 import { useBackendJob, type JobDescriptor } from "./useBackendJob";
 import { useAppEvent } from "./ipc/events";
-import { isReadyToDelete } from "./workspaceDerived";
+import {
+  isReadyToDelete,
+  linkPrEntries,
+  prGroups,
+  type LinkPr,
+  type PrGroup,
+} from "./workspaceDerived";
 import "./App.css";
 
 /** Selectable claude entry-point binaries, shared by the new-workspace form
@@ -1201,8 +1214,7 @@ function WorkspaceDetail({
             // doesn't double up around an empty group.
             r.github || r.attached_prs.length > 0 ? (
               <span className="gh-chip-group" key={r.repo_key}>
-                {r.github && <GithubChip status={r.github} />}
-                <AttachedPrChips link={r} onDetach={detachPr} />
+                <RepoPrChips link={r} onDetach={detachPr} />
               </span>
             ) : null,
           )}
@@ -1915,39 +1927,91 @@ function WorkspaceInfoDialog({
 }
 
 /** Chips for the PRs manually attached to one repo link. */
-function AttachedPrChips({
+/** Names the stack and where its tracked members sit in it. */
+function stackTitle(group: PrGroup): string {
+  const stack = group.stack!;
+  const members = group.prs
+    .map((e) => `#${e.status.pr_number} (${e.status.stack!.position})`)
+    .join(" → ");
+  return `Stack #${stack.number}, ${stack.size} PRs, base-first: ${members}`;
+}
+
+/**
+ * One repo's PR chips: the branch PR and any attached ones, with the members of
+ * a `gh stack` wrapped together in stack order. Chips stay one-per-PR — the
+ * container is the only thing the grouping adds.
+ */
+function RepoPrChips({
   link,
   onDetach,
 }: {
   link: RepoLink;
   onDetach: (repoKey: string, prNumber: number) => void;
 }) {
+  // Only an attached PR can be detached; the branch PR is the poller's.
+  const chip = ({ status, attachedNumber }: LinkPr) => (
+    <GithubChip
+      status={status}
+      onDetach={
+        attachedNumber === null
+          ? undefined
+          : () => onDetach(link.repo_key, attachedNumber)
+      }
+    />
+  );
+
   return (
     <>
-      {link.attached_prs.map((attached) =>
-        attached.status ? (
-          <GithubChip
-            key={attached.number}
-            status={attached.status}
-            onDetach={() => onDetach(link.repo_key, attached.number)}
-          />
+      {prGroups(linkPrEntries(link)).map((group) =>
+        group.stack ? (
+          <span
+            key={`stack-${group.stack.number}`}
+            className="gh-stack"
+            title={stackTitle(group)}
+          >
+            {group.prs.map((entry, i) => (
+              <Fragment key={entry.status.pr_number}>
+                {i > 0 && (
+                  <span className="gh-stack-sep" aria-hidden="true">
+                    ›
+                  </span>
+                )}
+                {chip(entry)}
+              </Fragment>
+            ))}
+            {/* A stack whose other branches aren't checked out here would
+                otherwise look like the whole thing. */}
+            {group.prs.length < group.stack.size && (
+              <span className="gh-stack-count">
+                {group.prs.length} of {group.stack.size}
+              </span>
+            )}
+          </span>
         ) : (
+          <Fragment key={group.prs[0].status.pr_number}>
+            {chip(group.prs[0])}
+          </Fragment>
+        ),
+      )}
+      {link.attached_prs
+        .filter((attached) => !attached.status)
+        .map((attached) => (
           // Attaching fetches the PR up front, so this only shows up if the PR
-          // later became unreachable (deleted, or GitHub is down).
+          // later became unreachable (deleted, or GitHub is down). With no
+          // status there's no base branch, so it can't join a stack.
           <span
             key={attached.number}
             className="gh-chip gh-chip-missing"
             title={`PR #${attached.number} in ${link.repo_key} couldn't be fetched`}
           >
-            <span className="gh-pr">#{attached.number}</span>
-            <span className="gh-draft-badge">no data</span>
+            <span className="gh-pr">{attached.number}</span>
+            <span className="gh-note-badge">no data</span>
             <PrDetachButton
               prNumber={attached.number}
               onDetach={() => onDetach(link.repo_key, attached.number)}
             />
           </span>
-        ),
-      )}
+        ))}
     </>
   );
 }

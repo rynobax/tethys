@@ -20,17 +20,98 @@ export function isStale(fetchedAt: string, nowMs: number = Date.now()): boolean 
 }
 
 /**
- * Every PR tracked on a repo link: the branch-derived one plus any the user
- * attached by hand. Attached PRs with no status yet (first fetch failed) are
+ * A tracked PR plus the slot it came from. The slot is what the branch PR and
+ * an attached one disagree about — only an attached PR can be detached — so it
+ * has to survive any regrouping the UI does.
+ */
+export type LinkPr = {
+  status: GithubPrStatus;
+  /** Set when this came from `attached_prs`; `null` for the branch PR. */
+  attachedNumber: number | null;
+};
+
+/**
+ * Every PR tracked on a repo link, branch PR first, then attached ones in
+ * attach order. Attached PRs with no status yet (first fetch failed) are
  * skipped — there's nothing to roll up.
  */
-export function linkPrs(link: RepoLink): GithubPrStatus[] {
-  const out: GithubPrStatus[] = [];
-  if (link.github) out.push(link.github);
+export function linkPrEntries(link: RepoLink): LinkPr[] {
+  const out: LinkPr[] = [];
+  if (link.github) out.push({ status: link.github, attachedNumber: null });
   for (const attached of link.attached_prs) {
-    if (attached.status) out.push(attached.status);
+    if (attached.status) {
+      out.push({ status: attached.status, attachedNumber: attached.number });
+    }
   }
   return out;
+}
+
+export function linkPrs(link: RepoLink): GithubPrStatus[] {
+  return linkPrEntries(link).map((e) => e.status);
+}
+
+/**
+ * A repo's PRs as the header draws them: either one `gh stack` and the members
+ * of it this workspace tracks, or a single PR that isn't in a stack.
+ */
+export type PrGroup = {
+  /** The stack these PRs belong to; `null` for a PR in no stack at all. */
+  stack: { number: number; size: number } | null;
+  /** Stack members in position order, base-first. */
+  prs: LinkPr[];
+};
+
+/**
+ * Partitions a repo link's PRs into groups: one per `gh stack` present, plus a
+ * group of one for every PR that isn't in a stack. Every PR comes back exactly
+ * once, so the header can render groups uniformly.
+ *
+ * Membership is GitHub's own — `stack` is only set once `gh stack` has made the
+ * stack a real object on GitHub's side, so PRs merely based on each other by
+ * hand stay separate chips. That's deliberate: a manual chain and a `gh stack`
+ * look identical from the base branches alone, and only one of them is a thing
+ * you can `gh stack sync`.
+ *
+ * A group can be smaller than `stack.size` — a stack of six with one branch
+ * checked out here shows one chip — so callers wanting "is this the whole
+ * stack" have to compare the two.
+ *
+ * Stack numbers are per repository and a link is one repo, so there's nothing
+ * here that could pull two repos' PRs into a group.
+ */
+export function prGroups(entries: LinkPr[]): PrGroup[] {
+  const groups: PrGroup[] = [];
+  // Keyed by stack number, so a group lands where its first member appeared
+  // and chips don't jump when an unrelated PR is attached.
+  const byStack = new Map<number, PrGroup>();
+
+  for (const entry of entries) {
+    const stack = entry.status.stack;
+    if (!stack) {
+      groups.push({ stack: null, prs: [entry] });
+      continue;
+    }
+    const existing = byStack.get(stack.number);
+    if (existing) {
+      existing.prs.push(entry);
+      continue;
+    }
+    const group: PrGroup = {
+      stack: { number: stack.number, size: stack.size },
+      prs: [entry],
+    };
+    byStack.set(stack.number, group);
+    groups.push(group);
+  }
+
+  for (const group of byStack.values()) {
+    // Position is 1-based from the stack's base branch. Ties can't happen on
+    // GitHub's side, and sort is stable, so a hand-edited file that repeats a
+    // position just keeps the order it was listed in.
+    group.prs.sort((a, b) => a.status.stack!.position - b.status.stack!.position);
+  }
+
+  return groups;
 }
 
 /** Every PR tracked anywhere in the workspace. */
