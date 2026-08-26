@@ -56,10 +56,10 @@ export interface PrStack {
   position: number;
 }
 
-/** A PR the user attached by hand, for a branch other than the workspace's own. */
-export interface AttachedPr {
+/** A PR a repo link tracks, however it came to be tracked. */
+export interface TrackedPr {
   number: number;
-  attached_at: string;
+  tracked_at: string;
   /** `null` until the first successful fetch, or if the PR became unreachable. */
   status: GithubPrStatus | null;
 }
@@ -68,10 +68,14 @@ export interface RepoLink {
   repo_key: string;
   worktree_path: string;
   setup_script_ran_at: string | null;
-  /** PR for the workspace's own branch, discovered by the poller. */
-  github: GithubPrStatus | null;
-  /** Extra PRs the user attached manually (see `attach_pr`). */
-  attached_prs: AttachedPr[];
+  /** Every PR this link tracks, in the order tracking started. The PR for the
+   *  workspace's own branch is in here like any other — the poller adds it for
+   *  you, and that is the only way it differs from one you attached by hand. */
+  prs: TrackedPr[];
+  /** PR numbers detached from this link, so the poller's branch scan doesn't
+   *  put them back. Nothing in the UI reads this; it's here because it round
+   *  trips through `workspace:changed`. */
+  dismissed: number[];
   docs?: { branch: string; checkout_path: string; linked_paths: string[] } | null;
 }
 
@@ -259,9 +263,9 @@ export interface TurnChangedEvent {
 export interface GithubStatusChangedEvent {
   workspace_id: string;
   repo_key: string;
-  /** Set when the update is for a manually-attached PR; null for the
-   *  branch-derived one. */
-  pr_number: number | null;
+  /** Always names the PR the status belongs to — there is no longer a slot to
+   *  disambiguate. */
+  pr_number: number;
   /** null when the PR no longer exists (branch unpushed or deleted). */
   status: GithubPrStatus | null;
 }

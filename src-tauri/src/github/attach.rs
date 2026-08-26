@@ -3,41 +3,34 @@
 //! Two callers arrive here: the user pasting a reference into the attach
 //! dialog, and an agent calling `link_pr` over the MCP socket. They differ only
 //! in how the reference reaches the app, so everything past that point —
-//! resolving which repo it belongs to, fetching it, and deciding *which slot on
-//! the repo link it lands in* — lives here rather than in the Tauri command.
+//! resolving which repo it belongs to, fetching it, and recording it — lives
+//! here rather than in the Tauri command.
 //!
-//! That last decision is the reason this isn't just a `push`. A repo link has
-//! two places a PR can sit: `github`, the PR for the workspace's own branch,
-//! which the poller discovers on its own; and `attached_prs`, everything else.
-//! An agent that just opened a PR for the branch it is working on would
-//! otherwise land in `attached_prs`, and then the poller would find the same PR
-//! by branch a tick later and draw it twice. Routing on `head_branch` makes the
-//! two paths agree, and has the side benefit that the chip appears at once
-//! instead of at the next poll.
-
-use chrono::Utc;
+//! There used to be a third thing here: deciding which of a repo link's two PR
+//! slots the reference landed in, since the PR for the workspace's own branch
+//! had a slot of its own. It doesn't any more. A link tracks one list, the
+//! poller adds the branch's PR to it the same way this does, and both paths
+//! land on `RepoLink::track`. Attaching a PR the poller already found is a
+//! refresh rather than a duplicate for the same reason it always was — the
+//! number is the identity — it just no longer takes a special case to say so.
 
 use crate::error::{AppError, AppResult};
 use crate::github::poller::fetch_pr_status;
 use crate::github::{parse_pr_reference, resolve_attach_target, GithubPrStatus, GithubSlug};
 use crate::registry::RegistryLoad;
-use crate::state::{AttachedPr, Workspace, WorkspaceId};
+use crate::state::{Workspace, WorkspaceId};
 use crate::store::Store;
-
-/// Which of a repo link's two PR slots the reference landed in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttachSlot {
-    /// The PR for the workspace's own branch — the slot the poller maintains.
-    BranchPr,
-    /// A PR opened from this worktree on some other branch.
-    Attached,
-}
 
 /// Where a reference ended up, and what GitHub said about it.
 #[derive(Debug, Clone)]
 pub struct Attached {
     pub repo_key: String,
-    pub slot: AttachSlot,
+    /// Whether this is the PR for the workspace's own branch — the one the
+    /// poller would have found on its own. Read straight off `head_branch`
+    /// rather than from where it was stored, because there is only one place
+    /// to store it. Reported back to an agent so it can tell "I linked the PR I
+    /// just opened" from "I linked somebody else's".
+    pub is_branch_pr: bool,
     pub status: GithubPrStatus,
 }
 
@@ -100,57 +93,43 @@ pub async fn attach(
 
     let stored = status.clone();
     let key = repo_key.clone();
-    let slot = store
+    let is_branch_pr = store
         .update_workspace(workspace_id, move |ws| record(ws, &key, stored))
         .await?;
 
     Ok(Attached {
         repo_key,
-        slot,
+        is_branch_pr,
         status,
     })
 }
 
-/// Write a fetched status into whichever of the repo link's two PR slots it
-/// belongs in, and say which one that was.
+/// Record a fetched status on the repo link, and say whether it turned out to
+/// be the PR for the workspace's own branch.
 ///
-/// Split out from [`attach`] because it is the whole of the decision and none
-/// of the I/O: everything above it needs a workspace, a registry and GitHub,
-/// and this needs a `Workspace` and a status.
-fn record(ws: &mut Workspace, repo_key: &str, status: GithubPrStatus) -> AppResult<AttachSlot> {
+/// Split out from [`attach`] because it is all of the state change and none of
+/// the I/O: everything above it needs a workspace, a registry and GitHub, and
+/// this needs a `Workspace` and a status.
+///
+/// Attaching something already tracked is a refresh, never an error. It used to
+/// be an error for everything except the branch PR, which made re-pasting a
+/// number either helpful or a failure depending on which branch the PR happened
+/// to be on — a distinction nobody asked for.
+fn record(ws: &mut Workspace, repo_key: &str, status: GithubPrStatus) -> AppResult<bool> {
     let number = status.pr_number;
     let is_branch_pr = status.head_branch.as_deref() == Some(ws.branch.as_str());
     let link = ws
         .link_mut(repo_key)
         .ok_or_else(|| AppError::Other(format!("workspace has no worktree for {repo_key}")))?;
-
-    if is_branch_pr {
-        // Idempotent on purpose: re-pointing at the branch PR is a refresh, not
-        // a mistake worth an error. Any copy that reached `attached_prs` before
-        // the poller caught up goes away here, so the two paths can't both draw
-        // the same PR.
-        link.attached_prs.retain(|a| a.number != number);
-        link.github = Some(status);
-        return Ok(AttachSlot::BranchPr);
-    }
-
-    if link.attached_prs.iter().any(|a| a.number == number) {
-        return Err(AppError::Other(format!(
-            "PR #{number} is already attached to {repo_key}"
-        )));
-    }
-    link.attached_prs.push(AttachedPr {
-        number,
-        attached_at: Utc::now(),
-        status: Some(status),
-    });
-    Ok(AttachSlot::Attached)
+    link.track(number, Some(status));
+    Ok(is_branch_pr)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::github::status::{ChecksRollup, PrState, ReviewDecision};
+    use chrono::Utc;
     use crate::state::{Origin, RepoLink};
     use std::path::PathBuf;
 
@@ -160,8 +139,8 @@ mod tests {
             repo_key: "api".into(),
             worktree_path: PathBuf::from("/tmp/ws-1/api"),
             setup_script_ran_at: None,
-            github: None,
-            attached_prs: Vec::new(),
+            prs: Vec::new(),
+            dismissed: Vec::new(),
             created_branch: true,
         });
         ws
@@ -186,79 +165,69 @@ mod tests {
         }
     }
 
-    /// An agent that opens the PR for the branch it is working on and links it
-    /// immediately gets there before the poller does. It has to land in the
-    /// branch slot anyway, or the poller finds the same PR a tick later and the
-    /// workspace draws it twice.
+    /// The agent-facing half of the point: an agent that opens the PR for the
+    /// branch it is working on gets there before the poller does, and is told
+    /// that's what it linked.
     #[test]
-    fn a_pr_on_the_workspace_branch_fills_the_branch_slot() {
+    fn a_pr_on_the_workspace_branch_reports_as_the_branch_pr() {
         let mut ws = workspace();
-        let slot = record(&mut ws, "api", status(7, "feat/thing")).unwrap();
-        assert_eq!(slot, AttachSlot::BranchPr);
+        assert!(record(&mut ws, "api", status(7, "feat/thing")).unwrap());
         let link = ws.link("api").unwrap();
-        assert_eq!(link.github.as_ref().unwrap().pr_number, 7);
-        assert!(link.attached_prs.is_empty());
+        assert_eq!(link.prs.len(), 1);
+        assert_eq!(link.prs[0].number, 7);
     }
 
+    /// Same list, same code path — the only difference is what it reports.
     #[test]
-    fn a_pr_on_any_other_branch_is_attached() {
+    fn a_pr_on_any_other_branch_is_tracked_the_same_way() {
         let mut ws = workspace();
-        let slot = record(&mut ws, "api", status(8, "feat/stacked")).unwrap();
-        assert_eq!(slot, AttachSlot::Attached);
+        assert!(!record(&mut ws, "api", status(8, "feat/stacked")).unwrap());
         let link = ws.link("api").unwrap();
-        assert!(link.github.is_none());
-        assert_eq!(link.attached_prs.len(), 1);
-        assert_eq!(link.attached_prs[0].number, 8);
+        assert_eq!(link.prs.len(), 1);
+        assert_eq!(link.prs[0].number, 8);
     }
 
-    /// Re-linking the branch PR is a refresh, not a mistake — the second call
-    /// has to overwrite rather than error or duplicate.
+    /// Re-linking is a refresh whichever branch the PR is on. This used to hold
+    /// only for the branch PR, and error for everything else.
     #[test]
-    fn re_linking_the_branch_pr_refreshes_it() {
+    fn re_linking_refreshes_rather_than_duplicating() {
+        for branch in ["feat/thing", "feat/stacked"] {
+            let mut ws = workspace();
+            record(&mut ws, "api", status(7, branch)).unwrap();
+            let mut newer = status(7, branch);
+            newer.checks = ChecksRollup::Failure;
+            record(&mut ws, "api", newer).unwrap();
+            let link = ws.link("api").unwrap();
+            assert_eq!(link.prs.len(), 1, "{branch}");
+            assert_eq!(
+                link.prs[0].status.as_ref().unwrap().checks,
+                ChecksRollup::Failure,
+                "{branch}",
+            );
+        }
+    }
+
+    /// Asking for a PR by number outranks having detached it, or the only way
+    /// back from a mis-click would be editing `state.json`.
+    #[test]
+    fn attaching_a_detached_pr_un_dismisses_it() {
         let mut ws = workspace();
         record(&mut ws, "api", status(7, "feat/thing")).unwrap();
-        let mut newer = status(7, "feat/thing");
-        newer.checks = ChecksRollup::Failure;
-        assert_eq!(record(&mut ws, "api", newer).unwrap(), AttachSlot::BranchPr);
-        let link = ws.link("api").unwrap();
-        assert_eq!(link.github.as_ref().unwrap().checks, ChecksRollup::Failure);
-        assert!(link.attached_prs.is_empty());
-    }
-
-    /// State written before this routing existed can hold the branch PR in
-    /// `attached_prs`. Linking it again has to collapse the two, not add a
-    /// third rendering of the same PR.
-    #[test]
-    fn a_stale_attached_copy_of_the_branch_pr_is_swept_up() {
-        let mut ws = workspace();
-        ws.link_mut("api").unwrap().attached_prs.push(AttachedPr {
-            number: 7,
-            attached_at: Utc::now(),
-            status: Some(status(7, "feat/thing")),
-        });
+        ws.link_mut("api").unwrap().untrack(7);
         record(&mut ws, "api", status(7, "feat/thing")).unwrap();
         let link = ws.link("api").unwrap();
-        assert_eq!(link.github.as_ref().unwrap().pr_number, 7);
-        assert!(link.attached_prs.is_empty());
-    }
-
-    #[test]
-    fn attaching_the_same_extra_pr_twice_is_rejected() {
-        let mut ws = workspace();
-        record(&mut ws, "api", status(8, "feat/stacked")).unwrap();
-        let err = record(&mut ws, "api", status(8, "feat/stacked")).unwrap_err();
-        assert!(err.to_string().contains("already attached"), "{err}");
-        assert_eq!(ws.link("api").unwrap().attached_prs.len(), 1);
+        assert_eq!(link.prs.len(), 1);
+        assert!(link.dismissed.is_empty());
     }
 
     /// A PR whose head branch GitHub didn't report can't be claimed as the
     /// workspace's own — a workspace branch is always a `Some`.
     #[test]
-    fn a_status_with_no_head_branch_is_attached() {
+    fn a_status_with_no_head_branch_is_not_the_branch_pr() {
         let mut ws = workspace();
         let mut s = status(9, "ignored");
         s.head_branch = None;
-        assert_eq!(record(&mut ws, "api", s).unwrap(), AttachSlot::Attached);
+        assert!(!record(&mut ws, "api", s).unwrap());
     }
 
     #[test]

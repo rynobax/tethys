@@ -40,7 +40,7 @@ The tool returns as soon as the `Creating` draft is in state: provisioning runs 
 
 `mcp__tethys__link_pr` points the *calling* workspace at a PR that already exists on GitHub — the agent-facing half of the attach dialog, and the same code (`github/attach.rs`) behind both. It takes a reference (`123`, `#123`, `owner/repo#123`, or a URL) and an optional `repo_key` for when the workspace spans several GitHub repos; the workspace itself comes from the config's `env` block, like the handoff origin, so an agent can only ever link to its own.
 
-The one judgement call in there is *which* of a repo link's two PR slots the PR lands in. `link.github` is the PR for the workspace's own branch, which the poller finds on its own; `attached_prs` is everything else. `record()` routes on `head_branch`, so an agent linking the PR it just opened for its own branch fills the branch slot rather than creating a second chip the poller would duplicate a tick later. That path is idempotent, and sweeps up any stale `attached_prs` copy of the same number.
+`record()` is a plain insert-or-refresh into the link's one PR list (see **Tracked PRs**), so linking a PR the poller already found is a refresh rather than a second chip. It reports back whether the PR turned out to be the one for the workspace's own branch — read off `head_branch`, not off where it was stored — so an agent can tell "I linked the PR I just opened" from "I linked somebody else's".
 
 Deliberately absent: no creating or editing PRs (this records, it doesn't act on GitHub), no unlinking, and no linking to any workspace but the caller's.
 
@@ -62,7 +62,7 @@ Deliberately absent: no persisted queue (quit with four waiting and they're gone
 
 The sidebar is a partition: every workspace sits in exactly one folder, and `folder: None` *is* the **Default** folder — deliberately not a `Folder` at all, which is what makes it always present, unnameable, and impossible to delete or drag off the top. Folders are flat and inert: membership decides where a row is drawn and nothing else. Create none and the sidebar looks exactly as it did before they existed — headers appear only once a real folder does.
 
-They replaced an `archived_at` marker that was the same idea wearing behaviour it didn't need. Archiving used to mute "your turn" notifications, drop the row from keyboard navigation, and suppress the "ready to delete" banner; none of that survived, so a workspace in a folder named Archived pings like any other. `Store::load` migrates any `archived_at` still in the file into an ordinary (collapsed) folder called "Archived", reading it off a `serde_json::Value` rather than the struct so `Workspace` carries no trace of the retired concept. The first flush without the field ends the migration for good.
+They replaced an `archived_at` marker that was the same idea wearing behaviour it didn't need. Archiving used to mute "your turn" notifications and drop the row from keyboard navigation; neither survived, so a workspace in a folder named Archived pings like any other. `Store::load` migrates any `archived_at` still in the file into an ordinary (collapsed) folder called "Archived", reading it off a `serde_json::Value` rather than the struct so `Workspace` carries no trace of the retired concept. The first flush without the field ends the migration for good.
 
 Ordering is two Vecs — `AppState.folders` and the existing `AppState.workspaces`. Rendering re-groups the flat workspace order by folder, so only *relative* order within a folder can be observed; the drag handler leans on that, which is why its index math doesn't bother producing a globally tidy list.
 
@@ -84,6 +84,21 @@ Agents get at this through one extra `create_workspace` argument, `blocks_caller
 
 Deliberately absent: no derivation from PR bases or `gh stack` membership — a stack is drawn inside one workspace's header and never nests one workspace under another — no notification when a blocker clears, no coupling to PR state, and no second blocker.
 
+## Tracked PRs
+
+A repo link tracks **one list** of PRs (`RepoLink::prs`). The PR for the workspace's own branch is in there like any other; the only thing special about it is that it gets *added* for you.
+
+It used to have a slot of its own, `link.github`, with `attached_prs` beside it — and that split quietly bought the branch PR four behaviours nothing else had: it couldn't be detached, it re-derived itself from the branch every tick, it vanished silently where an attached PR showed "no data", and re-pointing at it was a refresh where re-attaching anything else was an error. Every one of those was an accident of storage rather than a decision, so the list replaced them. `Store::load` folds both old fields in (`migrate_pr_slots`), reading them off a `serde_json::Value` so `RepoLink` carries no trace of the split, and the first flush ends the migration.
+
+The poller's two target kinds are now the whole of the asymmetry, and they're a division of labour rather than of privilege. `TargetKind::Branch` is a *scan*: it selects only `number` and answers "which PR should this link be tracking", which is the automatic equivalent of typing a number into the attach dialog. `TargetKind::Pr` pulls the full selection and is what every tracked PR is polled with afterwards, no matter how it got there. So a tick is two passes — scan, then fetch anything the scan just started tracking — because attaching by hand fetches before it records, and a PR you just opened shouldn't sit there saying "no data" for 45 seconds when a hand-attached one wouldn't.
+
+Two consequences worth knowing, both of them the point rather than side effects:
+
+- **A scan takes nothing away.** Tracking ends at detach, not at whatever the branch currently points to. Close the PR on your branch and open another, and you get two chips instead of one silently swapped for the other.
+- **Detach works on everything**, which is why `untrack` records the number in `dismissed`: a scan runs every tick and would otherwise put the branch's PR straight back, so detaching it would last 45 seconds. Attaching a dismissed number clears it — asking for a PR by name outranks having once said no to it.
+
+Gone with the split: `isReadyToDelete` and its "ready to delete" banner. It asked whether every tracked PR was merged, which was only ever answerable because the branch slot re-derived itself; with tracking that persists, a closed-and-replaced PR would have pinned it false until someone detached the corpse. Nobody was using the banner to decide anything.
+
 ## PR stacks
 
 The members of a **`gh stack`** are drawn wrapped in one outline in the workspace header, base-first, separated by a chevron. Each PR keeps its own chip — the container is the whole of what stacking adds. Ryan builds stacks with `gh stack` (`github/gh-stack`), so Tethys only has to recognize them, never create or restack them.
@@ -92,7 +107,7 @@ Membership is GitHub's own, not inferred. `github/gh-stack` makes a stack a real
 
 Chaining PRs by base branch instead was the obvious cheaper route and is wrong. A hand-made chain and a `gh stack` are indistinguishable from `baseRefName` alone, and only one of them is a thing you can `gh stack sync` — so grouping on bases would put an outline around PRs that have no stack to manage. Nothing fetches `baseRefName`.
 
-`prGroups` (`src/workspaceDerived.ts`) partitions a link's PRs by stack number, ordering each group by `position`, and hands back every PR exactly once with non-stacked ones as groups of one — so the header renders groups uniformly and a workspace with no stack looks exactly as it did before. Both PR slots feed in, the branch PR the poller found and anything hand-attached, since a stack's other branches are attached PRs from this workspace's point of view. Stack numbers are per repository and a link is one repo, so nothing can pull two repos' PRs into one group.
+`prGroups` (`src/workspaceDerived.ts`) partitions a link's PRs by stack number, ordering each group by `position`, and hands back every PR exactly once with non-stacked ones as groups of one — so the header renders groups uniformly and a workspace with no stack looks exactly as it did before. Every PR the link tracks feeds in, however it got there, since a stack's other branches are ones you attached by hand from this workspace's point of view. Stack numbers are per repository and a link is one repo, so nothing can pull two repos' PRs into one group.
 
 A group is often *smaller* than `stack.size`: six stacked branches with one checked out here is one chip. That case still gets the outline — the PR is genuinely stacked and a bare chip would hide it — plus a `1 of 6` marker, which is the only thing distinguishing "this is the stack" from "this is what I have of it".
 

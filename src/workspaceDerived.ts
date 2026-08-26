@@ -20,28 +20,28 @@ export function isStale(fetchedAt: string, nowMs: number = Date.now()): boolean 
 }
 
 /**
- * A tracked PR plus the slot it came from. The slot is what the branch PR and
- * an attached one disagree about — only an attached PR can be detached — so it
- * has to survive any regrouping the UI does.
+ * A tracked PR with a status to draw, plus its number.
+ *
+ * The number used to be nullable, because the PR for the workspace's own branch
+ * lived in a slot of its own and was the one PR you couldn't detach. Every
+ * tracked PR now has a number and every one of them can be detached, so this is
+ * just a `GithubPrStatus` that hasn't lost track of which entry it belongs to
+ * through the regrouping below.
  */
 export type LinkPr = {
   status: GithubPrStatus;
-  /** Set when this came from `attached_prs`; `null` for the branch PR. */
-  attachedNumber: number | null;
+  number: number;
 };
 
 /**
- * Every PR tracked on a repo link, branch PR first, then attached ones in
- * attach order. Attached PRs with no status yet (first fetch failed) are
+ * Every PR tracked on a repo link that has something to draw, in the order
+ * tracking started. PRs with no status yet (a first fetch that failed) are
  * skipped — there's nothing to roll up.
  */
 export function linkPrEntries(link: RepoLink): LinkPr[] {
   const out: LinkPr[] = [];
-  if (link.github) out.push({ status: link.github, attachedNumber: null });
-  for (const attached of link.attached_prs) {
-    if (attached.status) {
-      out.push({ status: attached.status, attachedNumber: attached.number });
-    }
+  for (const pr of link.prs) {
+    if (pr.status) out.push({ status: pr.status, number: pr.number });
   }
   return out;
 }
@@ -112,22 +112,6 @@ export function prGroups(entries: LinkPr[]): PrGroup[] {
   }
 
   return groups;
-}
-
-/** Every PR tracked anywhere in the workspace. */
-export function workspacePrs(ws: Workspace): GithubPrStatus[] {
-  return ws.repo_links.flatMap(linkPrs);
-}
-
-/**
- * True when every PR tracked by the workspace — branch-derived and manually
- * attached — is merged. A workspace with no tracked PRs at all returns false
- * so we don't suggest deleting an unsynced workspace.
- */
-export function isReadyToDelete(ws: Workspace): boolean {
-  const prs = workspacePrs(ws);
-  if (prs.length === 0) return false;
-  return prs.every((pr) => pr.state === "merged");
 }
 
 /** A workspace plus how deep it sits in the blocker tree. */

@@ -220,7 +220,8 @@ export function GithubChip({
    * only place that attribution can live.
    */
   context?: string;
-  /** When set, renders a detach button. Only for manually-attached PRs. */
+  /** When set, renders a detach button. The sidebar leaves it off — detaching
+   *  is a workspace-header action — but any tracked PR can be detached. */
   onDetach?: () => void;
 }) {
   const stale = isStale(status.fetched_at);

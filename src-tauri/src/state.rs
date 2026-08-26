@@ -188,14 +188,26 @@ pub struct RepoLink {
     pub repo_key: String,
     pub worktree_path: PathBuf,
     pub setup_script_ran_at: Option<DateTime<Utc>>,
+    /// Every PR this repo link tracks, in the order tracking started.
+    ///
+    /// One list, deliberately: the PR for the workspace's own branch used to
+    /// live in a slot of its own, which bought it four behaviours nothing else
+    /// had — it couldn't be detached, it re-derived itself from the branch
+    /// every tick, it vanished silently instead of showing "no data", and
+    /// re-pointing at it was a refresh where re-attaching anything else was an
+    /// error. None of that was worth the split. The branch PR is now just the
+    /// one entry that gets *added* for you (see `TargetKind::Branch`); past
+    /// that it is an ordinary tracked PR.
     #[serde(default)]
-    pub github: Option<GithubPrStatus>,
-    /// PRs the user manually attached to this repo link. The `github` field
-    /// above only ever tracks the PR for the workspace's own branch; anything
-    /// else opened from this worktree (a second branch, a stacked PR) has to
-    /// be attached by hand. Polled alongside the branch PR.
+    pub prs: Vec<TrackedPr>,
+    /// PR numbers detached from this link, so branch discovery doesn't put
+    /// them straight back. The price of letting the automatically-added PR be
+    /// detached like any other: without this, the next poll re-adds it.
+    ///
+    /// Manually attaching a dismissed number clears it — asking for a PR by
+    /// name outranks having once said no to it.
     #[serde(default)]
-    pub attached_prs: Vec<AttachedPr>,
+    pub dismissed: Vec<u32>,
     /// Whether Tethys created this branch (branched off HEAD or off a remote
     /// tracking ref) versus checked out a branch that already existed locally.
     /// Teardown only deletes branches Tethys created, so checking out a
@@ -210,13 +222,13 @@ fn default_created_branch() -> bool {
     true
 }
 
-/// A manually-attached pull request on a repo link. The number is the user's
-/// intent and persists even when a poll fails; `status` is the last successful
-/// fetch (`None` until the first one lands, or if the PR became unreachable).
+/// A pull request a repo link tracks. The number is the intent and persists
+/// even when a poll fails; `status` is the last successful fetch (`None` until
+/// the first one lands, or if the PR became unreachable).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AttachedPr {
+pub struct TrackedPr {
     pub number: u32,
-    pub attached_at: DateTime<Utc>,
+    pub tracked_at: DateTime<Utc>,
     #[serde(default)]
     pub status: Option<GithubPrStatus>,
 }
@@ -347,6 +359,57 @@ impl Workspace {
     }
 }
 
+impl RepoLink {
+    pub fn tracked(&self, number: u32) -> Option<&TrackedPr> {
+        self.prs.iter().find(|p| p.number == number)
+    }
+
+    pub fn tracked_mut(&mut self, number: u32) -> Option<&mut TrackedPr> {
+        self.prs.iter_mut().find(|p| p.number == number)
+    }
+
+    /// Start tracking `number`, or refresh what we already have for it.
+    ///
+    /// Idempotent for both callers — the attach dialog re-pasting a number and
+    /// the poller re-finding the branch PR mean the same thing here, which is
+    /// the point of there being one list. Tracking a number also un-dismisses
+    /// it, so a detached PR you ask for again comes back and stays.
+    pub fn track(&mut self, number: u32, status: Option<GithubPrStatus>) {
+        self.dismissed.retain(|n| *n != number);
+        match self.tracked_mut(number) {
+            // A refresh with nothing to say (a failed fetch) leaves the last
+            // known status alone rather than blanking a good chip.
+            Some(existing) => {
+                if status.is_some() {
+                    existing.status = status;
+                }
+            }
+            None => self.prs.push(TrackedPr {
+                number,
+                tracked_at: Utc::now(),
+                status,
+            }),
+        }
+    }
+
+    /// Stop tracking `number` and remember the refusal, so branch discovery
+    /// doesn't re-add it on the next tick. Returns whether it was tracked.
+    pub fn untrack(&mut self, number: u32) -> bool {
+        let had = self.tracked(number).is_some();
+        self.prs.retain(|p| p.number != number);
+        if !self.dismissed.contains(&number) {
+            self.dismissed.push(number);
+        }
+        had
+    }
+
+    /// Whether branch discovery should leave `number` alone: either we already
+    /// track it, or it was detached.
+    pub fn discovery_should_skip(&self, number: u32) -> bool {
+        self.tracked(number).is_some() || self.dismissed.contains(&number)
+    }
+}
+
 impl AppState {
     pub fn find_workspace(&self, id: &str) -> Option<&Workspace> {
         self.workspaces.iter().find(|w| w.id == id)
@@ -459,8 +522,8 @@ mod tests {
                     repo_key: format!("repo{i}"),
                     worktree_path: PathBuf::from(p),
                     setup_script_ran_at: None,
-                    github: None,
-                    attached_prs: Vec::new(),
+                    prs: Vec::new(),
+                    dismissed: Vec::new(),
                     created_branch: true,
                 })
                 .collect(),
@@ -553,9 +616,11 @@ mod tests {
         assert_eq!(ws.id, "abc-123");
         assert_eq!(ws.branch, "feat/foo");
         assert_eq!(ws.repo_links.len(), 1);
-        assert!(ws.repo_links[0].github.is_none());
-        // Old RepoLink JSON without `attached_prs` deserializes to an empty list.
-        assert!(ws.repo_links[0].attached_prs.is_empty());
+        // Old RepoLink JSON without `prs` deserializes to an empty list. The
+        // retired `github` / `attached_prs` slots are folded in by
+        // `Store::load`, not by serde.
+        assert!(ws.repo_links[0].prs.is_empty());
+        assert!(ws.repo_links[0].dismissed.is_empty());
         assert!(ws.claude_binary.is_none());
         assert!(ws.deleted_at.is_none());
         assert!(ws.folder.is_none());
@@ -780,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn attached_prs_round_trip() {
+    fn tracked_prs_round_trip() {
         let raw = r#"{
             "workspaces": [
                 {
@@ -792,23 +857,91 @@ mod tests {
                             "repo_key": "frontend",
                             "worktree_path": "/tmp/wt/abc-123/frontend",
                             "setup_script_ran_at": null,
-                            "attached_prs": [
+                            "prs": [
                                 {
                                     "number": 512,
-                                    "attached_at": "2026-04-02T09:00:00Z",
+                                    "tracked_at": "2026-04-02T09:00:00Z",
                                     "status": null
                                 }
-                            ]
+                            ],
+                            "dismissed": [7]
                         }
                     ]
                 }
             ]
         }"#;
         let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
-        let attached = &parsed.workspaces[0].repo_links[0].attached_prs;
-        assert_eq!(attached.len(), 1);
-        assert_eq!(attached[0].number, 512);
-        assert!(attached[0].status.is_none());
+        let link = &parsed.workspaces[0].repo_links[0];
+        assert_eq!(link.prs.len(), 1);
+        assert_eq!(link.prs[0].number, 512);
+        assert!(link.prs[0].status.is_none());
+        assert_eq!(link.dismissed, vec![7]);
+    }
+
+    fn link() -> RepoLink {
+        RepoLink {
+            repo_key: "frontend".into(),
+            worktree_path: PathBuf::from("/tmp/wt/frontend"),
+            setup_script_ran_at: None,
+            prs: Vec::new(),
+            dismissed: Vec::new(),
+            created_branch: true,
+        }
+    }
+
+    #[test]
+    fn tracking_twice_refreshes_rather_than_duplicates() {
+        let mut l = link();
+        l.track(7, None);
+        l.track(7, None);
+        assert_eq!(l.prs.len(), 1);
+    }
+
+    /// A failed refetch must not blank a chip that already has good data.
+    #[test]
+    fn refresh_with_no_status_keeps_the_last_one() {
+        let mut l = link();
+        l.track(7, Some(pr_status(7)));
+        l.track(7, None);
+        assert_eq!(l.prs[0].status.as_ref().unwrap().pr_number, 7);
+    }
+
+    #[test]
+    fn detaching_dismisses_so_discovery_skips_it() {
+        let mut l = link();
+        l.track(7, Some(pr_status(7)));
+        assert!(l.untrack(7));
+        assert!(l.prs.is_empty());
+        assert!(l.discovery_should_skip(7));
+    }
+
+    /// Asking for a PR by number outranks having once said no to it.
+    #[test]
+    fn tracking_a_dismissed_number_un_dismisses_it() {
+        let mut l = link();
+        l.untrack(7);
+        l.track(7, Some(pr_status(7)));
+        assert!(l.dismissed.is_empty());
+        assert!(!l.discovery_should_skip(9));
+    }
+
+    fn pr_status(number: u32) -> GithubPrStatus {
+        GithubPrStatus {
+            pr_number: number,
+            url: format!("https://github.com/o/r/pull/{number}"),
+            state: crate::github::status::PrState::Open,
+            is_draft: false,
+            checks: crate::github::status::ChecksRollup::None,
+            bugbot: crate::github::status::ChecksRollup::None,
+            has_merge_conflicts: false,
+            review_decision: crate::github::status::ReviewDecision::None,
+            unresolved_threads: 0,
+            head_branch: None,
+            head_sha: String::new(),
+            stack: None,
+            fetched_at: Utc::now(),
+            last_error: None,
+        }
     }
 
     #[test]

@@ -8,7 +8,7 @@ use tracing::{info, info_span, trace, warn, Instrument};
 
 use crate::github::client::{gh_login_status, run_graphql, GhCli, GhError, PrSource};
 use crate::github::pr_status::{
-    apply_results, build_query, parse_response, Target, TargetKind,
+    apply_results, build_query, parse_response, Applied, PollOutcome, Target, TargetKind,
 };
 use crate::github::status::GithubPrStatus;
 use crate::github::GithubSlug;
@@ -228,18 +228,22 @@ impl GithubPoller {
                 let Some(slug) = &repo.github_slug else {
                     continue;
                 };
+                // One scan for the workspace's own branch, so a PR opened
+                // there gets tracked without anyone typing its number...
                 out.push(Target {
                     workspace_id: ws.id.clone(),
                     repo_key: link.repo_key.clone(),
                     slug: slug.clone(),
                     kind: TargetKind::Branch(ws.branch.clone()),
                 });
-                for attached in &link.attached_prs {
+                // ...and one status fetch per tracked PR, with nothing here
+                // caring how any of them came to be tracked.
+                for pr in &link.prs {
                     out.push(Target {
                         workspace_id: ws.id.clone(),
                         repo_key: link.repo_key.clone(),
                         slug: slug.clone(),
-                        kind: TargetKind::Pr(attached.number),
+                        kind: TargetKind::Pr(pr.number),
                     });
                 }
             }
@@ -247,23 +251,72 @@ impl GithubPoller {
         out
     }
 
+    /// One tick: fetch every target, apply it, then — if the branch scan turned
+    /// up a PR nobody was tracking — fetch that PR's status straight away.
+    ///
+    /// The second pass is what keeps automatic and manual tracking the same
+    /// from the outside. Attaching by hand fetches before it records, so a chip
+    /// appears fully formed; without this, a PR you had just opened would sit
+    /// there saying "no data" until the next tick 45 seconds later.
     async fn do_poll(&self, targets: &[Target]) -> Result<usize, GhError> {
+        let applied = self.fetch_and_apply(targets).await?;
+        let mut count = applied.changed.len();
+
+        let follow_up: Vec<Target> = applied
+            .discovered
+            .iter()
+            .filter_map(|d| {
+                // Reuse the slug the scan itself was built with, so nothing
+                // here has to reach back into the registry.
+                let slug = targets
+                    .iter()
+                    .find(|t| t.workspace_id == d.workspace_id && t.repo_key == d.repo_key)
+                    .map(|t| t.slug.clone())?;
+                Some(Target {
+                    workspace_id: d.workspace_id.clone(),
+                    repo_key: d.repo_key.clone(),
+                    slug,
+                    kind: TargetKind::Pr(d.number),
+                })
+            })
+            .collect();
+
+        if !follow_up.is_empty() {
+            info!(count = follow_up.len(), "tracking newly discovered PRs");
+            // These are all `Pr` targets, so they can't discover anything and
+            // this can't cascade past one extra pass.
+            let result = self.fetch_and_apply(&follow_up).await;
+            // The list itself grew, which no `status_changed` can express — it
+            // only ever updates a PR the frontend already has. Announced even
+            // when the status fetch failed, so the chip shows up (as "no data")
+            // rather than waiting for something else to refresh the workspace.
+            for id in dedup(applied.discovered.iter().map(|d| &d.workspace_id)) {
+                self.store.notify_workspace_changed(id);
+            }
+            count += result?.changed.len();
+        }
+        Ok(count)
+    }
+
+    async fn fetch_and_apply(&self, targets: &[Target]) -> Result<Applied, GhError> {
         let (query, variables) = build_query(targets);
         trace!(query = %query, variables = ?variables, "github graphql request");
         let data = self.source.fetch(&query, &variables).await?;
         trace!(data = %data, "github graphql response");
         let parsed = parse_response(targets, &data);
 
-        let changed = self
+        let applied = self
             .store
             .mutate(|s| Ok(apply_results(s, &parsed)))
             .await
             .unwrap_or_default();
 
-        for result in &changed {
-            self.events.status_changed(&result.event());
+        for result in &applied.changed {
+            if let Some(event) = result.event() {
+                self.events.status_changed(&event);
+            }
         }
-        Ok(changed.len())
+        Ok(applied)
     }
 
     async fn handle_error(&self, err: GhError) {
@@ -364,7 +417,24 @@ pub async fn fetch_pr_status(
     Ok(parse_response(targets, &data)
         .into_iter()
         .next()
-        .and_then(|r| r.status))
+        .and_then(|r| match r.outcome {
+            PollOutcome::Status { status, .. } => status,
+            // A `Pr` target never yields a discovery.
+            PollOutcome::Discovered(_) => None,
+        }))
+}
+
+/// The distinct values of `items`, order preserved. Discoveries cluster by
+/// workspace — several repos of one workspace can each turn up a PR in the same
+/// tick — and one refresh per workspace is enough.
+fn dedup<'a, I: Iterator<Item = &'a String>>(items: I) -> Vec<&'a String> {
+    let mut out: Vec<&String> = Vec::new();
+    for item in items {
+        if !out.contains(&item) {
+            out.push(item);
+        }
+    }
+    out
 }
 
 fn backoff_for(failures: u32) -> Duration {
@@ -403,6 +473,39 @@ mod tests {
                 Some(e) => Err(GhError::Other(e.to_string())),
                 None => Ok(serde_json::json!({})),
             }
+        }
+    }
+
+    /// A `PrSource` that plays back canned responses in order, so a test can
+    /// drive both passes of a tick.
+    struct ScriptedSource {
+        responses: StdMutex<std::collections::VecDeque<Value>>,
+        queries: Arc<StdMutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl PrSource for ScriptedSource {
+        async fn fetch(
+            &self,
+            query: &str,
+            _variables: &std::collections::BTreeMap<String, String>,
+        ) -> Result<Value, GhError> {
+            self.queries.lock().unwrap().push(query.to_string());
+            Ok(self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| serde_json::json!({})))
+        }
+    }
+
+    /// Records the workspaces the store announced as changed.
+    struct RecordingNotifier(Arc<StdMutex<Vec<String>>>);
+
+    impl crate::store::WorkspaceNotifier for RecordingNotifier {
+        fn workspace_changed(&self, workspace_id: &str) {
+            self.0.lock().unwrap().push(workspace_id.to_string());
         }
     }
 
@@ -543,5 +646,109 @@ mod tests {
         assert_eq!(backoff_for(1), Duration::from_secs(90));
         assert_eq!(backoff_for(2), Duration::from_secs(180));
         assert!(backoff_for(10) <= MAX_BACKOFF);
+    }
+
+    /// The whole point of the second pass: a PR found by branch scan lands
+    /// fully formed, the same as one attached by hand, instead of sitting as a
+    /// statusless chip until the next tick 45 seconds later.
+    #[tokio::test]
+    async fn a_discovered_pr_gets_its_status_in_the_same_tick() {
+        let tmp = tempfile::tempdir().unwrap();
+        let announced = Arc::new(StdMutex::new(Vec::new()));
+        let store = Store::load(
+            tmp.path().join("state.json"),
+            tmp.path().join("state.json.tmp"),
+            Box::new(RecordingNotifier(announced.clone())),
+        )
+        .await
+        .unwrap();
+        std::mem::forget(tmp);
+
+        store
+            .mutate(|s| {
+                let mut ws = crate::state::Workspace::draft(
+                    "ws-0".into(),
+                    "feat/thing".into(),
+                    None,
+                    crate::state::Origin::Ui,
+                    None,
+                );
+                ws.repo_links.push(crate::state::RepoLink {
+                    repo_key: "api".into(),
+                    worktree_path: "/tmp/ws-0/api".into(),
+                    setup_script_ran_at: None,
+                    prs: Vec::new(),
+                    dismissed: Vec::new(),
+                    created_branch: true,
+                });
+                s.workspaces.push(ws);
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let queries = Arc::new(StdMutex::new(Vec::new()));
+        let source = ScriptedSource {
+            responses: StdMutex::new(
+                [
+                    // Pass one: the scan, which only ever yields a number.
+                    serde_json::json!({
+                        "q0": { "ref": { "associatedPullRequests": { "nodes": [{ "number": 7 }] } } }
+                    }),
+                    // Pass two: that number's status.
+                    serde_json::json!({
+                        "q0": { "pullRequest": {
+                            "number": 7,
+                            "url": "https://github.com/me/api/pull/7",
+                            "state": "OPEN",
+                            "isDraft": false,
+                            "headRefName": "feat/thing",
+                            "commits": { "nodes": [{ "commit": {
+                                "oid": "sha7",
+                                "statusCheckRollup": { "state": "SUCCESS" }
+                            }}]}
+                        }}
+                    }),
+                ]
+                .into(),
+            ),
+            queries: queries.clone(),
+        };
+
+        let poller = GithubPoller::with_seams(
+            store.clone(),
+            Arc::new(RegistryLoad::Missing {
+                path: "/nonexistent".into(),
+            }),
+            Box::new(source),
+            Box::new(EventLog::default()),
+        );
+
+        let targets = vec![Target {
+            workspace_id: "ws-0".into(),
+            repo_key: "api".into(),
+            slug: GithubSlug {
+                owner: "me".into(),
+                name: "api".into(),
+            },
+            kind: TargetKind::Branch("feat/thing".into()),
+        }];
+        poller.do_poll(&targets).await.unwrap();
+
+        assert_eq!(queries.lock().unwrap().len(), 2, "scan, then status fetch");
+        // The PR list itself grew, which a `status_changed` can't express — the
+        // frontend has to be told to re-read the workspace or the chip never
+        // appears.
+        assert_eq!(announced.lock().unwrap().as_slice(), ["ws-0"]);
+        let status = store
+            .read(|s| {
+                s.workspaces[0].repo_links[0]
+                    .tracked(7)
+                    .and_then(|p| p.status.clone())
+            })
+            .await;
+        let status = status.expect("the discovered PR has its status already");
+        assert_eq!(status.pr_number, 7);
+        assert_eq!(status.checks, crate::github::status::ChecksRollup::Success);
     }
 }

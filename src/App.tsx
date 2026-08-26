@@ -32,7 +32,6 @@ import { applyTheme, ThemeContext } from "./theme";
 import { useBackendJob, type JobDescriptor } from "./useBackendJob";
 import { useAppEvent } from "./ipc/events";
 import {
-  isReadyToDelete,
   linkPrEntries,
   prGroups,
   type LinkPr,
@@ -201,13 +200,13 @@ function App() {
           ...w,
           repo_links: w.repo_links.map((r) => {
             if (r.repo_key !== repo_key) return r;
-            // A pr_number means the update is for a manually-attached PR,
-            // which lives in its own slot alongside the branch PR.
-            if (pr_number === null) return { ...r, github: status };
+            // Every status names its PR, and every PR lives in one list, so
+            // there's no slot to pick between. A number we don't track was
+            // detached mid-tick; the backend already dropped it.
             return {
               ...r,
-              attached_prs: r.attached_prs.map((a) =>
-                a.number === pr_number ? { ...a, status } : a,
+              prs: r.prs.map((p) =>
+                p.number === pr_number ? { ...p, status } : p,
               ),
             };
           }),
@@ -1186,7 +1185,9 @@ function WorkspaceDetail({
     }
   };
 
-  // The backend emits `workspace:changed`, which refreshes the chip row.
+  // The backend emits `workspace:changed`, which refreshes the chip row. It
+  // also records the number as dismissed, so a PR detached from the workspace's
+  // own branch doesn't come back on the next poll.
   const detachPr = async (repoKey: string, prNumber: number) => {
     setError(null);
     try {
@@ -1212,7 +1213,7 @@ function WorkspaceDetail({
           {workspace.repo_links.map((r) =>
             // Skipped entirely for repos with no PRs, so the header's gap
             // doesn't double up around an empty group.
-            r.github || r.attached_prs.length > 0 ? (
+            r.prs.length > 0 ? (
               <span className="gh-chip-group" key={r.repo_key}>
                 <RepoPrChips link={r} onDetach={detachPr} />
               </span>
@@ -1272,23 +1273,6 @@ function WorkspaceDetail({
           />
         </div>
       </header>
-      {isReadyToDelete(workspace) && (
-        <div className="ready-banner">
-          <div>
-            <strong>Ready to delete.</strong>{" "}
-            <span className="muted">
-              Every linked PR for <code>{workspace.branch}</code> is merged.
-            </span>
-          </div>
-          <button
-            type="button"
-            className="primary"
-            onClick={onRequestDelete}
-          >
-            Delete workspace
-          </button>
-        </div>
-      )}
       {showInfo && (
         <WorkspaceInfoDialog
           workspace={workspace}
@@ -1948,15 +1932,12 @@ function RepoPrChips({
   link: RepoLink;
   onDetach: (repoKey: string, prNumber: number) => void;
 }) {
-  // Only an attached PR can be detached; the branch PR is the poller's.
-  const chip = ({ status, attachedNumber }: LinkPr) => (
+  // Anything tracked can be detached, including the PR the poller found on its
+  // own — `dismissed` on the backend is what stops the next scan re-adding it.
+  const chip = ({ status, number }: LinkPr) => (
     <GithubChip
       status={status}
-      onDetach={
-        attachedNumber === null
-          ? undefined
-          : () => onDetach(link.repo_key, attachedNumber)
-      }
+      onDetach={() => onDetach(link.repo_key, number)}
     />
   );
 
@@ -1993,22 +1974,24 @@ function RepoPrChips({
           </Fragment>
         ),
       )}
-      {link.attached_prs
-        .filter((attached) => !attached.status)
-        .map((attached) => (
-          // Attaching fetches the PR up front, so this only shows up if the PR
-          // later became unreachable (deleted, or GitHub is down). With no
-          // status there's no base branch, so it can't join a stack.
+      {link.prs
+        .filter((pr) => !pr.status)
+        .map((pr) => (
+          // Both paths fetch before they record — attaching by hand, and the
+          // poller's follow-up pass on a PR it just discovered — so this shows
+          // up only if the PR became unreachable (deleted, or GitHub is down).
+          // With no status there's no stack membership, so it can't join a
+          // group.
           <span
-            key={attached.number}
+            key={pr.number}
             className="gh-chip gh-chip-missing"
-            title={`PR #${attached.number} in ${link.repo_key} couldn't be fetched`}
+            title={`PR #${pr.number} in ${link.repo_key} couldn't be fetched`}
           >
-            <span className="gh-pr">{attached.number}</span>
+            <span className="gh-pr">{pr.number}</span>
             <span className="gh-note-badge">no data</span>
             <PrDetachButton
-              prNumber={attached.number}
-              onDetach={() => onDetach(link.repo_key, attached.number)}
+              prNumber={pr.number}
+              onDetach={() => onDetach(link.repo_key, pr.number)}
             />
           </span>
         ))}

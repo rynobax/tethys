@@ -98,8 +98,8 @@ pub async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLi
             repo_key: ctx.repo.key.clone(),
             worktree_path: ctx.worktree_path.to_path_buf(),
             setup_script_ran_at: None,
-            github: None,
-            attached_prs: Vec::new(),
+            prs: Vec::new(),
+            dismissed: Vec::new(),
             created_branch,
         };
 

@@ -289,8 +289,8 @@ mod tests {
                     repo_key: (*k).into(),
                     worktree_path: root.join(k),
                     setup_script_ran_at: None,
-                    github: None,
-                    attached_prs: Vec::new(),
+                    prs: Vec::new(),
+                    dismissed: Vec::new(),
                     created_branch: true,
                 })
                 .collect(),

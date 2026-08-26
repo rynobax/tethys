@@ -26,37 +26,77 @@ pub struct Target {
     pub kind: TargetKind,
 }
 
-/// Which PR of a repo link a target (and its result) refers to: the one for
-/// the workspace's own branch, or a specific manually-attached number.
+/// What a target asks GitHub for. The two are asymmetric on purpose, and the
+/// asymmetry is the *only* place the workspace's own branch is special:
+/// `Branch` finds out which PR to track, and `Pr` is what every tracked PR —
+/// however it got there — is polled with afterwards.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetKind {
+    /// Look up the PR for a workspace's branch. Yields a number, not a status:
+    /// tracking it is the automatic equivalent of typing that number into the
+    /// attach dialog, and the status arrives the same way it does for a PR you
+    /// attached by hand.
     Branch(String),
+    /// Fetch status for a PR the link already tracks.
     Pr(u32),
+}
+
+/// What one target came back with.
+#[derive(Debug, Clone)]
+pub enum PollOutcome {
+    /// The PR number GitHub associates with the branch; `None` when the branch
+    /// has no PR at all.
+    Discovered(Option<u32>),
+    /// A tracked PR's status. `None` means the PR became unreachable — the
+    /// number stays tracked, and the chip says so.
+    Status {
+        number: u32,
+        status: Option<GithubPrStatus>,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct PollResult {
     pub workspace_id: WorkspaceId,
     pub repo_key: String,
-    pub kind: TargetKind,
-    pub status: Option<GithubPrStatus>,
+    pub outcome: PollOutcome,
+}
+
+/// A PR number a branch scan turned up that the link wasn't tracking yet.
+/// Carries no status — the poller fetches that in the same tick.
+#[derive(Debug, Clone)]
+pub struct Discovery {
+    pub workspace_id: WorkspaceId,
+    pub repo_key: String,
+    pub number: u32,
+}
+
+/// What one pass over the poll results did: the status changes worth telling
+/// the UI about, and the numbers this pass started tracking.
+///
+/// The two travel together because they come from one `&mut AppState` pass —
+/// splitting them into a mutate and a read would leave a window where a PR is
+/// tracked but nothing has been asked to fetch it.
+#[derive(Debug, Clone, Default)]
+pub struct Applied {
+    pub changed: Vec<PollResult>,
+    pub discovered: Vec<Discovery>,
 }
 
 impl PollResult {
-    /// Payload for `github:status_changed`. `pr_number` is null for the
-    /// branch-derived PR and set for a manually-attached one, which is how the
-    /// frontend knows which slot to update.
-    pub fn event(&self) -> Value {
-        let pr_number = match self.kind {
-            TargetKind::Branch(_) => None,
-            TargetKind::Pr(n) => Some(n),
+    /// Payload for `github:status_changed`. `pr_number` always names the PR
+    /// the status belongs to — there is no longer a slot to disambiguate.
+    /// Discovery results have no status and never produce an event.
+    pub fn event(&self) -> Option<Value> {
+        let PollOutcome::Status { number, status } = &self.outcome else {
+            return None;
         };
-        json!({
+        Some(json!({
             "workspace_id": self.workspace_id,
             "repo_key": self.repo_key,
-            "pr_number": pr_number,
-            "status": self.status,
-        })
+            "pr_number": number,
+            "status": status,
+        }))
     }
 }
 
@@ -65,8 +105,8 @@ pub fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
     let mut var_decls = Vec::new();
     let mut body = String::new();
 
-    // Shared selection set for a PR node — same shape whether we found it via
-    // the branch ref or via the merged-PRs fallback.
+    // Selection set for a tracked PR. Every PR goes through this, whether it
+    // was attached by hand or discovered from the workspace's branch.
     const PR_FIELDS: &str = r#"number
           url
           state
@@ -135,6 +175,10 @@ pub fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
                 var_decls.push(format!(
                     "${ow}: String!, ${nm}: String!, ${br}: String!, ${bn}: String!"
                 ));
+                // Just the number: this is a lookup, not a status fetch. The
+                // full selection below is pulled per *tracked* PR, so asking
+                // for it here as well would fetch the same PR twice a tick.
+                //
                 // `mergedPrs` is the fallback for when the branch has been
                 // deleted post-merge: GitHub nulls the `ref`, but the PR record
                 // persists and is queryable by headRefName.
@@ -143,13 +187,13 @@ pub fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
     ref(qualifiedName: ${br}) {{
       associatedPullRequests(first: 1, orderBy: {{field: UPDATED_AT, direction: DESC}}) {{
         nodes {{
-          {PR_FIELDS}
+          number
         }}
       }}
     }}
     mergedPrs: pullRequests(headRefName: ${bn}, states: [MERGED, CLOSED], first: 1, orderBy: {{field: UPDATED_AT, direction: DESC}}) {{
       nodes {{
-        {PR_FIELDS}
+        number
       }}
     }}
   }}
@@ -184,38 +228,43 @@ pub fn parse_response(targets: &[Target], data: &Value) -> Vec<PollResult> {
     for (i, t) in targets.iter().enumerate() {
         let alias = format!("q{i}");
         let node = data.get(&alias);
-        let status = match t.kind {
-            TargetKind::Branch(_) => node.and_then(parse_branch_repo_node),
-            TargetKind::Pr(_) => node
-                .and_then(|repo| repo.get("pullRequest"))
-                .and_then(parse_pr_node),
+        let outcome = match t.kind {
+            TargetKind::Branch(_) => PollOutcome::Discovered(node.and_then(parse_branch_pr_number)),
+            TargetKind::Pr(number) => PollOutcome::Status {
+                number,
+                status: node
+                    .and_then(|repo| repo.get("pullRequest"))
+                    .and_then(parse_pr_node),
+            },
         };
         out.push(PollResult {
             workspace_id: t.workspace_id.clone(),
             repo_key: t.repo_key.clone(),
-            kind: t.kind.clone(),
-            status,
+            outcome,
         });
     }
     out
 }
 
-fn parse_branch_repo_node(repo: &Value) -> Option<GithubPrStatus> {
+fn parse_branch_pr_number(repo: &Value) -> Option<u32> {
+    /// First PR number out of a `{ nodes: [{ number }] }` connection.
+    fn first_number(connection: Option<&Value>) -> Option<u32> {
+        connection?
+            .get("nodes")?
+            .as_array()?
+            .first()?
+            .get("number")?
+            .as_u64()
+            .map(|n| n as u32)
+    }
+
     // Prefer the PR associated with the live branch ref. If the branch was
     // deleted on merge, `ref` will be null — fall back to the most recent
     // merged/closed PR for that branch name.
     let assoc = repo
         .get("ref")
-        .and_then(|r| r.get("associatedPullRequests"))
-        .and_then(|a| a.get("nodes"))
-        .and_then(|n| n.as_array())
-        .and_then(|arr| arr.first());
-    let merged_fallback = repo
-        .get("mergedPrs")
-        .and_then(|m| m.get("nodes"))
-        .and_then(|n| n.as_array())
-        .and_then(|arr| arr.first());
-    parse_pr_node(assoc.or(merged_fallback)?)
+        .and_then(|r| r.get("associatedPullRequests"));
+    first_number(assoc).or_else(|| first_number(repo.get("mergedPrs")))
 }
 
 fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
@@ -504,9 +553,16 @@ fn aggregate_rollup(states: impl Iterator<Item = ChecksRollup>) -> ChecksRollup 
     }
 }
 
-/// Apply parsed results to `AppState`, returning the set of changes to emit.
-pub fn apply_results(state: &mut AppState, results: &[PollResult]) -> Vec<PollResult> {
-    let mut changed = Vec::new();
+/// Apply parsed results to `AppState`: write each tracked PR's status, and
+/// start tracking any PR a branch scan turned up that we didn't have.
+///
+/// A scan that comes back empty takes nothing away. Once a PR is tracked it
+/// stays until it's detached, exactly like one attached by hand — the branch is
+/// how a PR gets *found*, not what keeps it on screen. That is also why a
+/// branch whose PR was closed and replaced ends up with two chips rather than
+/// one silently swapped for the other.
+pub fn apply_results(state: &mut AppState, results: &[PollResult]) -> Applied {
+    let mut applied = Applied::default();
     for result in results {
         let Some(ws) = state.find_workspace_mut(&result.workspace_id) else {
             continue;
@@ -514,27 +570,42 @@ pub fn apply_results(state: &mut AppState, results: &[PollResult]) -> Vec<PollRe
         let Some(link) = ws.link_mut(&result.repo_key) else {
             continue;
         };
-        let slot = match result.kind {
-            TargetKind::Branch(_) => &mut link.github,
-            // A PR the user detached mid-tick has no slot left to write to.
-            TargetKind::Pr(number) => {
-                match link.attached_prs.iter_mut().find(|a| a.number == number) {
-                    Some(attached) => &mut attached.status,
-                    None => continue,
+        match &result.outcome {
+            PollOutcome::Discovered(found) => {
+                let Some(number) = found else { continue };
+                if link.discovery_should_skip(*number) {
+                    continue;
+                }
+                // Tracked now, status filled by the follow-up pass in this
+                // same tick. The gap is why the chip can render statusless at
+                // all — and if that fetch fails it reads "no data", the same
+                // as a hand-attached PR that went unreachable.
+                link.track(*number, None);
+                applied.discovered.push(Discovery {
+                    workspace_id: result.workspace_id.clone(),
+                    repo_key: result.repo_key.clone(),
+                    number: *number,
+                });
+            }
+            PollOutcome::Status { number, status } => {
+                // A PR detached mid-tick has nothing left to write to.
+                let Some(tracked) = link.tracked_mut(*number) else {
+                    continue;
+                };
+                let meaningful = is_meaningful_change(tracked.status.as_ref(), status.as_ref());
+                // Store every poll, even a no-op one, so `fetched_at` tracks
+                // when we last heard from GitHub rather than when the PR last
+                // changed. The UI fades a status once it goes stale — that's
+                // meant to flag a wedged poller, not a PR nobody has touched
+                // in a day.
+                tracked.status = status.clone();
+                if meaningful {
+                    applied.changed.push(result.clone());
                 }
             }
-        };
-        let meaningful = is_meaningful_change(slot.as_ref(), result.status.as_ref());
-        // Store every poll, even a no-op one, so `fetched_at` tracks when we
-        // last heard from GitHub rather than when the PR last changed. The
-        // UI fades a status once it goes stale — that's meant to flag a
-        // wedged poller, not a PR nobody has touched in a day.
-        *slot = result.status.clone();
-        if meaningful {
-            changed.push(result.clone());
         }
     }
-    changed
+    applied
 }
 
 /// Compare two statuses ignoring `fetched_at`. Emit only on real changes so
@@ -582,13 +653,28 @@ mod tests {
         }
     }
 
-    /// Parse a single-branch-target response and hand back just the status.
+    /// The PR node out of a fixture: the branch ref's first associated PR, or
+    /// the merged fallback.
+    fn pr_node(data: &Value) -> Option<&Value> {
+        fn first(connection: Option<&Value>) -> Option<&Value> {
+            connection?.get("nodes")?.as_array()?.first()
+        }
+        let assoc = data
+            .get("q0")
+            .and_then(|r| r.get("ref"))
+            .and_then(|r| r.get("associatedPullRequests"));
+        first(assoc).or_else(|| first(data.get("q0").and_then(|r| r.get("mergedPrs"))))
+    }
+
+    /// Run a fixture's PR node through the projection.
+    ///
+    /// The fixtures below are shaped like a branch-scan response because that
+    /// is what they were written against, and a branch scan now selects only
+    /// `number`. What they exercise is [`parse_pr_node`] — the projection every
+    /// tracked PR goes through, however it came to be tracked — so the shape
+    /// they arrive in no longer matters.
     fn parse_one(data: &Value) -> Option<GithubPrStatus> {
-        parse_response(&[mk_target(0)], data)
-            .into_iter()
-            .next()
-            .expect("one result per target")
-            .status
+        parse_pr_node(pr_node(data)?)
     }
 
     #[test]
@@ -605,12 +691,62 @@ mod tests {
         assert_eq!(vars.get("q1_branch_name").unwrap(), "feat/foo-1");
     }
 
+    fn discovered(data: &Value) -> Option<u32> {
+        match parse_response(&[mk_target(0)], data)
+            .remove(0)
+            .outcome
+        {
+            PollOutcome::Discovered(n) => n,
+            PollOutcome::Status { .. } => panic!("a branch target discovers"),
+        }
+    }
+
+    #[test]
+    fn branch_scan_reads_the_associated_pr_number() {
+        let data = json!({
+            "q0": { "ref": { "associatedPullRequests": { "nodes": [{ "number": 42 }] } } }
+        });
+        assert_eq!(discovered(&data), Some(42));
+    }
+
+    /// A branch deleted on merge nulls the `ref`, but the PR record survives
+    /// and is still queryable by branch name.
+    #[test]
+    fn branch_scan_falls_back_to_the_merged_pr_number() {
+        let data = json!({
+            "q0": {
+                "ref": null,
+                "mergedPrs": { "nodes": [{ "number": 41 }] }
+            }
+        });
+        assert_eq!(discovered(&data), Some(41));
+    }
+
     #[test]
     fn parse_no_branch_returns_none() {
-        let data = json!({ "q0": { "ref": null } });
-        let parsed = parse_response(&[mk_target(0)], &data);
-        assert_eq!(parsed.len(), 1);
-        assert!(parsed[0].status.is_none());
+        assert_eq!(discovered(&json!({ "q0": { "ref": null } })), None);
+    }
+
+    #[test]
+    fn branch_scan_with_no_pr_at_all_discovers_nothing() {
+        let data = json!({
+            "q0": {
+                "ref": { "associatedPullRequests": { "nodes": [] } },
+                "mergedPrs": { "nodes": [] }
+            }
+        });
+        assert_eq!(discovered(&data), None);
+    }
+
+    /// A scan is a lookup, not a status fetch — pulling the full selection here
+    /// would fetch every branch PR twice a tick, once by branch and once by
+    /// number.
+    #[test]
+    fn branch_scan_query_asks_only_for_the_number() {
+        let (q, _) = build_query(&[mk_target(0)]);
+        assert!(q.contains("associatedPullRequests"));
+        assert!(!q.contains("reviewThreads"));
+        assert!(!q.contains("statusCheckRollup"));
     }
 
     #[test]
@@ -1370,8 +1506,7 @@ mod tests {
             }
         });
         let target = mk_target_kind(0, TargetKind::Pr(512));
-        let result = parse_response(&[target], &data).remove(0);
-        let status = result.status.expect("should parse");
+        let status = status_of(parse_response(&[target], &data).remove(0)).expect("should parse");
         assert_eq!(status.pr_number, 512);
         assert_eq!(status.head_branch.as_deref(), Some("feat/second-branch"));
         assert_eq!(status.checks, ChecksRollup::Success);
@@ -1383,8 +1518,30 @@ mod tests {
         // A detached-or-bogus number comes back as `pullRequest: null`.
         let data = json!({ "q0": { "pullRequest": null } });
         let target = mk_target_kind(0, TargetKind::Pr(999));
-        let result = parse_response(&[target], &data).remove(0);
-        assert!(result.status.is_none());
+        assert!(status_of(parse_response(&[target], &data).remove(0)).is_none());
+    }
+
+    fn status_of(result: PollResult) -> Option<GithubPrStatus> {
+        match result.outcome {
+            PollOutcome::Status { status, .. } => status,
+            PollOutcome::Discovered(_) => panic!("a Pr target fetches status"),
+        }
+    }
+
+    fn status_result(number: u32, status: Option<GithubPrStatus>) -> PollResult {
+        PollResult {
+            workspace_id: "ws-0".into(),
+            repo_key: "frontend".into(),
+            outcome: PollOutcome::Status { number, status },
+        }
+    }
+
+    fn discovery_result(number: Option<u32>) -> PollResult {
+        PollResult {
+            workspace_id: "ws-0".into(),
+            repo_key: "frontend".into(),
+            outcome: PollOutcome::Discovered(number),
+        }
     }
 
     fn mk_status(number: u32) -> GithubPrStatus {
@@ -1406,7 +1563,7 @@ mod tests {
         }
     }
 
-    fn mk_state_with_attached(number: u32) -> AppState {
+    fn mk_state_tracking(numbers: &[u32]) -> AppState {
         AppState {
             workspaces: vec![crate::state::Workspace {
                 id: "ws-0".into(),
@@ -1416,12 +1573,15 @@ mod tests {
                     repo_key: "frontend".into(),
                     worktree_path: "/tmp/wt/frontend".into(),
                     setup_script_ran_at: None,
-                    github: None,
-                    attached_prs: vec![crate::state::AttachedPr {
-                        number,
-                        attached_at: Utc::now(),
-                        status: None,
-                    }],
+                    prs: numbers
+                        .iter()
+                        .map(|n| crate::state::TrackedPr {
+                            number: *n,
+                            tracked_at: Utc::now(),
+                            status: None,
+                        })
+                        .collect(),
+                    dismissed: Vec::new(),
                     created_branch: true,
                 }],
                 sessions: Vec::new(),
@@ -1439,71 +1599,99 @@ mod tests {
     }
 
     #[test]
-    fn apply_writes_pr_result_to_the_attached_slot() {
-        let mut state = mk_state_with_attached(512);
+    fn apply_writes_each_status_to_its_own_tracked_pr() {
+        let mut state = mk_state_tracking(&[10, 512]);
         let results = vec![
-            PollResult {
-                workspace_id: "ws-0".into(),
-                repo_key: "frontend".into(),
-                kind: TargetKind::Branch("feat/foo-0".into()),
-                status: Some(mk_status(10)),
-            },
-            PollResult {
-                workspace_id: "ws-0".into(),
-                repo_key: "frontend".into(),
-                kind: TargetKind::Pr(512),
-                status: Some(mk_status(512)),
-            },
+            status_result(10, Some(mk_status(10))),
+            status_result(512, Some(mk_status(512))),
         ];
-        let changed = apply_results(&mut state, &results);
-        assert_eq!(changed.len(), 2);
+        let applied = apply_results(&mut state, &results);
+        assert_eq!(applied.changed.len(), 2);
 
         let link = &state.workspaces[0].repo_links[0];
-        // The branch PR and the attached PR land in separate slots.
-        assert_eq!(link.github.as_ref().unwrap().pr_number, 10);
-        assert_eq!(link.attached_prs[0].status.as_ref().unwrap().pr_number, 512);
+        assert_eq!(link.tracked(10).unwrap().status.as_ref().unwrap().pr_number, 10);
+        assert_eq!(
+            link.tracked(512).unwrap().status.as_ref().unwrap().pr_number,
+            512
+        );
     }
 
     #[test]
-    fn apply_ignores_pr_result_with_no_matching_attachment() {
+    fn apply_ignores_a_status_for_an_untracked_number() {
         // The user detached the PR between building the query and applying it.
-        let mut state = mk_state_with_attached(512);
-        let results = vec![PollResult {
-            workspace_id: "ws-0".into(),
-            repo_key: "frontend".into(),
-            kind: TargetKind::Pr(777),
-            status: Some(mk_status(777)),
-        }];
-        let changed = apply_results(&mut state, &results);
-        assert!(changed.is_empty());
-        assert!(state.workspaces[0].repo_links[0].attached_prs[0]
-            .status
-            .is_none());
+        let mut state = mk_state_tracking(&[512]);
+        let applied = apply_results(&mut state, &[status_result(777, Some(mk_status(777)))]);
+        assert!(applied.changed.is_empty());
+        let link = &state.workspaces[0].repo_links[0];
+        assert_eq!(link.prs.len(), 1);
+        assert!(link.tracked(512).unwrap().status.is_none());
+    }
+
+    /// The automatic half of tracking: a scan finds a number nobody asked for
+    /// by hand, and it becomes an ordinary tracked PR awaiting its status.
+    #[test]
+    fn a_scan_starts_tracking_a_new_number() {
+        let mut state = mk_state_tracking(&[]);
+        let applied = apply_results(&mut state, &[discovery_result(Some(42))]);
+        assert_eq!(applied.discovered.len(), 1);
+        assert_eq!(applied.discovered[0].number, 42);
+        // No status yet — the poller's follow-up pass fills it this same tick.
+        assert!(applied.changed.is_empty());
+        let link = &state.workspaces[0].repo_links[0];
+        assert_eq!(link.prs.len(), 1);
+        assert_eq!(link.prs[0].number, 42);
+    }
+
+    #[test]
+    fn a_scan_finding_a_pr_we_already_track_does_nothing() {
+        let mut state = mk_state_tracking(&[42]);
+        let applied = apply_results(&mut state, &[discovery_result(Some(42))]);
+        assert!(applied.discovered.is_empty());
+        assert_eq!(state.workspaces[0].repo_links[0].prs.len(), 1);
+    }
+
+    /// The reason detach has to be remembered: a scan runs every tick and would
+    /// otherwise put the branch's PR straight back.
+    #[test]
+    fn a_scan_does_not_resurrect_a_detached_pr() {
+        let mut state = mk_state_tracking(&[42]);
+        state.workspaces[0].repo_links[0].untrack(42);
+        let applied = apply_results(&mut state, &[discovery_result(Some(42))]);
+        assert!(applied.discovered.is_empty());
+        assert!(state.workspaces[0].repo_links[0].prs.is_empty());
+    }
+
+    /// A branch with no PR takes nothing away. Tracking ends at detach, not at
+    /// whatever the branch happens to point to now — which is what makes an
+    /// automatically-added PR behave like a hand-attached one.
+    #[test]
+    fn an_empty_scan_leaves_tracked_prs_alone() {
+        let mut state = mk_state_tracking(&[42]);
+        apply_results(&mut state, &[status_result(42, Some(mk_status(42)))]);
+        let applied = apply_results(&mut state, &[discovery_result(None)]);
+        assert!(applied.discovered.is_empty());
+        let link = &state.workspaces[0].repo_links[0];
+        assert_eq!(link.prs.len(), 1);
+        assert!(link.tracked(42).unwrap().status.is_some());
     }
 
     /// A PR nobody has touched still has to look freshly polled, or the UI
     /// fades it as stale while the poller is working perfectly.
     #[test]
     fn apply_advances_fetched_at_without_emitting() {
-        let mut state = mk_state_with_attached(512);
+        let mut state = mk_state_tracking(&[512]);
         let mut first = mk_status(512);
         first.fetched_at = Utc::now() - chrono::Duration::hours(6);
-        state.workspaces[0].repo_links[0].attached_prs[0].status = Some(first.clone());
+        state.workspaces[0].repo_links[0].prs[0].status = Some(first.clone());
 
         let mut polled = first.clone();
         polled.fetched_at = Utc::now();
-        let results = vec![PollResult {
-            workspace_id: "ws-0".into(),
-            repo_key: "frontend".into(),
-            kind: TargetKind::Pr(512),
-            status: Some(polled.clone()),
-        }];
 
         // Nothing about the PR changed, so the frontend hears nothing...
-        let changed = apply_results(&mut state, &results);
-        assert!(changed.is_empty());
+        let applied = apply_results(&mut state, &[status_result(512, Some(polled.clone()))]);
+        assert!(applied.changed.is_empty());
         // ...but the timestamp still moves.
-        let stored = state.workspaces[0].repo_links[0].attached_prs[0]
+        let stored = state.workspaces[0].repo_links[0].prs[0]
             .status
             .as_ref()
             .unwrap();
@@ -1512,19 +1700,15 @@ mod tests {
     }
 
     #[test]
-    fn pr_result_event_carries_the_number() {
-        let result = PollResult {
-            workspace_id: "ws-0".into(),
-            repo_key: "frontend".into(),
-            kind: TargetKind::Pr(512),
-            status: None,
-        };
-        assert_eq!(result.event()["pr_number"], json!(512));
+    fn a_status_event_always_names_its_pr() {
+        let result = status_result(512, None);
+        assert_eq!(result.event().unwrap()["pr_number"], json!(512));
+    }
 
-        let branch = PollResult {
-            kind: TargetKind::Branch("feat/foo-0".into()),
-            ..result
-        };
-        assert_eq!(branch.event()["pr_number"], Value::Null);
+    /// A scan has no status to report, so it produces no event — the follow-up
+    /// fetch it triggers is what the UI hears about.
+    #[test]
+    fn a_discovery_produces_no_event() {
+        assert!(discovery_result(Some(42)).event().is_none());
     }
 }

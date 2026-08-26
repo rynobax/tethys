@@ -791,19 +791,6 @@ button.danger.primary:hover:not(:disabled) {
   font-family: "SF Mono", ui-monospace, monospace;
 }
 
-.ready-banner {
-  background: color-mix(in oklab, #a371f7 14%, var(--bg));
-  border: 1px solid color-mix(in oklab, #a371f7 40%, transparent);
-  border-radius: 6px;
-  padding: 10px 14px;
-  margin-bottom: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  font-size: 13px;
-}
-
 .inline-confirm {
   background: color-mix(in oklab, var(--danger) 10%, var(--bg));
   border: 1px solid color-mix(in oklab, var(--danger) 40%, transparent);

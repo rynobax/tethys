@@ -2,10 +2,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::Deserialize;
 use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::error::{AppError, AppResult};
+use crate::github::GithubPrStatus;
 use crate::state::{AppState, Folder, Workspace, WorkspaceStatus};
 
 /// Where the `Store` announces that a workspace changed so the UI can refresh.
@@ -74,6 +76,7 @@ impl Store {
 
         if let Some(bytes) = raw.as_deref() {
             migrate_archived_to_folder(&mut initial, bytes);
+            migrate_pr_slots(&mut initial, bytes);
         }
 
         let stranded = initial.prune_missing_folders();
@@ -170,6 +173,17 @@ impl Store {
         let result = self.update_workspace_quiet(id, f).await?;
         self.notifier.workspace_changed(id);
         Ok(result)
+    }
+
+    /// Announce a workspace as changed without editing it.
+    ///
+    /// For writes that went through [`Store::mutate`], which spans many
+    /// workspaces and so can't notify per workspace on its own. The poller
+    /// needs it: its `status_changed` event can only update a PR the frontend
+    /// already knows about, so a tick that starts *tracking* a PR has to tell
+    /// the UI the list itself grew.
+    pub fn notify_workspace_changed(&self, id: &str) {
+        self.notifier.workspace_changed(id);
     }
 
     /// [`Store::update_workspace`] without the notification.
@@ -287,6 +301,86 @@ fn migrate_archived_to_folder(state: &mut AppState, raw: &[u8]) {
     }
     state.folders.push(folder);
     info!(count = moved, "migrated archived workspaces into a folder");
+}
+
+/// Fold the retired two-slot PR layout — `github` for the workspace's own
+/// branch, `attached_prs` for everything else — into `RepoLink::prs`.
+///
+/// Same shape as [`migrate_archived_to_folder`], and for the same reason: read
+/// the old fields off the raw JSON so `RepoLink` carries no trace of a split
+/// that no longer exists, and let the first flush end the migration for good.
+///
+/// The branch PR goes first, which is where it has always been drawn. It is
+/// also the one entry that can collide: a PR could sit in `github` and in
+/// `attached_prs` at once if it was hand-attached just before the poller found
+/// it by branch, so `track` is what merges them rather than a plain push.
+fn migrate_pr_slots(state: &mut AppState, raw: &[u8]) {
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(raw) else {
+        return;
+    };
+    let Some(workspaces) = json.get("workspaces").and_then(|w| w.as_array()) else {
+        return;
+    };
+
+    let mut migrated = 0usize;
+    for ws_json in workspaces {
+        let Some(id) = ws_json.get("id").and_then(|i| i.as_str()) else {
+            continue;
+        };
+        let Some(links) = ws_json.get("repo_links").and_then(|l| l.as_array()) else {
+            continue;
+        };
+        for link_json in links {
+            let Some(repo_key) = link_json.get("repo_key").and_then(|k| k.as_str()) else {
+                continue;
+            };
+            let branch_pr: Option<GithubPrStatus> = link_json
+                .get("github")
+                .filter(|g| !g.is_null())
+                .and_then(|g| serde_json::from_value(g.clone()).ok());
+            let attached: Vec<OldAttachedPr> = link_json
+                .get("attached_prs")
+                .and_then(|a| serde_json::from_value(a.clone()).ok())
+                .unwrap_or_default();
+            if branch_pr.is_none() && attached.is_empty() {
+                continue;
+            }
+
+            let Some(link) = state
+                .workspaces
+                .iter_mut()
+                .find(|w| w.id == id)
+                .and_then(|w| w.link_mut(repo_key))
+            else {
+                continue;
+            };
+            // Only ever fills an empty list: a file already carrying `prs` has
+            // been through this, and its old fields are gone.
+            if !link.prs.is_empty() {
+                continue;
+            }
+            if let Some(status) = branch_pr {
+                link.track(status.pr_number, Some(status));
+                migrated += 1;
+            }
+            for old in attached {
+                link.track(old.number, old.status);
+                migrated += 1;
+            }
+        }
+    }
+    if migrated > 0 {
+        info!(count = migrated, "migrated PRs into the tracked-PR list");
+    }
+}
+
+/// The retired `attached_prs` entry, read only by [`migrate_pr_slots`]. Named
+/// apart from `TrackedPr` because the field it keyed on was `attached_at`.
+#[derive(Deserialize)]
+struct OldAttachedPr {
+    number: u32,
+    #[serde(default)]
+    status: Option<GithubPrStatus>,
 }
 
 #[cfg(test)]
@@ -629,6 +723,114 @@ mod tests {
         let again = fixture_with(Some(migrated)).await;
         let folders = again.store.read(|s| s.folders.clone()).await;
         assert_eq!(folders.len(), 1, "one Archived folder, not two");
+    }
+
+    /// A `state.json` from the two-slot era: PR 7 in the branch slot, PR 8
+    /// attached by hand, and PR 7 *also* still sitting in `attached_prs` from
+    /// before the poller caught up.
+    fn two_slot_state_json() -> String {
+        let pr = |number: u32, branch: &str| {
+            format!(
+                r#"{{
+                    "pr_number": {number},
+                    "url": "https://github.com/me/api/pull/{number}",
+                    "state": "open",
+                    "is_draft": false,
+                    "checks": "success",
+                    "unresolved_threads": 0,
+                    "head_branch": "{branch}",
+                    "head_sha": "sha{number}",
+                    "fetched_at": "2026-05-01T09:00:00Z"
+                }}"#
+            )
+        };
+        format!(
+            r#"{{
+            "workspaces": [
+                {{
+                    "id": "ws-0",
+                    "branch": "feat/thing",
+                    "created_at": "2026-04-01T12:00:00Z",
+                    "status": {{"kind": "ready"}},
+                    "repo_links": [
+                        {{
+                            "repo_key": "api",
+                            "worktree_path": "/tmp/ws-0/api",
+                            "setup_script_ran_at": null,
+                            "github": {branch_pr},
+                            "attached_prs": [
+                                {{
+                                    "number": 8,
+                                    "attached_at": "2026-05-01T10:00:00Z",
+                                    "status": {other_pr}
+                                }},
+                                {{
+                                    "number": 7,
+                                    "attached_at": "2026-05-01T08:00:00Z",
+                                    "status": null
+                                }}
+                            ]
+                        }}
+                    ]
+                }}
+            ]
+        }}"#,
+            branch_pr = pr(7, "feat/thing"),
+            other_pr = pr(8, "feat/stacked"),
+        )
+    }
+
+    #[tokio::test]
+    async fn boot_folds_both_pr_slots_into_one_list() {
+        let f = fixture_with_raw(&two_slot_state_json()).await;
+        let link = f
+            .store
+            .read(|s| s.workspaces[0].repo_links[0].clone())
+            .await;
+        // The branch PR keeps its place at the front, and the duplicate copy of
+        // it that was in `attached_prs` collapses into the same entry.
+        assert_eq!(
+            link.prs.iter().map(|p| p.number).collect::<Vec<_>>(),
+            vec![7, 8]
+        );
+        assert_eq!(link.prs[0].status.as_ref().unwrap().pr_number, 7);
+        assert_eq!(link.prs[1].status.as_ref().unwrap().pr_number, 8);
+        assert!(link.dismissed.is_empty());
+    }
+
+    /// The first flush drops the old fields, so every later boot is a no-op —
+    /// and a file that already carries `prs` is left exactly as it is.
+    #[tokio::test]
+    async fn a_migrated_file_is_not_migrated_again() {
+        let raw = r#"{
+            "workspaces": [
+                {
+                    "id": "ws-0",
+                    "branch": "feat/thing",
+                    "created_at": "2026-04-01T12:00:00Z",
+                    "status": {"kind": "ready"},
+                    "repo_links": [
+                        {
+                            "repo_key": "api",
+                            "worktree_path": "/tmp/ws-0/api",
+                            "setup_script_ran_at": null,
+                            "prs": [{"number": 9, "tracked_at": "2026-05-01T09:00:00Z", "status": null}],
+                            "dismissed": [7]
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let f = fixture_with_raw(raw).await;
+        let link = f
+            .store
+            .read(|s| s.workspaces[0].repo_links[0].clone())
+            .await;
+        assert_eq!(
+            link.prs.iter().map(|p| p.number).collect::<Vec<_>>(),
+            vec![9]
+        );
+        assert_eq!(link.dismissed, vec![7]);
     }
 
     #[tokio::test]

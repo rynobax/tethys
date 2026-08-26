@@ -102,7 +102,11 @@ pub struct DetachPrArgs {
     pub pr_number: u32,
 }
 
-/// Stop tracking a manually-attached PR. Nothing on GitHub is touched.
+/// Stop tracking a PR. Nothing on GitHub is touched.
+///
+/// Works on any tracked PR, including the one branch discovery added — which is
+/// the whole reason [`RepoLink::untrack`] remembers the number. Without that,
+/// detaching the PR for the workspace's own branch would last 45 seconds.
 #[tauri::command]
 pub async fn detach_pr(
     store: State<'_, Arc<Store>>,
@@ -113,7 +117,7 @@ pub async fn detach_pr(
             let link = ws.link_mut(&args.repo_key).ok_or_else(|| {
                 AppError::Other(format!("workspace has no worktree for {}", args.repo_key))
             })?;
-            link.attached_prs.retain(|a| a.number != args.pr_number);
+            link.untrack(args.pr_number);
             Ok(())
         })
         .await?;

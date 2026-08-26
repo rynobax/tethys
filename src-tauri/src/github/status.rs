@@ -52,9 +52,10 @@ pub struct GithubPrStatus {
     #[serde(default)]
     pub review_decision: ReviewDecision,
     pub unresolved_threads: u32,
-    /// The PR's head branch. Only interesting for manually-attached PRs, where
-    /// it's the one thing that tells two PRs on the same repo link apart.
-    /// `None` for statuses persisted before this field existed.
+    /// The PR's head branch. What tells two PRs on the same repo link apart,
+    /// and what `attach` reads to report whether a linked PR is the one for the
+    /// workspace's own branch. `None` for statuses persisted before this field
+    /// existed.
     #[serde(default)]
     pub head_branch: Option<String>,
     /// Where the PR sits in a `gh stack`, if it's in one. `None` both for a

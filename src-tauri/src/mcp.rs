@@ -205,7 +205,7 @@ async fn link_pr(services: &McpServices, req: LinkPr) -> Response {
             repo_key: attached.repo_key,
             number: attached.status.pr_number,
             url: attached.status.url,
-            is_branch_pr: attached.slot == github::AttachSlot::BranchPr,
+            is_branch_pr: attached.is_branch_pr,
         },
         Err(e) => {
             warn!(error = %e, "pr link refused");
