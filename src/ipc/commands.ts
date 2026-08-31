@@ -277,7 +277,13 @@ export const removeOrphanDir = (path: string) =>
 
 export const runPurgeNow = () => invoke<void>("run_purge_now");
 
-export const openReposConfig = () => invoke<void>("open_repos_config");
+/** The Tethys-owned locations the Configuration panel can open. */
+export type ConfigLocation = "repos_config" | "worktree_root" | "clone_dir";
+
+export const openConfigLocation = (location: ConfigLocation) =>
+  invoke<void>("open_config_location", { location });
+
+export const cloneDirPath = () => invoke<string>("clone_dir_path");
 
 // ── misc ───────────────────────────────────────────────────────────────────
 

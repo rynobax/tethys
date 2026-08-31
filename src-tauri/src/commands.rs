@@ -187,18 +187,65 @@ fn open_workspace_in_editor(path: &Path) -> AppResult<()> {
     Ok(())
 }
 
+/// Where the base clones every worktree is branched off live.
+///
+/// Display-only companion to [`ConfigLocation::CloneDir`]: the Configuration
+/// panel shows each path beside the row that opens it, and this is the one
+/// path the frontend can't already read off the registry.
 #[tauri::command]
-pub fn open_repos_config(paths: State<'_, Paths>) -> AppResult<()> {
-    let path = paths.repos_config_file();
-    if !path.exists() {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, starter_template())?;
-        info!(?path, "wrote starter repos.toml");
-    }
+pub fn clone_dir_path(paths: State<'_, Paths>) -> PathBuf {
+    paths.repos_clone_dir()
+}
 
-    open_in_editor(&path)
+/// A Tethys-owned location the Configuration panel can open.
+///
+/// Named rather than passed as a path, so the only things openable this way are
+/// the three Tethys itself knows about.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigLocation {
+    /// `repos.toml`. Written from the starter template first if absent — this
+    /// is the way out of the "repos not configured" notice.
+    ReposConfig,
+    /// The registry's `worktree_root`, where per-workspace worktrees live.
+    WorktreeRoot,
+    /// The base clones every worktree is branched off.
+    CloneDir,
+}
+
+#[tauri::command]
+pub fn open_config_location(
+    location: ConfigLocation,
+    paths: State<'_, Paths>,
+    registry: State<'_, Arc<RegistryLoad>>,
+) -> AppResult<()> {
+    match location {
+        ConfigLocation::ReposConfig => {
+            let path = paths.repos_config_file();
+            if !path.exists() {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, starter_template())?;
+                info!(?path, "wrote starter repos.toml");
+            }
+            open_in_editor(&path)
+        }
+        // Both directories go through the workspace opener rather than
+        // `open -a`, for the reason spelled out there: each is a pile of full
+        // checkouts, and a fresh window per open multiplies the whole
+        // extension-host / TS-server stack.
+        ConfigLocation::WorktreeRoot => {
+            open_workspace_in_editor(&registry.require()?.worktree_root)
+        }
+        ConfigLocation::CloneDir => {
+            // Nothing has been cloned yet on a fresh install, and opening a
+            // missing path is an error rather than an empty window.
+            let path = paths.repos_clone_dir();
+            std::fs::create_dir_all(&path)?;
+            open_workspace_in_editor(&path)
+        }
+    }
 }
 
 #[tauri::command]

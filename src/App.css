@@ -1900,6 +1900,29 @@ li.is-dragging {
   align-self: flex-start;
 }
 
+/* The label is the open affordance — it sheds the button chrome so the row
+   reads as it did before, and the path beside it stays plain selectable text
+   rather than becoming part of a click target. */
+.system-status-modal .status-list .path-label {
+  align-self: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.system-status-modal .status-list .path-label:hover,
+.system-status-modal .status-list .path-label:focus-visible {
+  color: var(--fg);
+  text-decoration-style: solid;
+}
+
 .modal-tabs {
   display: flex;
   gap: 4px;

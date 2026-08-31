@@ -819,7 +819,7 @@ function RegistryNotice({
 }) {
   const openConfig = async () => {
     try {
-      await api.openReposConfig();
+      await api.openConfigLocation("repos_config");
     } catch (e) {
       alert(String(e));
     }

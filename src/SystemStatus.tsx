@@ -202,6 +202,14 @@ function StatusTab({
   onDiscrepancyChange: () => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
+  // Fixed for the life of the process, so one fetch when the tab mounts.
+  const [cloneDir, setCloneDir] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .cloneDirPath()
+      .then(setCloneDir, (e) => console.error("clone_dir_path:", e));
+  }, []);
 
   const cancelDelete = async (id: WorkspaceId) => {
     setBusy(`cancel:${id}`);
@@ -237,9 +245,9 @@ function StatusTab({
     }
   };
 
-  const openConfig = async () => {
+  const openLocation = async (location: api.ConfigLocation) => {
     try {
-      await api.openReposConfig();
+      await api.openConfigLocation(location);
     } catch (e) {
       alert(String(e));
     }
@@ -253,26 +261,32 @@ function StatusTab({
       />
 
       <section>
-        <div className="section-header">
-          <h4>Configuration</h4>
-          <button type="button" onClick={openConfig}>
-            Open repos.toml
-          </button>
-        </div>
+        <h4>Configuration</h4>
         {registry ? (
           <ul className="status-list">
             <li>
-              <div className="status-row">
-                <span className="muted">repos.toml</span>
-                <code>{registry.path}</code>
-              </div>
+              <PathRow
+                label="repos.toml"
+                path={registry.path}
+                onOpen={() => openLocation("repos_config")}
+              />
             </li>
             {registry.kind === "ok" && (
               <li>
-                <div className="status-row">
-                  <span className="muted">worktree_root</span>
-                  <code>{registry.registry.worktree_root}</code>
-                </div>
+                <PathRow
+                  label="worktree_root"
+                  path={registry.registry.worktree_root}
+                  onOpen={() => openLocation("worktree_root")}
+                />
+              </li>
+            )}
+            {cloneDir && (
+              <li>
+                <PathRow
+                  label="base clones"
+                  path={cloneDir}
+                  onOpen={() => openLocation("clone_dir")}
+                />
               </li>
             )}
           </ul>
@@ -353,6 +367,33 @@ function StatusTab({
         )}
       </section>
     </>
+  );
+}
+
+/** A Tethys-owned path, with its label as the only thing that opens it — the
+ *  Configuration section carries no separate "open" button, and the path
+ *  itself stays plain selectable text so it can be copied. */
+function PathRow({
+  label,
+  path,
+  onOpen,
+}: {
+  label: string;
+  path: string;
+  onOpen: () => void;
+}) {
+  return (
+    <div className="status-row">
+      <button
+        type="button"
+        className="path-label"
+        title={`Open ${label} in the editor`}
+        onClick={onOpen}
+      >
+        {label}
+      </button>
+      <code>{path}</code>
+    </div>
   );
 }
 
