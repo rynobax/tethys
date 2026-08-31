@@ -13,6 +13,7 @@ mod inprogress;
 mod job;
 mod logging;
 mod mcp;
+mod memwatch;
 mod paths;
 mod pending_permissions;
 mod probe;
@@ -82,6 +83,9 @@ pub fn run() {
             app.manage(LoggingGuard(guard));
 
             info!(data_dir = ?paths.data_dir, "tethys starting up");
+
+            // Before anything heavy, so a hang during boot is still sampled.
+            memwatch::spawn();
 
             if let Err(e) = registry::write_schema(&paths.repos_schema_file()) {
                 error!(error = %e, "failed to write repos.schema.json");

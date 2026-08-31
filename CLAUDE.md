@@ -122,16 +122,22 @@ Two log sinks, filtered independently (`logging.rs`):
 
 ### Memory watchdog
 
-`~/.local/bin/memwatch.sh` (outside this repo) samples system + per-app memory every 20s into `~/memwatch/samples.tsv`, and dumps `~/memwatch/snap-<ts>.txt` when iTerm2 >1.2GB or VS Code >5GB. Snapshots carry top-30 RSS, every tty and its command, `vmmap -summary` for iTerm2, and a tethys log tail. Start with `nohup memwatch.sh 20 &`, stop with `pkill -f memwatch.sh`.
+`scripts/memwatch.sh` samples system + per-app memory every 20s into `~/memwatch/samples.tsv`, and dumps `~/memwatch/snap-<ts>.txt` when a threshold trips. **Tethys launches it at boot** (`memwatch.rs`) — it was never running when a hang happened otherwise. `TETHYS_MEMWATCH=off` disables it, an integer overrides the interval. `~/.local/bin/memwatch.sh` is a symlink to the repo copy.
 
-Written to chase an intermittent "iTerm2 eats all the RAM" report. Findings from 8.5k samples over 5 days (2026-08-13 → 08-18):
+Tethys owns only the *start*. The script is a singleton on a pidfile, and detaches into a subshell ignoring `SIGHUP`/`SIGINT`, so it survives both the `pnpm tauri dev` that launched it and Tethys itself — Tethys is one of the suspects, and a watchdog that dies with the suspect cannot record the aftermath. Stop it with `pkill -f memwatch.sh`.
 
-- **iTerm2 was never the problem** — max 225MB, mean 111MB. Never came close to tripping.
-- **Tethys is not a heavy process** — mean 66MB, and its stderr output measured ~236 KB/hour before the `warn` default landed. (One 770MB sample is the script catching a concurrent `cargo` build under `target/`, not the app.)
+Memory is **`phys_footprint`** — the number Activity Monitor shows — read from one `top -l 1` per sample and joined against `ps` for full argv, so every column in a row describes one instant. The original script used `ps rss`, which excludes compressed and swapped pages and so understates by 2-3x *exactly* under the pressure worth catching.
+
+Columns worth knowing: `claude_mb` counts the session processes, `claude_kids_mb` everything they spawned (test runners — the thing usually costing the memory); `tethys_mb` is the Rust binary tree, `webview_mb` the `WebKit.WebContent` process where a Tauri app's UI memory actually lives, `devstack_mb` the `pnpm tauri dev` tree minus Tethys; `dockervm_mb` catches `docker compose` test runs, which land in a VM descended from no session. Trips are on *system pressure* — any single process >8GB, swap >12GB, free <250MB — not on a named app.
+
+The pre-2026-08-31 findings below came from the RSS-based script and understate every figure. Treat the iTerm2 line as unproven rather than settled: it was measured with the wrong instrument.
+
+- **iTerm2 was never the problem** — max 225MB, mean 111MB (RSS; footprint measures ~280MB idle).
+- **Tethys is not a heavy process** — mean 66MB, and its stderr output measured ~236 KB/hour before the `warn` default landed.
 - **The machine is chronically oversubscribed** on 24GB: swap mean 7.1GB / max 13.3GB, compressor mean 7GB, free pages routinely <100MB. Chrome is the largest consumer (mean 4.0GB, max 7.2GB).
-- **The one trip was VS Code**, 5.3GB at 2026-08-14T14:42 — a burst of Code renderer + extension-host processes <15s old, alongside `oxlint --lsp` running inside a Tethys worktree (`~/code/worktrees/<workspace>/nl-frontend`). Each worktree is a full checkout with its own `node_modules`, so opening several in VS Code multiplies the LSP/TS-server stack with nothing shared.
+- **The one trip was VS Code**, 5.3GB at 2026-08-14T14:42, alongside `oxlint --lsp` in a Tethys worktree. Each worktree is a full checkout with its own `node_modules`, so opening several in VS Code multiplies the LSP/TS-server stack with nothing shared.
 
-So: apparent app-level memory blowups here are most likely symptoms of system-wide pressure, not a leak in Tethys. Check `samples.tsv` before assuming otherwise.
+First minute of the rewritten script contradicts the "nothing here is big" reading: `claude_kids_mb` hit 11.2GB while `dockervm_mb` sat at 6.8GB and Chrome at 6.4GB — ~30GB of footprint on a 24GB machine. Sessions running test suites are a live suspect; check `claude_kids_mb` and `dockervm_mb` before blaming Tethys.
 
 ## Rust
 
