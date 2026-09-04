@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::artifacts::Artifact;
 use crate::github::GithubPrStatus;
 
 pub type WorkspaceId = String;
@@ -89,6 +90,11 @@ pub struct Workspace {
     /// unfinished drafts.
     #[serde(default)]
     pub blocked_by: Option<WorkspaceId>,
+    /// Diagrams and pages sessions in this workspace produced, oldest first
+    /// (see `artifacts.rs`). Persisted so a design you drew yesterday is still
+    /// there after a restart; bounded by the per-workspace cap.
+    #[serde(default)]
+    pub artifacts: Vec<Artifact>,
 }
 
 /// A named place in the sidebar that holds workspaces.
@@ -317,6 +323,7 @@ impl Workspace {
             script_runs: Vec::new(),
             notes: String::new(),
             blocked_by: None,
+            artifacts: Vec::new(),
         }
     }
 
@@ -536,6 +543,7 @@ mod tests {
             script_runs: Vec::new(),
             notes: String::new(),
             blocked_by: None,
+            artifacts: Vec::new(),
         }
     }
 

@@ -9,20 +9,21 @@
 //! the exact source, unwrapped and complete, where the screen shows whatever
 //! fraction of it is currently in the viewport.
 //!
-//! Artifacts belong to the workspace, live only in memory, and are capped per
-//! workspace — a diagram goes stale the moment the design moves on, so
-//! persisting them would turn `state.json` into a graveyard.
+//! Artifacts belong to the workspace and are stored on it, so they ride along
+//! in `state.json` and go when the workspace goes. The per-workspace cap is
+//! what keeps that from becoming a graveyard: the design moves on, and the
+//! twelve most recent things it produced is plenty of history.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::sessions::SessionId;
 use crate::state::WorkspaceId;
+use crate::store::Store;
 
 /// Most artifacts one workspace keeps; the oldest is evicted past this.
 pub const CAP_PER_WORKSPACE: usize = 12;
@@ -30,14 +31,14 @@ pub const CAP_PER_WORKSPACE: usize = 12;
 /// Longest label a tab gets. Anything longer is cut with an ellipsis.
 const LABEL_MAX_CHARS: usize = 18;
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ArtifactKind {
     Diagram { source: String },
     Page { path: PathBuf },
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Artifact {
     pub id: String,
     /// The session that produced it. Informational — artifacts are shown per
@@ -59,30 +60,26 @@ pub struct ArtifactChanged {
     pub artifact_id: Option<String>,
 }
 
+/// The artifact operations, over the workspace they belong to.
 pub struct ArtifactStore {
-    by_workspace: Mutex<HashMap<WorkspaceId, Vec<Artifact>>>,
+    store: Arc<Store>,
     app: AppHandle,
 }
 
 impl ArtifactStore {
-    pub fn new(app: AppHandle) -> Self {
-        Self {
-            by_workspace: Mutex::new(HashMap::new()),
-            app,
-        }
+    pub fn new(app: AppHandle, store: Arc<Store>) -> Self {
+        Self { store, app }
     }
 
-    pub fn list(&self, workspace_id: &str) -> Vec<Artifact> {
-        self.by_workspace
-            .lock()
-            .unwrap()
-            .get(workspace_id)
-            .cloned()
+    pub async fn list(&self, workspace_id: &str) -> Vec<Artifact> {
+        self.store
+            .with_workspace(workspace_id, |ws| ws.artifacts.clone())
+            .await
             .unwrap_or_default()
     }
 
     /// Record every mermaid fence in a finished reply.
-    pub fn record_diagrams(&self, workspace_id: &str, session_id: &str, message: &str) {
+    pub async fn record_diagrams(&self, workspace_id: &str, session_id: &str, message: &str) {
         let diagrams = extract_diagrams(message);
         if diagrams.is_empty() {
             debug!(workspace_id, "Stop with no mermaid fences");
@@ -94,12 +91,13 @@ impl ArtifactStore {
                 session_id,
                 label,
                 ArtifactKind::Diagram { source },
-            );
+            )
+            .await;
         }
     }
 
     /// Record an HTML file a tool just wrote, if it lives inside the workspace.
-    pub fn record_page(
+    pub async fn record_page(
         &self,
         workspace_id: &str,
         session_id: &str,
@@ -126,27 +124,40 @@ impl ArtifactStore {
             session_id,
             label,
             ArtifactKind::Page { path },
-        );
+        )
+        .await;
     }
 
-    pub fn dismiss(&self, workspace_id: &str, artifact_id: &str) {
-        {
-            let mut map = self.by_workspace.lock().unwrap();
-            let Some(list) = map.get_mut(workspace_id) else { return };
-            list.retain(|a| a.id != artifact_id);
+    pub async fn dismiss(&self, workspace_id: &str, artifact_id: &str) {
+        let result = self
+            .store
+            .update_workspace_quiet(workspace_id, |ws| {
+                ws.artifacts.retain(|a| a.id != artifact_id);
+                Ok(())
+            })
+            .await;
+        match result {
+            Ok(()) => self.emit(workspace_id, None),
+            Err(e) => warn!(workspace_id, error = %e, "dismissing artifact"),
         }
-        self.emit(workspace_id, None);
     }
 
-    fn record(&self, workspace_id: &str, session_id: &str, label: String, kind: ArtifactKind) {
-        let id = {
-            let mut map = self.by_workspace.lock().unwrap();
-            let list = map.entry(workspace_id.to_string()).or_default();
-            upsert(list, session_id, label, kind)
-        };
-        self.emit(workspace_id, Some(id));
+    async fn record(&self, workspace_id: &str, session_id: &str, label: String, kind: ArtifactKind) {
+        let result = self
+            .store
+            .update_workspace_quiet(workspace_id, |ws| {
+                Ok(upsert(&mut ws.artifacts, session_id, label, kind))
+            })
+            .await;
+        match result {
+            Ok(id) => self.emit(workspace_id, Some(id)),
+            Err(e) => warn!(workspace_id, error = %e, "recording artifact"),
+        }
     }
 
+    /// `artifact:changed` is the panel's own signal, separate from
+    /// `workspace:changed`, so an arrival doesn't refetch every workspace and
+    /// can carry which artifact to select.
     fn emit(&self, workspace_id: &str, artifact_id: Option<String>) {
         let _ = self.app.emit(
             "artifact:changed",
@@ -156,6 +167,17 @@ impl ArtifactStore {
             },
         );
     }
+}
+
+/// Drop Pages whose file is gone. Runs at boot: a page is a path, and the
+/// file behind it may have been cleaned up while Tethys wasn't looking.
+pub fn prune_missing_pages(artifacts: &mut Vec<Artifact>) -> usize {
+    let before = artifacts.len();
+    artifacts.retain(|a| match &a.kind {
+        ArtifactKind::Page { path } => path.exists(),
+        ArtifactKind::Diagram { .. } => true,
+    });
+    before - artifacts.len()
 }
 
 /// Insert an artifact, or bump the one already there for the same thing.
@@ -519,6 +541,19 @@ flowchart LR
             command,
             cwd: Some("/w/repo"),
         }
+    }
+
+    #[test]
+    fn boot_prune_drops_pages_whose_file_is_gone_and_keeps_diagrams() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("here.html");
+        std::fs::write(&present, "<p/>").unwrap();
+        let mut list = Vec::new();
+        upsert(&mut list, "s", "d".into(), ArtifactKind::Diagram { source: "graph TD".into() });
+        upsert(&mut list, "s", "here".into(), ArtifactKind::Page { path: present });
+        upsert(&mut list, "s", "gone".into(), ArtifactKind::Page { path: dir.path().join("gone.html") });
+        assert_eq!(prune_missing_pages(&mut list), 1);
+        assert_eq!(list.iter().map(|a| a.label.as_str()).collect::<Vec<_>>(), ["d", "here"]);
     }
 
     #[test]

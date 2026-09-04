@@ -82,7 +82,7 @@ The collapsible pane on the right of a workspace, holding its Notes and its Arti
 _Avoid_: Inspector, drawer, right pane
 
 **Artifact**:
-Something a session produced that Tethys can show rather than leave as text in the terminal. Belongs to the workspace the session runs in, and kept only while Tethys is running.
+Something a session produced that Tethys can show rather than leave as text in the terminal. Belongs to the workspace the session runs in, and kept with it until closed or crowded out by newer ones.
 _Avoid_: Output, attachment
 
 **Diagram**:

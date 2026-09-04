@@ -498,7 +498,7 @@ impl SessionSupervisor {
         // debug line in `record_diagrams` is how we'd find out that matters.
         let Some(message) = msg.last_assistant_message.as_deref() else { return };
         let Some((ws_id, sess_id)) = self.resolve_session(&msg).await else { return };
-        self.artifacts.record_diagrams(&ws_id, &sess_id, message);
+        self.artifacts.record_diagrams(&ws_id, &sess_id, message).await;
     }
 
     /// PostToolUse for a file tool on an `.html` path, or a Bash `open` of
@@ -518,7 +518,7 @@ impl SessionSupervisor {
             .read(|s| s.find_workspace(&ws_id).and_then(|w| w.root_buf()))
             .await;
         let Some(root) = root else { return };
-        self.artifacts.record_page(&ws_id, &sess_id, &root, &path);
+        self.artifacts.record_page(&ws_id, &sess_id, &root, &path).await;
     }
 
     async fn handle_notify(&self, msg: HookMessage) {

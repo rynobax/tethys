@@ -178,7 +178,8 @@ pub fn run() {
             }
 
             // --- session supervisor + UDS listener --------------------------
-            let artifacts: Arc<ArtifactStore> = Arc::new(ArtifactStore::new(handle.clone()));
+            let artifacts: Arc<ArtifactStore> =
+                Arc::new(ArtifactStore::new(handle.clone(), store.clone()));
             app.manage(artifacts.clone());
             let supervisor: Arc<SessionSupervisor> = Arc::new(SessionSupervisor::new(
                 handle.clone(),

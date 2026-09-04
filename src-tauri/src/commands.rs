@@ -1314,11 +1314,11 @@ pub async fn set_workspace_notes(
 }
 
 #[tauri::command]
-pub fn list_artifacts(
+pub async fn list_artifacts(
     artifacts: State<'_, Arc<ArtifactStore>>,
     workspace_id: WorkspaceId,
-) -> Vec<Artifact> {
-    artifacts.list(&workspace_id)
+) -> AppResult<Vec<Artifact>> {
+    Ok(artifacts.list(&workspace_id).await)
 }
 
 /// Open a Page in the default browser. Goes through `open` rather than
@@ -1327,13 +1327,14 @@ pub fn list_artifacts(
 /// Only a path the store already holds can be opened, so the frontend can't
 /// hand over an arbitrary one.
 #[tauri::command]
-pub fn open_artifact(
+pub async fn open_artifact(
     artifacts: State<'_, Arc<ArtifactStore>>,
     workspace_id: WorkspaceId,
     artifact_id: String,
 ) -> AppResult<()> {
     let path = artifacts
         .list(&workspace_id)
+        .await
         .into_iter()
         .find(|a| a.id == artifact_id)
         .and_then(|a| match a.kind {
@@ -1349,12 +1350,13 @@ pub fn open_artifact(
 }
 
 #[tauri::command]
-pub fn dismiss_artifact(
+pub async fn dismiss_artifact(
     artifacts: State<'_, Arc<ArtifactStore>>,
     workspace_id: WorkspaceId,
     artifact_id: String,
-) {
-    artifacts.dismiss(&workspace_id, &artifact_id);
+) -> AppResult<()> {
+    artifacts.dismiss(&workspace_id, &artifact_id).await;
+    Ok(())
 }
 
 /// Newtype so `claude_bin` can be managed in Tauri state.

@@ -113,6 +113,15 @@ impl Store {
             }
         }
 
+        let missing_pages: usize = initial
+            .workspaces
+            .iter_mut()
+            .map(|w| crate::artifacts::prune_missing_pages(&mut w.artifacts))
+            .sum();
+        if missing_pages > 0 {
+            info!(count = missing_pages, "dropped page artifacts whose files are gone");
+        }
+
         let store = Arc::new(Self {
             state: Arc::new(RwLock::new(initial)),
             dirty: Arc::new(Notify::new()),
@@ -416,6 +425,7 @@ mod tests {
             script_runs: Vec::new(),
             notes: String::new(),
             blocked_by: None,
+            artifacts: Vec::new(),
         }
     }
 

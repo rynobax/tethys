@@ -1694,6 +1694,7 @@ mod tests {
                 script_runs: Vec::new(),
                 notes: String::new(),
             blocked_by: None,
+            artifacts: Vec::new(),
             }],
             ..Default::default()
         }

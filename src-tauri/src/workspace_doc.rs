@@ -303,6 +303,7 @@ mod tests {
             script_runs: Vec::new(),
             notes: "private scratchpad".into(),
             blocked_by: None,
+            artifacts: Vec::new(),
         }
     }
 
