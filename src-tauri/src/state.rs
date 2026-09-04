@@ -9,7 +9,6 @@ use crate::github::GithubPrStatus;
 pub type WorkspaceId = String;
 pub type FolderId = String;
 pub type SessionId = String;
-pub type ScriptRunId = String;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppState {
@@ -36,11 +35,19 @@ pub struct Workspace {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub repo_links: Vec<RepoLink>,
+    /// The workspace's one Claude session, or `None` until the first start.
+    ///
+    /// One per workspace, by design. Several used to be allowed — a tab bar
+    /// of chips, each with its own cwd, binary override and hidden flag — and
+    /// the whole apparatus went unused: every workspace in practice ran
+    /// exactly one. `Store::load` folds the old `sessions` list down to this.
     #[serde(default)]
-    pub sessions: Vec<ClaudeSessionMeta>,
-    /// Override the entry-point binary name for sessions in this workspace
+    pub session: Option<ClaudeSessionMeta>,
+    /// Override the entry-point binary name for this workspace's session
     /// (e.g. `claude-hipaa`). `None` falls back to the app-wide `claude`
-    /// resolved at boot.
+    /// resolved at boot. Chosen at creation, inherited by handoffs, and
+    /// changed after the fact by `switch_claude_binary`, which restarts the
+    /// session under the new one.
     #[serde(default)]
     pub claude_binary: Option<String>,
     /// Where this workspace came from. Defaults to `Ui` for everything
@@ -71,11 +78,6 @@ pub struct Workspace {
     /// every pre-existing workspace via the field default.
     #[serde(default)]
     pub status: WorkspaceStatus,
-    /// Running script processes (started via the per-repo `scripts` registry
-    /// entries). Persisted so they can be reattached after a Tethys restart.
-    /// Removed when a script exits or the user stops it.
-    #[serde(default)]
-    pub script_runs: Vec<ScriptRunMeta>,
     /// Freeform user notes for this workspace, edited via the notes overlay in
     /// the detail pane. Empty string when unset.
     #[serde(default)]
@@ -122,23 +124,6 @@ impl Folder {
             collapsed: false,
         }
     }
-}
-
-/// A live script process attached to a workspace+repo. The Tethys `id` is
-/// also the tmux session name on the Tethys server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScriptRunMeta {
-    pub id: ScriptRunId,
-    /// Repo this script was configured under. Used to look up the command
-    /// in the registry on reattach and to label the chip.
-    pub repo_key: String,
-    /// Key from `Repo.scripts` — the user-facing name (e.g. `dev`).
-    pub script_name: String,
-    /// Command string at start time. Cached so the chip still labels itself
-    /// correctly if the user edits the registry after starting the script.
-    pub command: String,
-    pub cwd: PathBuf,
-    pub started_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -239,28 +224,18 @@ pub struct TrackedPr {
     pub status: Option<GithubPrStatus>,
 }
 
+/// The persisted half of a workspace's Claude session: what it takes to find
+/// the tmux pane again (`id` is the tmux session name) or, failing that, to
+/// `claude --resume` the conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeSessionMeta {
     pub id: SessionId,
-    /// `None` => session was started at the workspace root (the parent dir
-    /// containing each repo's worktree subdir), not inside any one repo.
-    #[serde(default)]
-    pub repo_key: Option<String>,
+    /// Where Claude runs. Fixed when the session is first started — see
+    /// [`Workspace::session_cwd`] — and reused by every restart after, so a
+    /// resumed conversation keeps its project directory.
     pub cwd: PathBuf,
     pub claude_session_id: Option<String>,
     pub transcript_path: Option<PathBuf>,
-    /// Per-session override for the claude entry-point binary (e.g.
-    /// `claude-hipaa`). Set when the user switches the binary for an
-    /// in-progress chat; takes precedence over the workspace-level
-    /// `Workspace::claude_binary`. `None` (fresh sessions, or state.json from
-    /// before this field existed) falls back to the workspace default.
-    #[serde(default)]
-    pub claude_binary: Option<String>,
-    /// User-set: when true, the session chip is filtered out of the
-    /// default chip bar. The tmux session and supervisor handle stay
-    /// live — hide is purely cosmetic.
-    #[serde(default)]
-    pub hidden: bool,
     /// Last turn state observed via Claude Code hooks. Persisted so the
     /// "your turn" indicator survives Tethys restarts. `None` until the
     /// first hook lands (or for state.json from before this field existed).
@@ -314,13 +289,12 @@ impl Workspace {
             branch,
             created_at: Utc::now(),
             repo_links: Vec::new(),
-            sessions: Vec::new(),
+            session: None,
             claude_binary,
             origin,
             deleted_at: None,
             folder,
             status: WorkspaceStatus::Creating,
-            script_runs: Vec::new(),
             notes: String::new(),
             blocked_by: None,
             artifacts: Vec::new(),
@@ -361,8 +335,35 @@ impl Workspace {
         self.link(repo_key).is_some()
     }
 
+    /// The session, if it is the one with this id.
+    ///
+    /// Turn signals and hooks name a session by id, and one for a session
+    /// this workspace no longer runs — the previous one, killed by a binary
+    /// switch, whose exit hook fires late — must not be written onto the
+    /// current one.
     pub fn session_mut(&mut self, session_id: &str) -> Option<&mut ClaudeSessionMeta> {
-        self.sessions.iter_mut().find(|m| m.id == session_id)
+        self.session.as_mut().filter(|m| m.id == session_id)
+    }
+
+    /// Where this workspace's Claude session runs.
+    ///
+    /// Wherever the existing session already runs, so a restart keeps its
+    /// project directory. Otherwise the sole repo's worktree when there is
+    /// exactly one repo — Claude then sees that repo's own `CLAUDE.md` and
+    /// settings as its project — else the workspace root, the one directory
+    /// that contains every worktree. Adding a second repo later does not move
+    /// a session out of the worktree it started in.
+    ///
+    /// `None` when there is nothing on disk to run in: a draft, or a
+    /// workspace whose provisioning failed.
+    pub fn session_cwd(&self) -> Option<PathBuf> {
+        if let Some(session) = &self.session {
+            return Some(session.cwd.clone());
+        }
+        match self.repo_links.as_slice() {
+            [only] => Some(only.worktree_path.clone()),
+            _ => self.root_buf(),
+        }
     }
 }
 
@@ -534,16 +535,27 @@ mod tests {
                     created_branch: true,
                 })
                 .collect(),
-            sessions: Vec::new(),
+            session: None,
             claude_binary: None,
             origin: Origin::Ui,
             deleted_at: None,
             folder: None,
             status: WorkspaceStatus::Ready,
-            script_runs: Vec::new(),
             notes: String::new(),
             blocked_by: None,
             artifacts: Vec::new(),
+        }
+    }
+
+    fn session(id: &str, cwd: &str) -> ClaudeSessionMeta {
+        ClaudeSessionMeta {
+            id: id.into(),
+            cwd: PathBuf::from(cwd),
+            claude_session_id: None,
+            transcript_path: None,
+            runtime_state: None,
+            notification_type: None,
+            turn_acknowledged: false,
         }
     }
 
@@ -574,27 +586,45 @@ mod tests {
     }
 
     #[test]
-    fn links_and_sessions_are_found_by_key() {
+    fn links_are_found_by_key() {
         let mut ws = workspace_with_links(&["/wt/ws-1/frontend"]);
         assert!(ws.has_link("repo0"));
         assert!(!ws.has_link("nope"));
         assert_eq!(ws.link("repo0").map(|l| l.repo_key.as_str()), Some("repo0"));
         assert!(ws.link_mut("nope").is_none());
+    }
 
-        ws.sessions.push(ClaudeSessionMeta {
-            id: "sess-1".into(),
-            repo_key: None,
-            cwd: PathBuf::from("/wt/ws-1"),
-            claude_session_id: None,
-            transcript_path: None,
-            claude_binary: None,
-            hidden: false,
-            runtime_state: None,
-            notification_type: None,
-            turn_acknowledged: false,
-        });
+    /// A signal for a session this workspace no longer runs must not land on
+    /// the one it does.
+    #[test]
+    fn session_mut_answers_only_for_the_current_session() {
+        let mut ws = workspace_with_links(&["/wt/ws-1/frontend"]);
+        assert!(ws.session_mut("sess-1").is_none());
+        ws.session = Some(session("sess-1", "/wt/ws-1"));
         assert!(ws.session_mut("sess-1").is_some());
         assert!(ws.session_mut("sess-2").is_none());
+    }
+
+    /// One repo: Claude runs in that worktree, so the repo's own CLAUDE.md
+    /// and settings are its project. More than one: the root, the only
+    /// directory that holds them all.
+    #[test]
+    fn a_fresh_session_runs_in_the_sole_worktree_else_the_root() {
+        let one = workspace_with_links(&["/wt/ws-1/frontend"]);
+        assert_eq!(one.session_cwd(), Some(PathBuf::from("/wt/ws-1/frontend")));
+        let two = workspace_with_links(&["/wt/ws-1/frontend", "/wt/ws-1/backend"]);
+        assert_eq!(two.session_cwd(), Some(PathBuf::from("/wt/ws-1")));
+        assert_eq!(workspace_with_links(&[]).session_cwd(), None);
+    }
+
+    /// Adding a repo to a workspace whose session started inside the sole
+    /// worktree doesn't move it: a restart must resume in the directory the
+    /// conversation belongs to.
+    #[test]
+    fn an_existing_session_keeps_its_cwd() {
+        let mut ws = workspace_with_links(&["/wt/ws-1/frontend", "/wt/ws-1/backend"]);
+        ws.session = Some(session("sess-1", "/wt/ws-1/frontend"));
+        assert_eq!(ws.session_cwd(), Some(PathBuf::from("/wt/ws-1/frontend")));
     }
 
     #[test]
@@ -638,7 +668,9 @@ mod tests {
     #[test]
     fn pre_turn_state_session_round_trips() {
         // ClaudeSessionMeta from before runtime_state/notification_type were
-        // added must still deserialize.
+        // added must still deserialize. The old `sessions` list is folded
+        // into `session` by `Store::load`, not by serde, so this is the
+        // post-migration shape.
         let raw = r#"{
             "workspaces": [
                 {
@@ -646,51 +678,21 @@ mod tests {
                     "branch": "feat/foo",
                     "created_at": "2026-04-01T12:00:00Z",
                     "repo_links": [],
-                    "sessions": [
-                        {
-                            "id": "sess-1",
-                            "cwd": "/tmp/wt/abc-123/frontend",
-                            "claude_session_id": null,
-                            "transcript_path": null
-                        }
-                    ]
+                    "session": {
+                        "id": "sess-1",
+                        "cwd": "/tmp/wt/abc-123/frontend",
+                        "claude_session_id": null,
+                        "transcript_path": null
+                    }
                 }
             ]
         }"#;
         let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
-        let session = &parsed.workspaces[0].sessions[0];
+        let session = parsed.workspaces[0].session.as_ref().expect("session");
+        assert_eq!(session.id, "sess-1");
         assert!(session.runtime_state.is_none());
         assert!(session.notification_type.is_none());
         assert!(!session.turn_acknowledged);
-        assert!(session.claude_binary.is_none());
-    }
-
-    #[test]
-    fn session_claude_binary_round_trips() {
-        let raw = r#"{
-            "workspaces": [
-                {
-                    "id": "abc-123",
-                    "branch": "feat/foo",
-                    "created_at": "2026-04-01T12:00:00Z",
-                    "repo_links": [],
-                    "sessions": [
-                        {
-                            "id": "sess-1",
-                            "cwd": "/tmp/wt/abc-123/frontend",
-                            "claude_session_id": "claude-sid",
-                            "transcript_path": null,
-                            "claude_binary": "claude-hipaa"
-                        }
-                    ]
-                }
-            ]
-        }"#;
-        let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
-        assert_eq!(
-            parsed.workspaces[0].sessions[0].claude_binary.as_deref(),
-            Some("claude-hipaa")
-        );
     }
 
     #[test]
@@ -833,23 +835,6 @@ mod tests {
         let bytes = serde_json::to_vec(&origin).expect("serialize");
         let back: Origin = serde_json::from_slice(&bytes).expect("deserialize");
         assert_eq!(origin, back);
-    }
-
-    #[test]
-    fn pre_script_runs_state_defaults_to_empty() {
-        // Workspaces persisted before script_runs was added must load with
-        // an empty Vec.
-        let raw = r#"{
-            "workspaces": [
-                {
-                    "id": "abc-123",
-                    "branch": "feat/foo",
-                    "created_at": "2026-04-01T12:00:00Z"
-                }
-            ]
-        }"#;
-        let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
-        assert!(parsed.workspaces[0].script_runs.is_empty());
     }
 
     #[test]

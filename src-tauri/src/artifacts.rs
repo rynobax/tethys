@@ -21,7 +21,6 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tracing::{debug, warn};
 
-use crate::sessions::SessionId;
 use crate::state::WorkspaceId;
 use crate::store::Store;
 
@@ -41,9 +40,6 @@ pub enum ArtifactKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Artifact {
     pub id: String,
-    /// The session that produced it. Informational — artifacts are shown per
-    /// workspace, not per session.
-    pub session_id: SessionId,
     pub label: String,
     #[serde(flatten)]
     pub kind: ArtifactKind,
@@ -79,31 +75,20 @@ impl ArtifactStore {
     }
 
     /// Record every mermaid fence in a finished reply.
-    pub async fn record_diagrams(&self, workspace_id: &str, session_id: &str, message: &str) {
+    pub async fn record_diagrams(&self, workspace_id: &str, message: &str) {
         let diagrams = extract_diagrams(message);
         if diagrams.is_empty() {
             debug!(workspace_id, "Stop with no mermaid fences");
             return;
         }
         for (label, source) in diagrams {
-            self.record(
-                workspace_id,
-                session_id,
-                label,
-                ArtifactKind::Diagram { source },
-            )
-            .await;
+            self.record(workspace_id, label, ArtifactKind::Diagram { source })
+                .await;
         }
     }
 
     /// Record an HTML file a tool just wrote, if it lives inside the workspace.
-    pub async fn record_page(
-        &self,
-        workspace_id: &str,
-        session_id: &str,
-        workspace_root: &Path,
-        path: &Path,
-    ) {
+    pub async fn record_page(&self, workspace_id: &str, workspace_root: &Path, path: &Path) {
         if !crate::reconcile::is_under(workspace_root, path) {
             debug!(
                 workspace_id,
@@ -119,13 +104,8 @@ impl ArtifactStore {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "page".to_string());
-        self.record(
-            workspace_id,
-            session_id,
-            label,
-            ArtifactKind::Page { path },
-        )
-        .await;
+        self.record(workspace_id, label, ArtifactKind::Page { path })
+            .await;
     }
 
     pub async fn dismiss(&self, workspace_id: &str, artifact_id: &str) {
@@ -142,11 +122,11 @@ impl ArtifactStore {
         }
     }
 
-    async fn record(&self, workspace_id: &str, session_id: &str, label: String, kind: ArtifactKind) {
+    async fn record(&self, workspace_id: &str, label: String, kind: ArtifactKind) {
         let result = self
             .store
             .update_workspace_quiet(workspace_id, |ws| {
-                Ok(upsert(&mut ws.artifacts, session_id, label, kind))
+                Ok(upsert(&mut ws.artifacts, label, kind))
             })
             .await;
         match result {
@@ -186,18 +166,16 @@ pub fn prune_missing_pages(artifacts: &mut Vec<Artifact>) -> usize {
 /// Claude edits five times is one tab that reloads, not five. Either way the
 /// artifact moves to the end — newest position — and the list is trimmed to
 /// the cap from the front. Returns the id of the artifact touched.
-fn upsert(list: &mut Vec<Artifact>, session_id: &str, label: String, kind: ArtifactKind) -> String {
+fn upsert(list: &mut Vec<Artifact>, label: String, kind: ArtifactKind) -> String {
     let existing = list.iter().position(|a| a.kind == kind);
     let artifact = match existing {
         Some(i) => {
             let mut a = list.remove(i);
             a.revision += 1;
-            a.session_id = session_id.to_string();
             a
         }
         None => Artifact {
             id: uuid::Uuid::new_v4().to_string(),
-            session_id: session_id.to_string(),
             label,
             kind,
             revision: 0,
@@ -509,9 +487,9 @@ flowchart LR
     #[test]
     fn same_diagram_bumps_instead_of_duplicating_and_moves_to_newest() {
         let mut list = Vec::new();
-        let a = upsert(&mut list, "s", "a".into(), ArtifactKind::Diagram { source: "A".into() });
-        let b = upsert(&mut list, "s", "b".into(), ArtifactKind::Diagram { source: "B".into() });
-        let again = upsert(&mut list, "s", "a2".into(), ArtifactKind::Diagram { source: "A".into() });
+        let a = upsert(&mut list, "a".into(), ArtifactKind::Diagram { source: "A".into() });
+        let b = upsert(&mut list, "b".into(), ArtifactKind::Diagram { source: "B".into() });
+        let again = upsert(&mut list, "a2".into(), ArtifactKind::Diagram { source: "A".into() });
         assert_eq!(a, again);
         assert_ne!(a, b);
         assert_eq!(list.len(), 2);
@@ -524,7 +502,7 @@ flowchart LR
     fn cap_evicts_the_oldest() {
         let mut list = Vec::new();
         for i in 0..(CAP_PER_WORKSPACE + 3) {
-            upsert(&mut list, "s", i.to_string(), ArtifactKind::Diagram { source: i.to_string() });
+            upsert(&mut list, i.to_string(), ArtifactKind::Diagram { source: i.to_string() });
         }
         assert_eq!(list.len(), CAP_PER_WORKSPACE);
         assert_eq!(list[0].label, "3");
@@ -549,9 +527,9 @@ flowchart LR
         let present = dir.path().join("here.html");
         std::fs::write(&present, "<p/>").unwrap();
         let mut list = Vec::new();
-        upsert(&mut list, "s", "d".into(), ArtifactKind::Diagram { source: "graph TD".into() });
-        upsert(&mut list, "s", "here".into(), ArtifactKind::Page { path: present });
-        upsert(&mut list, "s", "gone".into(), ArtifactKind::Page { path: dir.path().join("gone.html") });
+        upsert(&mut list, "d".into(), ArtifactKind::Diagram { source: "graph TD".into() });
+        upsert(&mut list, "here".into(), ArtifactKind::Page { path: present });
+        upsert(&mut list, "gone".into(), ArtifactKind::Page { path: dir.path().join("gone.html") });
         assert_eq!(prune_missing_pages(&mut list), 1);
         assert_eq!(list.iter().map(|a| a.label.as_str()).collect::<Vec<_>>(), ["d", "here"]);
     }

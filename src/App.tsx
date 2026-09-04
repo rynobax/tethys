@@ -15,7 +15,6 @@ import type {
   RegistryStatus,
   Repo,
   RepoLink,
-  ScriptInfo,
   SessionInfo,
   Theme,
   Workspace,
@@ -24,7 +23,6 @@ import type {
 import { GithubAuthFooter } from "./GithubAuthFooter";
 import { GithubChip, PrDetachButton } from "./GithubChip";
 import { JobLogPane } from "./JobLogPane";
-import { ScriptTerminal } from "./ScriptTerminal";
 import { SessionTerminal } from "./SessionTerminal";
 import { SidePanel } from "./SidePanel";
 import { Sidebar } from "./Sidebar";
@@ -41,7 +39,7 @@ import {
 import "./App.css";
 
 /** Selectable claude entry-point binaries, shared by the new-workspace form
- *  and the per-session "run with" switcher. First entry is the default. */
+ *  and the workspace header's "run with" switcher. First entry is the default. */
 const CLAUDE_BINARIES = ["claude", "claude-hipaa", "claude-unsafe"] as const;
 
 /** Bracketed-paste markers: Claude Code treats the wrapped bytes as pasted
@@ -75,34 +73,25 @@ function App() {
     Map<WorkspaceId, CreateWorkspaceArgs>
   >(new Map());
   /**
-   * Per-session attention state, tracked by listening to
+   * Per-workspace attention state, tracked by listening to
    * `session:turn_changed` globally so the sidebar dot doesn't need a
-   * sessions fetch per workspace.
+   * session fetch per workspace.
    *
    * Stores the backend's derived answers rather than the raw
    * running/runtime_state/turn_acknowledged triple. Deriving it here is what
-   * let the sidebar aggregate and the chip dot drift apart.
+   * let the sidebar and the detail pane drift apart.
    */
   const [turnStates, setTurnStates] = useState<
-    Map<string, { workspaceId: string; needsTurn: boolean; working: boolean }>
+    Map<WorkspaceId, { needsTurn: boolean; working: boolean }>
   >(new Map());
   /**
-   * Sessions for every workspace, cached so switching into a workspace
+   * Each workspace's live session, cached so switching into a workspace
    * shows the terminal immediately instead of flashing "Dormant" during
-   * the list_sessions round-trip. Populated eagerly on workspace load
-   * and kept in sync via session:* events.
+   * the get_session round-trip. Populated eagerly on workspace load and
+   * kept in sync via session:* events. `null` is a real answer: dormant.
    */
-  const [sessionsByWorkspace, setSessionsByWorkspace] = useState<
-    Map<WorkspaceId, SessionInfo[]>
-  >(new Map());
-  /**
-   * Per-workspace cache of live + recently-exited scripts. Same pattern as
-   * sessions: populated on workspace load, kept in sync via `script:*`
-   * events. A script can appear here with `running: false` (exited, awaiting
-   * user dismissal) or `running: true`.
-   */
-  const [scriptsByWorkspace, setScriptsByWorkspace] = useState<
-    Map<WorkspaceId, ScriptInfo[]>
+  const [sessionByWorkspace, setSessionByWorkspace] = useState<
+    Map<WorkspaceId, SessionInfo | null>
   >(new Map());
   /**
    * Draft "initial prompt" text the user types while a workspace is still
@@ -162,35 +151,25 @@ function App() {
     } = payload;
     setTurnStates((prev) => {
       const next = new Map(prev);
-      next.set(session_id, {
-        workspaceId: workspace_id,
-        needsTurn: needs_turn,
-        working,
-      });
+      next.set(workspace_id, { needsTurn: needs_turn, working });
       return next;
     });
-    // Keep the cached SessionInfo[] in sync so WorkspaceDetail sees the
-    // new runtime_state without a full re-fetch.
-    setSessionsByWorkspace((prev) => {
-      const list = prev.get(workspace_id);
-      if (!list) return prev;
+    // Keep the cached SessionInfo in sync so WorkspaceDetail sees the new
+    // runtime_state without a full re-fetch. A signal for a session that is
+    // no longer the workspace's (replaced by a binary switch) is skipped.
+    setSessionByWorkspace((prev) => {
+      const s = prev.get(workspace_id);
+      if (!s || s.id !== session_id) return prev;
       const next = new Map(prev);
-      next.set(
-        workspace_id,
-        list.map((s) =>
-          s.id === session_id
-            ? {
-                ...s,
-                runtime_state,
-                notification_type: notification_type ?? null,
-                turn_acknowledged,
-                running,
-                needs_turn,
-                working,
-              }
-            : s,
-        ),
-      );
+      next.set(workspace_id, {
+        ...s,
+        runtime_state,
+        notification_type: notification_type ?? null,
+        turn_acknowledged,
+        running,
+        needs_turn,
+        working,
+      });
       return next;
     });
   });
@@ -220,54 +199,33 @@ function App() {
   });
 
   const workspaceNeedsTurn = useCallback(
-    (w: Workspace): boolean =>
-      [...turnStates.values()].some(
-        (info) => info.workspaceId === w.id && info.needsTurn,
-      ),
+    (w: Workspace): boolean => turnStates.get(w.id)?.needsTurn ?? false,
     [turnStates],
   );
 
   const workspaceWorking = useCallback(
-    (w: Workspace): boolean =>
-      [...turnStates.values()].some(
-        (info) => info.workspaceId === w.id && info.working,
-      ),
+    (w: Workspace): boolean => turnStates.get(w.id)?.working ?? false,
     [turnStates],
   );
 
-  const runningScriptNamesFor = useCallback(
-    (w: Workspace): string[] => {
-      const scripts = scriptsByWorkspace.get(w.id);
-      if (!scripts) return [];
-      return scripts.filter((s) => s.running).map((s) => s.script_name);
-    },
-    [scriptsByWorkspace],
-  );
+  const handleClearTurn = useCallback((workspace: Workspace) => {
+    // Backend persists turn_acknowledged + emits session:turn_changed
+    // back, which updates turnStates. No optimistic local update needed —
+    // the round-trip is fast and the persisted flag is the source of truth.
+    api
+      .acknowledgeSessionTurn(workspace.id)
+      .catch((e) => console.error("acknowledge_session_turn failed:", e));
+  }, []);
 
-  const handleClearTurn = useCallback(
-    (workspace: Workspace) => {
-      // Backend persists turn_acknowledged + emits session:turn_changed
-      // back, which updates turnStates. No optimistic local update needed —
-      // the round-trip is fast and the persisted flag is the source of truth.
-      for (const [sessionId, info] of turnStates) {
-        if (info.workspaceId !== workspace.id || !info.needsTurn) continue;
-        api
-          .acknowledgeSessionTurn(workspace.id, sessionId)
-          .catch((e) => console.error("acknowledge_session_turn failed:", e));
-      }
-    },
-    [turnStates],
-  );
-
-  const refreshSessionsFor = useCallback(async (workspaceId: WorkspaceId) => {
+  const refreshSessionFor = useCallback(async (workspaceId: WorkspaceId) => {
     try {
-      const list = await api.listSessions(workspaceId);
-      setSessionsByWorkspace((prev) => {
+      const session = await api.getSession(workspaceId);
+      setSessionByWorkspace((prev) => {
         const next = new Map(prev);
-        next.set(workspaceId, list);
+        next.set(workspaceId, session);
         return next;
       });
-      // Seed turnStates from the listing. The backend restores turn state
+      // Seed turnStates from the snapshot. The backend restores turn state
       // from disk at boot but deliberately emits nothing (the frontend isn't
       // subscribed yet) — without this the sidebar dot stays dark across
       // restarts until the next live event fires.
@@ -276,46 +234,18 @@ function App() {
       // entry while this re-inserted a stale one. Both sides now read the
       // same derived flags, so they can't disagree.
       setTurnStates((prev) => {
-        let next: Map<
-          string,
-          { workspaceId: string; needsTurn: boolean; working: boolean }
-        > | null = null;
-        const ensure = () => {
-          if (!next) next = new Map(prev);
-          return next;
-        };
-        for (const s of list) {
-          const cur = prev.get(s.id);
-          if (
-            !cur ||
-            cur.workspaceId !== workspaceId ||
-            cur.needsTurn !== s.needs_turn ||
-            cur.working !== s.working
-          ) {
-            ensure().set(s.id, {
-              workspaceId,
-              needsTurn: s.needs_turn,
-              working: s.working,
-            });
-          }
+        const needsTurn = session?.needs_turn ?? false;
+        const working = session?.working ?? false;
+        const cur = prev.get(workspaceId);
+        if (cur && cur.needsTurn === needsTurn && cur.working === working) {
+          return prev;
         }
-        return next ?? prev;
-      });
-    } catch (e) {
-      console.error("list_sessions:", e);
-    }
-  }, []);
-
-  const refreshScriptsFor = useCallback(async (workspaceId: WorkspaceId) => {
-    try {
-      const list = await api.listScripts(workspaceId);
-      setScriptsByWorkspace((prev) => {
         const next = new Map(prev);
-        next.set(workspaceId, list);
+        next.set(workspaceId, { needsTurn, working });
         return next;
       });
     } catch (e) {
-      console.error("list_scripts:", e);
+      console.error("get_session:", e);
     }
   }, []);
 
@@ -332,18 +262,13 @@ function App() {
       setRegistry(reg);
       setDiscrepancies(disc);
       setError(null);
-      // Pre-load sessions + scripts for every workspace so switching in
-      // doesn't render a stale/empty list.
-      await Promise.all(
-        list.flatMap((w) => [
-          refreshSessionsFor(w.id),
-          refreshScriptsFor(w.id),
-        ]),
-      );
+      // Pre-load every workspace's session so switching in doesn't render
+      // a stale "Dormant" pane.
+      await Promise.all(list.map((w) => refreshSessionFor(w.id)));
     } catch (e) {
       setError(String(e));
     }
-  }, [refreshSessionsFor, refreshScriptsFor]);
+  }, [refreshSessionFor]);
 
   useEffect(() => {
     refresh();
@@ -351,21 +276,15 @@ function App() {
 
   useAppEvent("workspace:changed", () => refresh());
   useAppEvent("session:changed", (payload) => {
-    refreshSessionsFor(payload.workspace_id);
+    refreshSessionFor(payload.workspace_id);
   });
   useAppEvent("session:exit", (payload) => {
-    refreshSessionsFor(payload.workspace_id);
-  });
-  useAppEvent("script:changed", (payload) => {
-    refreshScriptsFor(payload.workspace_id);
-  });
-  useAppEvent("script:exit", (payload) => {
-    refreshScriptsFor(payload.workspace_id);
+    refreshSessionFor(payload.workspace_id);
   });
 
-  // Paste any draft initial-prompt into a workspace's first Claude session
-  // once it's up. `workspace:changed` fires (and refreshes `workspaces`) when
-  // the SessionStart hook populates `claude_session_id`, which is our signal
+  // Paste any draft initial-prompt into a workspace's Claude session once
+  // it's up. `workspace:changed` fires (and refreshes `workspaces`) when the
+  // SessionStart hook populates `claude_session_id`, which is our signal
   // that the TUI is ready to receive a paste.
   useEffect(() => {
     for (const [workspaceId, prompt] of draftPrompts) {
@@ -373,8 +292,8 @@ function App() {
       if (prompt.trim().length === 0) continue;
       const ws = workspaces.find((w) => w.id === workspaceId);
       if (!ws || ws.status.kind !== "ready") continue;
-      const session = ws.sessions.find((s) => s.claude_session_id !== null);
-      if (!session) continue;
+      const session = ws.session;
+      if (!session || session.claude_session_id === null) continue;
 
       flushedDraftsRef.current.add(workspaceId);
       const sessionId = session.id;
@@ -427,12 +346,11 @@ function App() {
         next.delete(workspaceId);
         return next;
       });
-      // Auto-start a Claude session: in the only repo when the workspace
-      // has just one, otherwise at the workspace root.
-      const repoKey =
-        ws.repo_links.length === 1 ? ws.repo_links[0].repo_key : null;
+      // Auto-start the workspace's Claude session. Where it runs — the
+      // only repo's worktree, or the workspace root — is the backend's
+      // call (`Workspace::session_cwd`).
       try {
-        await api.startClaudeSession(ws.id, repoKey);
+        await api.startClaudeSession(ws.id);
       } catch (e) {
         setError(`auto-start claude failed: ${String(e)}`);
       }
@@ -655,7 +573,6 @@ function App() {
               onSetBlocker={handleSetBlocker}
               workspaceNeedsTurn={workspaceNeedsTurn}
               workspaceWorking={workspaceWorking}
-              runningScriptNames={runningScriptNamesFor}
             />
           </div>
           <div className="sidebar-footer">
@@ -701,11 +618,7 @@ function App() {
           {!selectedRun && selected && selected.status.kind === "ready" && (
             <WorkspaceDetail
               workspace={selected}
-              sessions={sessionsByWorkspace.get(selected.id) ?? []}
-              scripts={scriptsByWorkspace.get(selected.id) ?? []}
-              registryRepos={
-                registry?.kind === "ok" ? registry.registry.repos : []
-              }
+              session={sessionByWorkspace.get(selected.id) ?? null}
               availableRepos={
                 registry?.kind === "ok"
                   ? registry.registry.repos.filter(
@@ -868,25 +781,9 @@ function RegistryNotice({
   );
 }
 
-/**
- * Discriminated tab key for the workspace's main pane. Sessions and scripts
- * share the chip bar — exactly one is "selected" at a time. The script
- * variant is keyed by `(repoKey, scriptName)` rather than the run id, so the
- * tab survives stop/start cycles (a new run gets a fresh id).
- */
-type SelectedTab =
-  | { kind: "session"; metaId: string }
-  | { kind: "script"; repoKey: string; scriptName: string };
-
-function scriptTabKey(repoKey: string, scriptName: string): string {
-  return `script:${repoKey}:${scriptName}`;
-}
-
 function WorkspaceDetail({
   workspace,
-  sessions,
-  scripts,
-  registryRepos,
+  session,
   availableRepos,
   notes,
   onNotesChange,
@@ -894,11 +791,8 @@ function WorkspaceDetail({
   onRepoAdded,
 }: {
   workspace: Workspace;
-  sessions: SessionInfo[];
-  scripts: ScriptInfo[];
-  /** Every repo in the registry — used to look up configured scripts for the
-   *  workspace's linked repos. */
-  registryRepos: Repo[];
+  /** The live half of the workspace's session; `null` while dormant. */
+  session: SessionInfo | null;
   availableRepos: Repo[];
   /** Live notes text for this workspace — the App-level draft when there is
    *  one, else the persisted `workspace.notes`. */
@@ -911,97 +805,20 @@ function WorkspaceDetail({
   const [showInfo, setShowInfo] = useState(false);
   const [addingRepo, setAddingRepo] = useState(false);
   const [attachingPr, setAttachingPr] = useState(false);
-  // Per-workspace selection. Derived on render (no effect), so switching
-  // back to a workspace paints the remembered pick immediately.
-  const [selectedByWorkspace, setSelectedByWorkspace] = useState<
-    Map<string, SelectedTab>
-  >(new Map());
-  const selectedTab = selectedByWorkspace.get(workspace.id) ?? null;
-  const selectedSessionId =
-    selectedTab?.kind === "session" ? selectedTab.metaId : null;
-  const setSelectedTab = (tab: SelectedTab | null) => {
-    setSelectedByWorkspace((prev) => {
-      const next = new Map(prev);
-      if (tab) next.set(workspace.id, tab);
-      else next.delete(workspace.id);
-      return next;
-    });
-  };
-  const selectSession = (id: string | null) => {
-    setSelectedTab(id ? { kind: "session", metaId: id } : null);
-  };
-  const selectScript = (repoKey: string, scriptName: string) => {
-    setSelectedTab({ kind: "script", repoKey, scriptName });
-  };
   const [error, setError] = useState<string | null>(null);
-  // Meta ids we've already auto-resumed this app-run — guards against
-  // retry loops if spawn fails, while still allowing a manual Resume
-  // click to try again.
-  const autoResumedRef = useRef<Set<string>>(new Set());
+  // Sessions already auto-opened this app-run — guards against a retry loop
+  // if the spawn fails, while a manual Resume click can still try again.
+  const autoOpenedRef = useRef<Set<string>>(new Set());
 
-  const liveById = new Map(sessions.map((s) => [s.id, s]));
-  // `workspace.sessions` is append-ordered on the backend, so the most
-  // recently started session sits last — i.e. on the right of the tab row.
-  const ordered = [...workspace.sessions];
-  const visibleOrdered = ordered.filter((m) => !m.hidden);
-  const hiddenOrdered = ordered.filter((m) => m.hidden);
-  const [showHidden, setShowHidden] = useState(false);
+  const meta = workspace.session;
 
-  // Build script chips: every configured (repo, script_name) becomes one
-  // chip. If there's a running/exited ScriptInfo for that pair it gets
-  // attached; otherwise the chip renders as idle.
-  const scriptChips: ScriptChipData[] = [];
-  for (const link of workspace.repo_links) {
-    const repo = registryRepos.find((r) => r.key === link.repo_key);
-    if (!repo) continue;
-    for (const [name, command] of Object.entries(repo.scripts ?? {})) {
-      const run =
-        scripts.find(
-          (s) => s.repo_key === link.repo_key && s.script_name === name,
-        ) ?? null;
-      scriptChips.push({
-        repoKey: link.repo_key,
-        scriptName: name,
-        command,
-        run,
-      });
-    }
-  }
-
-  const selectedScriptChip =
-    selectedTab?.kind === "script"
-      ? (scriptChips.find(
-          (c) =>
-            c.repoKey === selectedTab.repoKey &&
-            c.scriptName === selectedTab.scriptName,
-        ) ?? null)
-      : null;
-
-  // Effective session selection: only used when a session tab (or nothing)
-  // is selected. Prefer the user's explicit pick when it's still visible,
-  // else newest live, else newest. Newest is last in append order.
-  const candidates = showHidden ? ordered : visibleOrdered;
-  const effectiveSelected = (() => {
-    if (selectedTab?.kind === "script") return null;
-    if (selectedSessionId && candidates.some((m) => m.id === selectedSessionId))
-      return selectedSessionId;
-    const lastLive = [...candidates].reverse().find((m) => liveById.has(m.id));
-    return lastLive?.id ?? candidates[candidates.length - 1]?.id ?? null;
-  })();
-
-  const selected = effectiveSelected
-    ? (ordered.find((m) => m.id === effectiveSelected) ?? null)
-    : null;
-  const selectedLive = selected ? (liveById.get(selected.id) ?? null) : null;
-
-  // `repoKey === null` spawns at the workspace root (parent of every
-  // repo worktree) — only offered when the workspace has 2+ repos.
-  const startInRepo = async (repoKey: string | null) => {
+  // Start, Resume and Reconnect are one call: the backend reattaches,
+  // resumes, or starts fresh, whichever the session's state calls for.
+  const openSession = async () => {
     setBusy(true);
     setError(null);
     try {
-      const res = await api.startClaudeSession(workspace.id, repoKey);
-      selectSession(res.id);
+      await api.startClaudeSession(workspace.id);
       // App-level listener on `session:changed` refreshes the cache.
     } catch (e) {
       setError(String(e));
@@ -1010,20 +827,12 @@ function WorkspaceDetail({
     }
   };
 
-  // Acknowledge a single session's "your turn" indicator. The backend
-  // persists turn_acknowledged + emits session:turn_changed, which clears
-  // the chip dot (and folds into the workspace row aggregate).
-  const clearSessionTurn = (sessionId: string) => {
-    api
-      .acknowledgeSessionTurn(workspace.id, sessionId)
-      .catch((e) => console.error("acknowledge_session_turn failed:", e));
-  };
-
-  const setSessionHidden = async (sessionId: string, hidden: boolean) => {
+  // Restart the session under another entry-point binary, keeping history.
+  const switchBinary = async (binary: string) => {
     setBusy(true);
     setError(null);
     try {
-      await api.setClaudeSessionHidden(workspace.id, sessionId, hidden);
+      await api.switchClaudeBinary(workspace.id, binary);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -1031,72 +840,15 @@ function WorkspaceDetail({
     }
   };
 
-  const resumeMeta = async (metaId: string, repoKey: string | null) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await api.resumeClaudeSession(workspace.id, repoKey, metaId);
-      selectSession(res.id);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // Switch the entry-point binary for an in-progress chat. Restarts the
-  // session under the new binary via `claude --resume`, keeping history.
-  const switchBinary = async (metaId: string, binary: string) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await api.switchClaudeBinary(workspace.id, metaId, binary);
-      selectSession(res.id);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // Auto-resume the selected session when it's dormant but has a
-  // claude_session_id. `autoResumedRef` prevents a retry loop if the
-  // spawn fails — the user can still click Resume manually below.
+  // A dormant session with a saved conversation resumes without a click.
   useEffect(() => {
-    if (selectedTab?.kind === "script") return;
-    if (!selected || selectedLive) return;
-    if (!selected.claude_session_id) return;
-    if (autoResumedRef.current.has(selected.id)) return;
-    autoResumedRef.current.add(selected.id);
-    void resumeMeta(selected.id, selected.repo_key);
+    if (!meta || session) return;
+    if (!meta.claude_session_id) return;
+    if (autoOpenedRef.current.has(meta.id)) return;
+    autoOpenedRef.current.add(meta.id);
+    void openSession();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    selected?.id,
-    selectedLive?.id,
-    selected?.claude_session_id,
-    selectedTab?.kind,
-  ]);
-
-  const startScript = async (repoKey: string, scriptName: string) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.startScript(workspace.id, repoKey, scriptName);
-      selectScript(repoKey, scriptName);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const dismissScript = async (scriptId: string) => {
-    try {
-      await api.dismissScript(workspace.id, scriptId);
-    } catch (e) {
-      setError(String(e));
-    }
-  };
+  }, [meta?.id, meta?.claude_session_id, session?.id]);
 
   // The backend emits `workspace:changed`, which refreshes the chip row. It
   // also records the number as dismissed, so a PR detached from the workspace's
@@ -1110,13 +862,14 @@ function WorkspaceDetail({
     }
   };
 
-  const handleScriptChipClick = (chip: ScriptChipData) => {
-    if (!chip.run) {
-      void startScript(chip.repoKey, chip.scriptName);
-      return;
-    }
-    selectScript(chip.repoKey, chip.scriptName);
-  };
+  const openLabel = (verb: string) =>
+    busy ? (
+      <>
+        <Spinner /> {verb}…
+      </>
+    ) : (
+      verb
+    );
 
   return (
     <div className="workspace-detail">
@@ -1144,6 +897,11 @@ function WorkspaceDetail({
             </button>
           </h2>
           <div className="actions">
+            <BinaryMenu
+              current={workspace.claude_binary ?? CLAUDE_BINARIES[0]}
+              disabled={busy}
+              onSwitch={switchBinary}
+            />
             <button type="button" onClick={() => setShowInfo(true)}>
               Info
             </button>
@@ -1201,156 +959,64 @@ function WorkspaceDetail({
         )}
 
         <div className="session-pane">
-          <SessionBar
-            visibleSessions={visibleOrdered}
-            hiddenSessions={hiddenOrdered}
-            showHidden={showHidden}
-            onToggleShowHidden={() => setShowHidden((v) => !v)}
-            liveById={liveById}
-            repos={workspace.repo_links}
-            selectedId={effectiveSelected}
-            onSelect={selectSession}
-            onStartInRepo={startInRepo}
-            onSetHidden={setSessionHidden}
-            onClearTurn={clearSessionTurn}
-            workspaceBinary={workspace.claude_binary}
-            onSwitchBinary={switchBinary}
-            scriptChips={scriptChips}
-            selectedScriptKey={
-              selectedTab?.kind === "script"
-                ? scriptTabKey(selectedTab.repoKey, selectedTab.scriptName)
-                : null
-            }
-            showRepoOnScript={workspace.repo_links.length > 1}
-            onScriptChipClick={handleScriptChipClick}
-            onScriptChipDismiss={dismissScript}
-            busy={busy}
-          />
           {error && <div className="error-banner">{error}</div>}
-          {selectedScriptChip ? (
-            selectedScriptChip.run ? (
-              <>
-                {!selectedScriptChip.run.running && (
-                  <div className="session-exit-banner">
-                    <span>
-                      Script <code>{selectedScriptChip.scriptName}</code>{" "}
-                      exited.
-                    </span>
-                    <button
-                      type="button"
-                      className="primary"
-                      onClick={() =>
-                        startScript(
-                          selectedScriptChip.repoKey,
-                          selectedScriptChip.scriptName,
-                        )
-                      }
-                      disabled={busy}
-                    >
-                      Restart
-                    </button>
-                  </div>
-                )}
-                <ScriptTerminal scriptId={selectedScriptChip.run.id} />
-              </>
-            ) : (
-              <div className="session-dormant">
-                <p>
-                  Script <code>{selectedScriptChip.scriptName}</code> is not
-                  running.
-                </p>
-                <p className="muted">
-                  <code>{selectedScriptChip.command}</code>
-                </p>
-                <button
-                  type="button"
-                  className="primary"
-                  onClick={() =>
-                    startScript(
-                      selectedScriptChip.repoKey,
-                      selectedScriptChip.scriptName,
-                    )
-                  }
-                  disabled={busy}
-                >
-                  {busy ? (
-                    <>
-                      <Spinner /> Starting…
-                    </>
-                  ) : (
-                    "Start"
-                  )}
-                </button>
-              </div>
-            )
-          ) : selected ? (
-            selectedLive ? (
-              <>
-                {!selectedLive.running && (
-                  <div className="session-exit-banner">
-                    <span>Claude exited. Scrollback preserved below.</span>
-                    {selected.claude_session_id ? (
-                      <button
-                        type="button"
-                        className="primary"
-                        onClick={() =>
-                          resumeMeta(selected.id, selected.repo_key)
-                        }
-                        disabled={busy}
-                      >
-                        {busy ? (
-                          <>
-                            <Spinner /> Reconnecting…
-                          </>
-                        ) : (
-                          "Reconnect"
-                        )}
-                      </button>
-                    ) : (
-                      <span className="muted">
-                        No claude_session_id — can't reconnect.
-                      </span>
-                    )}
-                  </div>
-                )}
-                <SessionTerminal sessionId={selectedLive.id} />
-              </>
-            ) : (
-              <div className="session-dormant">
-                <p>
-                  This Claude session is dormant. Resume re-opens the
-                  conversation with <code>claude --resume</code>.
-                </p>
-                {selected.claude_session_id ? (
+          {session ? (
+            <>
+              {!session.running && (
+                <div className="session-exit-banner">
+                  <span>Claude exited. Scrollback preserved below.</span>
                   <button
                     type="button"
                     className="primary"
-                    onClick={() => resumeMeta(selected.id, selected.repo_key)}
+                    onClick={openSession}
                     disabled={busy}
                   >
-                    {busy ? (
-                      <>
-                        <Spinner /> Resuming…
-                      </>
-                    ) : (
-                      "Resume"
-                    )}
+                    {meta?.claude_session_id
+                      ? openLabel("Reconnect")
+                      : openLabel("Start again")}
                   </button>
+                </div>
+              )}
+              <SessionTerminal sessionId={session.id} />
+            </>
+          ) : meta ? (
+            <div className="session-dormant">
+              <p>
+                This workspace's Claude session is dormant.{" "}
+                {meta.claude_session_id ? (
+                  <>
+                    Resume re-opens the conversation with{" "}
+                    <code>claude --resume</code>.
+                  </>
                 ) : (
-                  <p className="muted">
-                    No <code>claude_session_id</code> was captured for this
-                    session — can't resume. (If you just started it, wait a
-                    second for the SessionStart hook.)
-                  </p>
+                  "No conversation was saved, so Resume starts a fresh one."
                 )}
-              </div>
-            )
-          ) : (
-            <div className="session-pane empty">
-              <p className="muted">No Claude sessions in this workspace yet.</p>
-              <p className="muted">
-                Click <strong>+ New</strong> above to start one.
               </p>
+              <button
+                type="button"
+                className="primary"
+                onClick={openSession}
+                disabled={busy}
+              >
+                {openLabel("Resume")}
+              </button>
+            </div>
+          ) : (
+            <div className="session-dormant">
+              <p className="muted">No Claude session in this workspace yet.</p>
+              <button
+                type="button"
+                className="primary"
+                onClick={openSession}
+                disabled={busy || workspace.repo_links.length === 0}
+                title={
+                  workspace.repo_links.length === 0
+                    ? "Add a repo first — there's nowhere to run Claude"
+                    : undefined
+                }
+              >
+                {openLabel("Start Claude")}
+              </button>
             </div>
           )}
         </div>
@@ -1364,403 +1030,65 @@ function WorkspaceDetail({
   );
 }
 
-type ChipMeta = {
-  id: string;
-  repo_key: string | null;
-  claude_session_id: string | null;
-  claude_binary: string | null;
-};
-
-type ScriptChipData = {
-  repoKey: string;
-  scriptName: string;
-  command: string;
-  /** `null` => not running and no stale handle to attach to. */
-  run: ScriptInfo | null;
-};
-
-function SessionChip({
-  meta,
-  hidden,
-  selected,
-  live,
-  onSelect,
-  onSetHidden,
-  onContextMenu,
+/**
+ * Which claude entry-point binary the workspace's session runs under. Picking
+ * another restarts the session under it, keeping the conversation when there
+ * is one on disk.
+ */
+function BinaryMenu({
+  current,
+  disabled,
+  onSwitch,
 }: {
-  meta: ChipMeta;
-  hidden: boolean;
-  selected: boolean;
-  live: SessionInfo | undefined;
-  onSelect: (id: string) => void;
-  onSetHidden: (id: string, hidden: boolean) => void;
-  onContextMenu: (id: string, x: number, y: number) => void;
+  current: string;
+  disabled: boolean;
+  onSwitch: (binary: string) => void;
 }) {
-  const label = meta.id.slice(0, 8);
-  const needsTurn = live?.needs_turn ?? false;
-  const chipClass = [
-    "session-chip",
-    selected ? "active" : "",
-    hidden ? "hidden" : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  return (
-    <div
-      className={chipClass}
-      onClick={() => onSelect(meta.id)}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        onContextMenu(meta.id, e.clientX, e.clientY);
-      }}
-    >
-      <span className={`chip-repo${meta.repo_key === null ? " root" : ""}`}>
-        {meta.repo_key ?? "root"}
-      </span>
-      <code>{label}</code>
-      {needsTurn && <span className="turn-dot" />}
-      {live && !live.running && <span className="chip-state">exited</span>}
-      {!live && <span className="chip-state">dormant</span>}
-      <button
-        type="button"
-        className="chip-x"
-        title={hidden ? "Show this chat" : "Hide this chat"}
-        aria-label={hidden ? "Show this chat" : "Hide this chat"}
-        onClick={(e) => {
-          e.stopPropagation();
-          onSetHidden(meta.id, !hidden);
-        }}
-      >
-        {hidden ? "↺" : "×"}
-      </button>
-    </div>
-  );
-}
-
-function ScriptChip({
-  chip,
-  showRepo,
-  selected,
-  onClick,
-  onDismiss,
-}: {
-  chip: ScriptChipData;
-  showRepo: boolean;
-  selected: boolean;
-  onClick: (chip: ScriptChipData) => void;
-  onDismiss: (scriptId: string) => void;
-}) {
-  const running = chip.run?.running ?? false;
-  const exited = chip.run !== null && !chip.run.running;
-  const idle = chip.run === null;
-  const indicator = running ? "▶" : exited ? "■" : "○";
-  const stateClass = running ? "running" : exited ? "exited" : "idle";
-  return (
-    <div
-      className={`session-chip script-chip ${stateClass}${selected ? " active" : ""}`}
-      onClick={() => onClick(chip)}
-      title={chip.command}
-    >
-      <span className="script-indicator" aria-hidden="true">
-        {indicator}
-      </span>
-      {showRepo && <span className="chip-repo">{chip.repoKey}</span>}
-      <code>{chip.scriptName}</code>
-      {!idle && chip.run && (
-        <button
-          type="button"
-          className="chip-x"
-          title={running ? "Cancel this script" : "Dismiss exited logs"}
-          aria-label={running ? "Cancel this script" : "Dismiss exited logs"}
-          onClick={(e) => {
-            e.stopPropagation();
-            onDismiss(chip.run!.id);
-          }}
-        >
-          ×
-        </button>
-      )}
-    </div>
-  );
-}
-
-function SessionBar({
-  visibleSessions,
-  hiddenSessions,
-  showHidden,
-  onToggleShowHidden,
-  liveById,
-  repos,
-  selectedId,
-  onSelect,
-  onStartInRepo,
-  onSetHidden,
-  onClearTurn,
-  workspaceBinary,
-  onSwitchBinary,
-  scriptChips,
-  selectedScriptKey,
-  showRepoOnScript,
-  onScriptChipClick,
-  onScriptChipDismiss,
-  busy,
-}: {
-  visibleSessions: ChipMeta[];
-  hiddenSessions: ChipMeta[];
-  showHidden: boolean;
-  onToggleShowHidden: () => void;
-  liveById: Map<string, SessionInfo>;
-  repos: { repo_key: string }[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
-  /** `null` => start at the workspace root. */
-  onStartInRepo: (repoKey: string | null) => void;
-  onSetHidden: (id: string, hidden: boolean) => void;
-  onClearTurn: (id: string) => void;
-  /** Workspace-level binary default; the fallback when a session has no
-   *  per-session override. `null` => the app default `claude`. */
-  workspaceBinary: string | null;
-  onSwitchBinary: (id: string, binary: string) => void;
-  scriptChips: ScriptChipData[];
-  selectedScriptKey: string | null;
-  /** Show the repo prefix on the script chip — only useful when the
-   *  workspace has 2+ repos, otherwise the prefix is noise. */
-  showRepoOnScript: boolean;
-  onScriptChipClick: (chip: ScriptChipData) => void;
-  onScriptChipDismiss: (scriptId: string) => void;
-  busy: boolean;
-}) {
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
-  // Right-click context menu for a single session chip.
-  const [chipMenu, setChipMenu] = useState<{
-    sessionId: string;
-    x: number;
-    y: number;
-  } | null>(null);
-  const openChipMenu = (sessionId: string, x: number, y: number) =>
-    setChipMenu({ sessionId, x, y });
-
-  // Close the "+ New" repo menu on outside click.
   useEffect(() => {
-    if (!menuOpen) return;
+    if (!open) return;
     const handler = (e: MouseEvent) => {
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
+        setOpen(false);
       }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [menuOpen]);
-
-  const onNewClick = () => {
-    if (repos.length === 0) return;
-    if (repos.length === 1) {
-      onStartInRepo(repos[0].repo_key);
-      return;
-    }
-    setMenuOpen((v) => !v);
-  };
+  }, [open]);
 
   return (
-    <div className="session-chip-bar">
-      {visibleSessions.map((m) => (
-        <SessionChip
-          key={m.id}
-          meta={m}
-          hidden={false}
-          selected={selectedId === m.id}
-          live={liveById.get(m.id)}
-          onSelect={onSelect}
-          onSetHidden={onSetHidden}
-          onContextMenu={openChipMenu}
-        />
-      ))}
-      {showHidden &&
-        hiddenSessions.map((m) => (
-          <SessionChip
-            key={m.id}
-            meta={m}
-            hidden={true}
-            selected={selectedId === m.id}
-            live={liveById.get(m.id)}
-            onSelect={onSelect}
-            onSetHidden={onSetHidden}
-            onContextMenu={openChipMenu}
-          />
-        ))}
-      {scriptChips.length > 0 && <span className="chip-bar-divider" />}
-      {scriptChips.map((chip) => {
-        const key = scriptTabKey(chip.repoKey, chip.scriptName);
-        return (
-          <ScriptChip
-            key={key}
-            chip={chip}
-            showRepo={showRepoOnScript}
-            selected={selectedScriptKey === key}
-            onClick={onScriptChipClick}
-            onDismiss={onScriptChipDismiss}
-          />
-        );
-      })}
-      <div className="new-session-wrap" ref={wrapRef}>
-        <button
-          type="button"
-          className="session-chip new"
-          onClick={onNewClick}
-          disabled={busy || repos.length === 0}
-          title={
-            repos.length === 0
-              ? "No repos in this workspace"
-              : repos.length === 1
-                ? `Start a new Claude session in ${repos[0].repo_key}`
-                : "Start a new Claude session"
-          }
-        >
-          {busy ? <Spinner /> : "+"} New
-          {repos.length > 1 && <span className="caret">▾</span>}
-        </button>
-        {menuOpen && repos.length > 1 && (
-          <div className="new-session-menu" role="menu">
+    <div className="binary-menu-wrap" ref={wrapRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        disabled={disabled}
+        aria-expanded={open}
+        title="The claude binary this workspace's session runs under. Switching restarts the session and keeps the conversation."
+      >
+        <code>{current}</code>
+        <span className="caret">▾</span>
+      </button>
+      {open && (
+        <div className="binary-menu" role="menu">
+          <div className="context-menu-label">Run with</div>
+          {CLAUDE_BINARIES.map((b) => (
             <button
+              key={b}
               type="button"
               role="menuitem"
+              disabled={b === current}
               onClick={() => {
-                setMenuOpen(false);
-                onStartInRepo(null);
+                setOpen(false);
+                onSwitch(b);
               }}
             >
-              New at workspace <code>root</code>
+              {b === current ? `${b} ✓` : b}
             </button>
-            {repos.map((r) => (
-              <button
-                key={r.repo_key}
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setMenuOpen(false);
-                  onStartInRepo(r.repo_key);
-                }}
-              >
-                New in <code>{r.repo_key}</code>
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-      {hiddenSessions.length > 0 && (
-        <button
-          type="button"
-          className="hidden-toggle"
-          onClick={onToggleShowHidden}
-          title={showHidden ? "Hide hidden chats" : "Show hidden chats"}
-        >
-          {showHidden
-            ? `Hide ${hiddenSessions.length} hidden`
-            : `Show ${hiddenSessions.length} hidden`}
-        </button>
+          ))}
+        </div>
       )}
-      {chipMenu &&
-        (() => {
-          const live = liveById.get(chipMenu.sessionId);
-          const needsTurn = live?.needs_turn ?? false;
-          const isHidden = hiddenSessions.some(
-            (m) => m.id === chipMenu.sessionId,
-          );
-          const meta = [...visibleSessions, ...hiddenSessions].find(
-            (m) => m.id === chipMenu.sessionId,
-          );
-          const currentBinary =
-            meta?.claude_binary ?? workspaceBinary ?? "claude";
-          return (
-            <SessionChipMenu
-              x={chipMenu.x}
-              y={chipMenu.y}
-              needsTurn={needsTurn}
-              hidden={isHidden}
-              currentBinary={currentBinary}
-              onClearTurn={() => onClearTurn(chipMenu.sessionId)}
-              onSetHidden={() => onSetHidden(chipMenu.sessionId, !isHidden)}
-              onSwitchBinary={(binary) =>
-                onSwitchBinary(chipMenu.sessionId, binary)
-              }
-              onClose={() => setChipMenu(null)}
-            />
-          );
-        })()}
-    </div>
-  );
-}
-
-function SessionChipMenu({
-  x,
-  y,
-  needsTurn,
-  hidden,
-  currentBinary,
-  onClearTurn,
-  onSetHidden,
-  onSwitchBinary,
-  onClose,
-}: {
-  x: number;
-  y: number;
-  needsTurn: boolean;
-  hidden: boolean;
-  currentBinary: string;
-  onClearTurn: () => void;
-  onSetHidden: () => void;
-  onSwitchBinary: (binary: string) => void;
-  onClose: () => void;
-}) {
-  const ref = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const handle = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    document.addEventListener("mousedown", handle);
-    return () => document.removeEventListener("mousedown", handle);
-  }, [onClose]);
-
-  // Keep the menu inside the viewport.
-  const ESTIMATED_W = 200;
-  const ESTIMATED_H = 240;
-  const left = Math.min(x, window.innerWidth - ESTIMATED_W - 4);
-  const top = Math.min(y, window.innerHeight - ESTIMATED_H - 4);
-
-  const wrap = (fn: () => void) => () => {
-    fn();
-    onClose();
-  };
-
-  return (
-    <div ref={ref} className="context-menu" style={{ left, top }} role="menu">
-      {needsTurn && (
-        <button type="button" role="menuitem" onClick={wrap(onClearTurn)}>
-          Clear notification
-        </button>
-      )}
-      <button type="button" role="menuitem" onClick={wrap(onSetHidden)}>
-        {hidden ? "Show this chat" : "Hide this chat"}
-      </button>
-      <div className="context-menu-sep" />
-      <div className="context-menu-label">Run with</div>
-      {CLAUDE_BINARIES.map((b) => {
-        const isCurrent = b === currentBinary;
-        return (
-          <button
-            key={b}
-            type="button"
-            role="menuitem"
-            disabled={isCurrent}
-            onClick={wrap(() => onSwitchBinary(b))}
-          >
-            {isCurrent ? `${b} ✓` : b}
-          </button>
-        );
-      })}
     </div>
   );
 }

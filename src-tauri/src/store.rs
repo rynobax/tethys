@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::{AppError, AppResult};
 use crate::github::GithubPrStatus;
-use crate::state::{AppState, Folder, Workspace, WorkspaceStatus};
+use crate::state::{AppState, ClaudeSessionMeta, Folder, Workspace, WorkspaceStatus};
 
 /// Where the `Store` announces that a workspace changed so the UI can refresh.
 ///
@@ -77,6 +77,7 @@ impl Store {
         if let Some(bytes) = raw.as_deref() {
             migrate_archived_to_folder(&mut initial, bytes);
             migrate_pr_slots(&mut initial, bytes);
+            migrate_sessions(&mut initial, bytes);
         }
 
         let stranded = initial.prune_missing_folders();
@@ -392,6 +393,81 @@ struct OldAttachedPr {
     status: Option<GithubPrStatus>,
 }
 
+/// Fold the retired per-workspace `sessions` list into the one `session`.
+///
+/// Same shape as the two above, for the same reason: the list is read off the
+/// raw JSON so `Workspace` carries no trace of it, and the first flush ends
+/// the migration. Only an empty `session` is filled — a file already carrying
+/// one has been through this.
+///
+/// When the list held several, the survivor is the newest visible session
+/// with a saved conversation, else the newest visible one, else the newest —
+/// the list was append-ordered, so newest is last. The rest lose their tmux
+/// panes at the next orphan reap, which is the point of there being one. A
+/// per-session binary override the survivor carried is lifted onto the
+/// workspace, where that setting now lives.
+fn migrate_sessions(state: &mut AppState, raw: &[u8]) {
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(raw) else {
+        return;
+    };
+    let Some(workspaces) = json.get("workspaces").and_then(|w| w.as_array()) else {
+        return;
+    };
+
+    let mut migrated = 0usize;
+    let mut dropped = 0usize;
+    for ws_json in workspaces {
+        let Some(id) = ws_json.get("id").and_then(|i| i.as_str()) else {
+            continue;
+        };
+        let Some(list) = ws_json.get("sessions").and_then(|s| s.as_array()) else {
+            continue;
+        };
+        let Some(chosen) = pick_surviving_session(list) else {
+            continue;
+        };
+        let Some(ws) = state.workspaces.iter_mut().find(|w| w.id == id) else {
+            continue;
+        };
+        if ws.session.is_some() {
+            continue;
+        }
+        match serde_json::from_value::<ClaudeSessionMeta>(chosen.clone()) {
+            Ok(meta) => {
+                ws.session = Some(meta);
+                if ws.claude_binary.is_none() {
+                    ws.claude_binary = chosen
+                        .get("claude_binary")
+                        .and_then(|b| b.as_str())
+                        .map(str::to_string);
+                }
+                migrated += 1;
+                dropped += list.len() - 1;
+            }
+            Err(e) => warn!(workspace = id, error = %e, "old session entry failed to parse"),
+        }
+    }
+    if migrated > 0 {
+        info!(count = migrated, dropped, "migrated session lists into one session each");
+    }
+}
+
+/// See [`migrate_sessions`] for the order of preference.
+fn pick_surviving_session(list: &[serde_json::Value]) -> Option<&serde_json::Value> {
+    let visible = |s: &&serde_json::Value| {
+        !s.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false)
+    };
+    let has_conversation = |s: &&serde_json::Value| {
+        s.get("claude_session_id").is_some_and(|c| !c.is_null())
+    };
+    list.iter()
+        .rev()
+        .filter(visible)
+        .find(has_conversation)
+        .or_else(|| list.iter().rev().find(visible))
+        .or_else(|| list.last())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,13 +492,12 @@ mod tests {
             branch: format!("feat/{id}"),
             created_at: Utc::now(),
             repo_links: Vec::new(),
-            sessions: Vec::new(),
+            session: None,
             claude_binary: None,
             origin: Origin::Ui,
             deleted_at: None,
             folder: None,
             status,
-            script_runs: Vec::new(),
             notes: String::new(),
             blocked_by: None,
             artifacts: Vec::new(),
@@ -841,6 +916,99 @@ mod tests {
             vec![9]
         );
         assert_eq!(link.dismissed, vec![7]);
+    }
+
+    /// A `state.json` from the many-sessions era: a hidden session with a
+    /// conversation, a visible one that never got its SessionStart hook, and
+    /// a visible one with a conversation and a per-session binary.
+    fn many_sessions_state_json() -> &'static str {
+        r#"{
+            "workspaces": [
+                {
+                    "id": "ws-0",
+                    "branch": "feat/thing",
+                    "created_at": "2026-04-01T12:00:00Z",
+                    "status": {"kind": "ready"},
+                    "repo_links": [],
+                    "sessions": [
+                        {
+                            "id": "hidden-one",
+                            "repo_key": null,
+                            "cwd": "/tmp/ws-0",
+                            "claude_session_id": "csid-hidden",
+                            "transcript_path": null,
+                            "hidden": true
+                        },
+                        {
+                            "id": "kept",
+                            "repo_key": "api",
+                            "cwd": "/tmp/ws-0/api",
+                            "claude_session_id": "csid-kept",
+                            "transcript_path": null,
+                            "claude_binary": "claude-hipaa",
+                            "runtime_state": "waiting_input"
+                        },
+                        {
+                            "id": "never-started",
+                            "repo_key": null,
+                            "cwd": "/tmp/ws-0",
+                            "claude_session_id": null,
+                            "transcript_path": null
+                        }
+                    ]
+                }
+            ]
+        }"#
+    }
+
+    #[tokio::test]
+    async fn boot_keeps_the_newest_visible_session_with_a_conversation() {
+        let f = fixture_with_raw(many_sessions_state_json()).await;
+        let ws = f.store.read(|s| s.workspaces[0].clone()).await;
+        let session = ws.session.expect("one session survives");
+        assert_eq!(session.id, "kept");
+        assert_eq!(session.claude_session_id.as_deref(), Some("csid-kept"));
+        assert_eq!(session.cwd, PathBuf::from("/tmp/ws-0/api"));
+        assert_eq!(
+            session.runtime_state,
+            Some(crate::state::SessionRuntimeState::WaitingInput)
+        );
+        // The per-session override moves to where the setting now lives.
+        assert_eq!(ws.claude_binary.as_deref(), Some("claude-hipaa"));
+    }
+
+    /// A file already carrying `session` is left exactly as it is, even if a
+    /// stale `sessions` list is somehow still beside it.
+    #[tokio::test]
+    async fn a_file_with_one_session_is_not_migrated_again() {
+        let raw = r#"{
+            "workspaces": [
+                {
+                    "id": "ws-0",
+                    "branch": "feat/thing",
+                    "created_at": "2026-04-01T12:00:00Z",
+                    "status": {"kind": "ready"},
+                    "repo_links": [],
+                    "session": {
+                        "id": "current",
+                        "cwd": "/tmp/ws-0",
+                        "claude_session_id": null,
+                        "transcript_path": null
+                    },
+                    "sessions": [
+                        {
+                            "id": "stale",
+                            "cwd": "/tmp/ws-0",
+                            "claude_session_id": "csid",
+                            "transcript_path": null
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let f = fixture_with_raw(raw).await;
+        let session = f.store.read(|s| s.workspaces[0].session.clone()).await;
+        assert_eq!(session.map(|s| s.id).as_deref(), Some("current"));
     }
 
     #[tokio::test]

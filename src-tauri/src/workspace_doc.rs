@@ -1,8 +1,8 @@
 //! Tethys-generated `<workspace_root>/CLAUDE.md`.
 //!
 //! Claude Code loads `CLAUDE.md` from the cwd *and every parent directory*, so
-//! a single file at the workspace root reaches every session in the workspace —
-//! the root session and each per-repo session alike — without putting an
+//! a single file at the workspace root reaches the workspace's session whether
+//! it runs at the root or inside one repo's worktree — without putting an
 //! untracked file inside any worktree.
 //!
 //! Its job is to tell Claude what this directory is (N worktrees of N repos, all
@@ -272,7 +272,6 @@ mod tests {
             default_setup_script: None,
             setup_timeout_secs: None,
             copy_files: Vec::new(),
-            scripts: Default::default(),
             claude_notes: notes.map(str::to_string),
             github_slug: None,
         }
@@ -294,13 +293,12 @@ mod tests {
                     created_branch: true,
                 })
                 .collect(),
-            sessions: Vec::new(),
+            session: None,
             claude_binary: None,
             origin: Origin::Ui,
             deleted_at: None,
             folder: None,
             status: WorkspaceStatus::Ready,
-            script_runs: Vec::new(),
             notes: "private scratchpad".into(),
             blocked_by: None,
             artifacts: Vec::new(),

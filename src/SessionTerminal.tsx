@@ -2,7 +2,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { Terminal } from "@xterm/xterm";
 
 import * as api from "./ipc/commands";
-import { sessionEndpoint, usePtyTerminal } from "./usePtyTerminal";
+import { usePtyTerminal } from "./usePtyTerminal";
 
 /**
  * Backslash-escape spaces in a filesystem path. Matches iTerm2's drop
@@ -43,7 +43,7 @@ interface Props {
  * needs: Finder paste interception, macOS editing keybinds, and drag-drop.
  */
 export function SessionTerminal({ sessionId }: Props) {
-  const { containerRef } = usePtyTerminal(sessionId, sessionEndpoint, {
+  const { containerRef } = usePtyTerminal(sessionId, {
     onReady: (term, container) => wireClaudeExtras(term, container, sessionId),
   });
 

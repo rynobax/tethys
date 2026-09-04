@@ -29,12 +29,10 @@ const INITIAL_ROWS: &str = "50";
 /// `env` becomes per-session `-e` variables — how `TETHYS_SPAWN_TOKEN` reaches
 /// Claude so its SessionStart hook can be correlated back.
 ///
-/// Built here rather than at each call site because the sessions and scripts
-/// supervisors used to construct this argv separately, character for
-/// character, including the load-bearing detail that [`server_init_args`] must
-/// be *prepended*: on cold start `new-session` is what boots the server, so
-/// options set afterwards would miss it and the pane would silently come up
-/// without `mouse on`.
+/// Built here rather than at the call site so the load-bearing detail lives
+/// in one place: [`server_init_args`] must be *prepended*, because on cold
+/// start `new-session` is what boots the server, so options set afterwards
+/// would miss it and the pane would silently come up without `mouse on`.
 pub fn new_session_args(
     session_id: &str,
     env: &[(&str, String)],

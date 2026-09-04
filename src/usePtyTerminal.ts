@@ -15,38 +15,6 @@ const DEFAULT_XTERM_THEME = {
   foreground: "#e8e8e8",
 };
 
-/**
- * The four backend calls a terminal pane needs. Sessions and scripts differ
- * only in which commands these map to — everything else about running an
- * xterm against a PTY was written twice, line for line.
- *
- * Two adapters, so this is a real seam and not a hypothetical one.
- */
-export interface PtyEndpoint {
-  attach(onBytes: Channel<ArrayBuffer>): Promise<number[]>;
-  detach(channelId: number): Promise<void>;
-  sendInput(data: number[]): Promise<void>;
-  resize(cols: number, rows: number): Promise<void>;
-  /** Names this endpoint in console diagnostics. */
-  label: string;
-}
-
-export const sessionEndpoint = (sessionId: string): PtyEndpoint => ({
-  attach: (onBytes) => api.attachSession(sessionId, onBytes),
-  detach: (channelId) => api.detachSession(sessionId, channelId),
-  sendInput: (data) => api.sendInput(sessionId, data),
-  resize: (cols, rows) => api.resizeSession(sessionId, cols, rows),
-  label: "session",
-});
-
-export const scriptEndpoint = (scriptId: string): PtyEndpoint => ({
-  attach: (onBytes) => api.attachScript(scriptId, onBytes),
-  detach: (channelId) => api.detachScript(scriptId, channelId),
-  sendInput: (data) => api.sendInputScript(scriptId, data),
-  resize: (cols, rows) => api.resizeScript(scriptId, cols, rows),
-  label: "script",
-});
-
 export interface PtyTerminalOptions {
   /**
    * Extra wiring that needs the live `Terminal` — the Claude-specific paste,
@@ -60,20 +28,18 @@ export interface PtyTerminalOptions {
 }
 
 /**
- * Mounts an xterm.js terminal bound to a PTY endpoint.
+ * Mounts an xterm.js terminal bound to a session's PTY.
  *
- * Owns the whole lifecycle that used to exist twice: terminal construction
- * with its three addons and link handler, keystroke and resize forwarding,
- * the attach → scrollback → drain sequence, `ResizeObserver`-driven fitting,
- * and the teardown — including the detach-then-sever-the-channel step whose
- * absence was a real memory leak, and whose fix had to be applied to both
- * copies separately.
+ * Owns the whole lifecycle: terminal construction with its three addons and
+ * link handler, keystroke and resize forwarding, the attach → scrollback →
+ * drain sequence, `ResizeObserver`-driven fitting, and the teardown —
+ * including the detach-then-sever-the-channel step whose absence was a real
+ * memory leak.
  *
- * `endpointKey` identifies the pane; changing it rebuilds the terminal.
+ * `sessionId` identifies the pane; changing it rebuilds the terminal.
  */
 export function usePtyTerminal(
-  endpointKey: string,
-  makeEndpoint: (key: string) => PtyEndpoint,
+  sessionId: string,
   options: PtyTerminalOptions = {},
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -96,7 +62,6 @@ export function usePtyTerminal(
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    const endpoint = makeEndpoint(endpointKey);
 
     const term = new Terminal({
       fontFamily: '"SF Mono", ui-monospace, Menlo, monospace',
@@ -147,13 +112,13 @@ export function usePtyTerminal(
 
     const dataSub = term.onData((data) => {
       const bytes = Array.from(new TextEncoder().encode(data));
-      endpoint.sendInput(bytes).catch((e) => {
-        console.error(`${endpoint.label} send_input failed:`, e);
+      api.sendInput(sessionId, bytes).catch((e) => {
+        console.error("send_input failed:", e);
       });
     });
     const resizeSub = term.onResize(({ cols, rows }) => {
-      endpoint.resize(cols, rows).catch((e) => {
-        console.error(`${endpoint.label} resize failed:`, e);
+      api.resizeSession(sessionId, cols, rows).catch((e) => {
+        console.error("resize_session failed:", e);
       });
     });
 
@@ -163,15 +128,15 @@ export function usePtyTerminal(
     };
 
     let cancelled = false;
-    endpoint
-      .attach(channel)
+    api
+      .attachSession(sessionId, channel)
       .then((scrollback) => {
         if (cancelled) return;
         if (scrollback.length > 0) {
           term.write(new Uint8Array(scrollback));
         }
         // Final resize so the backend matches xterm's cols/rows right away.
-        endpoint.resize(term.cols, term.rows).catch(() => {});
+        api.resizeSession(sessionId, term.cols, term.rows).catch(() => {});
       })
       .catch((e) => {
         term.write(`\r\n\x1b[31m[attach failed: ${String(e)}]\x1b[0m\r\n`);
@@ -197,7 +162,7 @@ export function usePtyTerminal(
       // Stop the backend fanning bytes to this dead pane. Its retain-on-error
       // path never fires on its own: the channel keeps succeeding as long as
       // its JS callback is registered, so we must detach explicitly.
-      endpoint.detach(channel.id).catch(() => {});
+      api.detachSession(sessionId, channel.id).catch(() => {});
       // Sever the channel's reference to `term`. Tauri registers the
       // channel's callback in a global registry and only unregisters it on an
       // end-of-stream message, which command-arg channels never send — so the
@@ -205,10 +170,8 @@ export function usePtyTerminal(
       // 50k-line scrollback) in the webview forever.
       channel.onmessage = () => {};
     };
-    // `makeEndpoint` is a module-level constructor; the pane is identified by
-    // `endpointKey` alone.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endpointKey]);
+  }, [sessionId]);
 
   return { containerRef, termRef };
 }

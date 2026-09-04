@@ -1,5 +1,5 @@
 //! Sanitize the environment Tethys passes to commands it runs *inside child
-//! repos* (setup scripts, Claude sessions, per-repo script chips).
+//! repos* (setup scripts, Claude sessions).
 //!
 //! When Tethys is itself launched via `yarn` (Yarn Berry / PnP), Yarn injects
 //! package-manager context into our process environment — most fatally

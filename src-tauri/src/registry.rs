@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use schemars::{schema_for, JsonSchema};
@@ -85,19 +84,14 @@ pub struct Repo {
     #[serde(default)]
     pub copy_files: Vec<String>,
 
-    /// Named shell commands runnable inside any worktree of this repo
-    /// (e.g. `dev = "yarn dev"`). Surfaced as chips next to Claude sessions
-    /// in each workspace; output is captured and viewable inline.
-    #[serde(default)]
-    pub scripts: BTreeMap<String, String>,
-
     /// Standing context for Claude about working in this repo — the things you'd
     /// otherwise re-explain every session (e.g. "a global django container is
     /// usually already running; don't start another"). Rendered verbatim
     /// (markdown allowed) into the generated `CLAUDE.md` at the root of every
-    /// workspace that includes this repo, so root and per-repo sessions both
-    /// see it. For guidance that belongs to the code rather than to your local
-    /// setup, prefer the repo's own committed `CLAUDE.md`.
+    /// workspace that includes this repo, which Claude reads whether its
+    /// session runs in the repo's worktree or at the workspace root. For
+    /// guidance that belongs to the code rather than to your local setup,
+    /// prefer the repo's own committed `CLAUDE.md`.
     #[serde(default)]
     pub claude_notes: Option<String>,
 
@@ -293,10 +287,6 @@ worktree_root = "CHANGE_ME_TO_AN_ABSOLUTE_PATH"
 # claude_notes = """
 # A global django container is usually already running — don't start another.
 # """
-#
-# [repo.scripts]
-# dev = "pnpm dev"
-# test = "pnpm test"
 
 # Tethys generates a CLAUDE.md at each workspace root explaining the worktree
 # layout. Uncomment to replace its wording with your own. Placeholders:

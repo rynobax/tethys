@@ -1234,25 +1234,9 @@ button.danger.primary:hover:not(:disabled) {
 }
 
 /*
- * "Your turn" dot on session chips: yellow with a soft halo whenever a
- * session is done working and waiting on you. (Workspace rows use the
- * right-edge status bleed below instead.)
- */
-.turn-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--turn-dot, #e2b23a);
-  box-shadow: 0 0 0 2px
-    color-mix(in oklab, var(--turn-dot, #e2b23a) 25%, transparent);
-  display: inline-block;
-  margin-left: auto;
-}
-
-/*
- * Per-workspace status tint: the whole row takes on a color while a session is
- * working (green) or it's your turn (yellow — more saturated so it reads as the
- * attention state). Idle/cleared rows keep their default background.
+ * Per-workspace status tint: the whole row takes on a color while the session
+ * is working (green) or it's your turn (yellow — more saturated so it reads as
+ * the attention state). Idle/cleared rows keep their default background.
  */
 .workspace-list > li.status-working {
   background: color-mix(in oklab, #2fb84d 16%, transparent);
@@ -1267,64 +1251,12 @@ button.danger.primary:hover:not(:disabled) {
   background: color-mix(in oklab, var(--turn-dot, #e2b23a) 42%, transparent);
 }
 
-/* Chips listing the scripts currently running in a workspace. */
-.workspace-scripts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 4px;
-}
-
-.script-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 100%;
-  padding: 1px 6px;
-  border-radius: 999px;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--script-chip-fg, #2f7d54);
-  background: color-mix(in oklab, var(--script-chip, #4caf78) 18%, transparent);
-  border: 1px solid color-mix(in oklab, var(--script-chip, #4caf78) 35%, transparent);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Leading pulse dot to read as "active". */
-.script-chip::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--script-chip, #4caf78);
-  flex-shrink: 0;
-  animation: script-chip-pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes script-chip-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.4;
-  }
-}
-
 .session-pane {
   display: flex;
   flex-direction: column;
   gap: 8px;
   flex: 1;
   min-height: 300px;
-}
-
-.session-pane.empty {
-  align-items: flex-start;
-  justify-content: flex-start;
-  padding-top: 16px;
 }
 
 .session-terminal {
@@ -1337,8 +1269,7 @@ button.danger.primary:hover:not(:disabled) {
 
 /* Fixed-size inline indicators — never shrink in flex rows.
    Add new spinner/dot/badge classes to this list. */
-.spinner,
-.turn-dot {
+.spinner {
   flex-shrink: 0;
 }
 
@@ -1372,162 +1303,26 @@ button.danger.primary:hover:not(:disabled) {
   gap: 12px;
 }
 
-.session-chip-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 6px 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-.session-chip {
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 4px 10px;
-  font-size: 12px;
-  color: var(--muted);
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  -webkit-user-select: none;
-  user-select: none;
-}
-
-.session-chip:hover:not(:disabled) {
-  background: rgba(125, 125, 125, 0.08);
-  color: var(--fg);
-}
-
-.session-chip.active {
-  background: var(--selected-bg);
-  border-color: var(--accent);
-  color: var(--fg);
-}
-
-.session-chip code {
-  font-size: 11px;
-  padding: 0;
-  background: transparent;
-}
-
-.session-chip .chip-repo {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--fg);
-  padding-right: 4px;
-  border-right: 1px solid var(--border);
-}
-
-.session-chip.active .chip-repo {
-  color: var(--fg);
-}
-
-.session-chip .chip-repo.root {
-  font-style: italic;
-  opacity: 0.85;
-}
-
-.session-chip .chip-x {
-  margin-left: 4px;
-  padding: 0 4px;
-  border: none;
-  background: transparent;
-  color: inherit;
-  font-size: 14px;
-  line-height: 1;
-  opacity: 0.4;
-  cursor: pointer;
-  border-radius: 3px;
-}
-
-.session-chip:hover .chip-x,
-.session-chip.active .chip-x {
-  opacity: 0.85;
-}
-
-.session-chip .chip-x:hover {
-  opacity: 1;
-  background: var(--danger-bg, rgba(255, 80, 80, 0.18));
-}
-
-.session-chip.hidden {
-  opacity: 0.55;
-  border-style: dotted;
-}
-
-.session-chip.hidden.active {
-  opacity: 0.85;
-}
-
-.hidden-toggle {
-  margin-left: auto;
-  padding: 4px 10px;
-  font-size: 11px;
-  background: transparent;
-  color: var(--fg-muted, var(--fg));
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  cursor: pointer;
-  opacity: 0.7;
-}
-
-.hidden-toggle:hover {
-  opacity: 1;
-}
-
-.session-chip.new {
-  border-style: dashed;
-}
-
-/* Visual divider between session chips and script chips in the chip bar. */
-.chip-bar-divider {
-  align-self: stretch;
-  width: 1px;
-  background: var(--border);
-  margin: 2px 4px;
-}
-
-.session-chip.script-chip {
-  cursor: pointer;
-}
-
-.session-chip.script-chip .script-indicator {
-  font-size: 10px;
-  line-height: 1;
-  width: 10px;
-  text-align: center;
-  color: var(--muted);
-}
-
-.session-chip.script-chip.running .script-indicator {
-  color: #2ecc71;
-}
-
-.session-chip.script-chip.exited .script-indicator {
-  color: var(--danger);
-}
-
-.session-chip.script-chip.idle {
-  opacity: 0.85;
-}
-
-.session-chip.script-chip.running {
-  border-color: rgba(46, 204, 113, 0.5);
-}
-
-.session-chip .caret {
-  font-size: 9px;
-  opacity: 0.6;
-  margin-left: 2px;
-}
-
-.new-session-wrap {
+/* "Run with" switcher in the workspace header: the current binary, and a
+   dropdown of the others. */
+.binary-menu-wrap {
   position: relative;
   display: inline-flex;
 }
 
-.new-session-menu {
+.binary-menu-wrap > button code {
+  padding: 0;
+  background: transparent;
+  font-size: 12px;
+}
+
+.binary-menu-wrap .caret {
+  font-size: 9px;
+  opacity: 0.6;
+  margin-left: 4px;
+}
+
+.binary-menu {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
@@ -1543,7 +1338,7 @@ button.danger.primary:hover:not(:disabled) {
   gap: 2px;
 }
 
-.new-session-menu button {
+.binary-menu button {
   background: transparent;
   border: none;
   padding: 6px 10px;
@@ -1554,20 +1349,18 @@ button.danger.primary:hover:not(:disabled) {
   cursor: pointer;
 }
 
-.new-session-menu button:hover {
+.binary-menu button:hover:not(:disabled) {
   background: var(--selected-bg);
+}
+
+.binary-menu button:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .info-modal {
   min-width: 440px;
   max-width: 640px;
-}
-
-.chip-state {
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--muted);
 }
 
 .session-dormant {

@@ -27,12 +27,6 @@ export interface AppEvents {
     code: number | null;
   };
   "session:turn_changed": TurnChangedEvent;
-  "script:changed": { workspace_id: string };
-  "script:exit": {
-    workspace_id: string;
-    script_id: string;
-    code: number | null;
-  };
   "github:auth_changed": GithubAuthSnapshot;
   "github:status_changed": GithubStatusChangedEvent;
   "system_status:changed": null;

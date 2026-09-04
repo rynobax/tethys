@@ -464,7 +464,6 @@ async fn seed_workspace_root(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use std::process::Command as StdCommand;
 
     fn git_ok(dir: &Path, args: &[&str]) {
@@ -513,7 +512,6 @@ mod tests {
             default_setup_script: setup_script.map(String::from),
             setup_timeout_secs: Some(30),
             copy_files: Vec::new(),
-            scripts: BTreeMap::new(),
             claude_notes: None,
             github_slug: None,
         }

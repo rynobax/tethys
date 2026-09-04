@@ -8,7 +8,7 @@
 //!   exist. The calling agent is told the handoff was *accepted*, never how it
 //!   went — provisioning takes minutes, and an agent that waited that long for
 //!   an answer it can't act on is worse than one that moved on.
-//! - It always starts exactly one session, at the workspace root, with the
+//! - It starts the workspace's session as soon as provisioning lands, with the
 //!   Brief as its first message. A handoff with nobody picking the work up is
 //!   just an expensive empty workspace.
 //! - The branch is auto-suffixed rather than refused when taken. "Pick another
@@ -30,7 +30,7 @@ use crate::paths::Paths;
 use crate::provision::{provision_workspace, WorkspaceProvision};
 use crate::provision_queue::ProvisionQueue;
 use crate::registry::{self, RegistryLoad, Repo};
-use crate::sessions::{self, SessionSupervisor, StartSession};
+use crate::sessions::{self, OpenSession, SessionSupervisor};
 use crate::state::{Origin, Workspace, WorkspaceId};
 use crate::store::Store;
 
@@ -250,16 +250,13 @@ impl Handoff {
             return;
         }
 
-        match sessions::start_session(StartSession {
+        match sessions::open_session(OpenSession {
             supervisor: &self.supervisor,
             store: &self.store,
             workspace_id: &workspace_id,
-            repo_key: None,
             claude_bin: &self.claude_bin,
             tmux_bin: &self.tmux_bin,
             mcp: self.mcp.as_ref(),
-            resume_claude_sid: None,
-            session_binary: None,
             brief: Some(&brief),
         })
         .await

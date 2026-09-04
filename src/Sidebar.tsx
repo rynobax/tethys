@@ -60,10 +60,8 @@ type Props = {
   /** `blockerId: null` clears the link. */
   onSetBlocker: (ws: Workspace, blockerId: WorkspaceId | null) => void;
   workspaceNeedsTurn: (ws: Workspace) => boolean;
-  /** True when a session in the workspace is actively processing (Claude working). */
+  /** True when the workspace's session is actively processing (Claude working). */
   workspaceWorking: (ws: Workspace) => boolean;
-  /** Names of scripts currently running in the workspace (empty if none). */
-  runningScriptNames: (ws: Workspace) => string[];
 };
 
 /**
@@ -143,7 +141,6 @@ export function Sidebar({
   onSetBlocker,
   workspaceNeedsTurn,
   workspaceWorking,
-  runningScriptNames,
 }: Props) {
   const sections: Section[] = useMemo(
     () =>
@@ -310,7 +307,6 @@ export function Sidebar({
     selected: w.id === selectedId,
     needsTurn: workspaceNeedsTurn(w),
     working: workspaceWorking(w),
-    runningScripts: runningScriptNames(w),
   });
 
   return (
@@ -592,7 +588,6 @@ function SortableWorkspaceRow({
   selected,
   needsTurn,
   working,
-  runningScripts,
   onSelect,
   onContextMenu,
 }: {
@@ -600,7 +595,6 @@ function SortableWorkspaceRow({
   selected: boolean;
   needsTurn: boolean;
   working: boolean;
-  runningScripts: string[];
   onSelect: () => void;
   onContextMenu: (x: number, y: number) => void;
 }) {
@@ -619,7 +613,6 @@ function SortableWorkspaceRow({
       selected={selected}
       needsTurn={needsTurn}
       working={working}
-      runningScripts={runningScripts}
       isDragging={isDragging}
       onSelect={onSelect}
       onContextMenu={onContextMenu}
@@ -642,7 +635,6 @@ function DraggableWorkspaceRow({
   selected,
   needsTurn,
   working,
-  runningScripts,
   depth,
   onSelect,
   onContextMenu,
@@ -651,7 +643,6 @@ function DraggableWorkspaceRow({
   selected: boolean;
   needsTurn: boolean;
   working: boolean;
-  runningScripts: string[];
   depth: number;
   onSelect: () => void;
   onContextMenu: (x: number, y: number) => void;
@@ -665,7 +656,6 @@ function DraggableWorkspaceRow({
       selected={selected}
       needsTurn={needsTurn}
       working={working}
-      runningScripts={runningScripts}
       isDragging={isDragging}
       depth={depth}
       onSelect={onSelect}
@@ -695,7 +685,6 @@ function WorkspaceRow({
   selected,
   needsTurn,
   working,
-  runningScripts,
   isDragging = false,
   depth = 0,
   onSelect,
@@ -706,7 +695,6 @@ function WorkspaceRow({
   selected: boolean;
   needsTurn: boolean;
   working: boolean;
-  runningScripts: string[];
   isDragging?: boolean;
   /** How deep in the blocker tree. 0 is a normal, unblocked row. */
   depth?: number;
@@ -715,9 +703,9 @@ function WorkspaceRow({
   dndProps?: DndProps;
 }) {
   const status = workspace.status.kind;
-  // Status tint for live workspaces: yellow when it's your turn, green while a
-  // session is working. Your-turn wins over working since it's the actionable
-  // state. Idle/cleared rows keep their default background.
+  // Status tint for live workspaces: yellow when it's your turn, green while
+  // the session is working. Your-turn wins over working since it's the
+  // actionable state. Idle/cleared rows keep their default background.
   const statusEdge =
     status === "ready"
       ? needsTurn
@@ -767,19 +755,6 @@ function WorkspaceRow({
           {workspace.branch}
         </span>
       </div>
-      {status === "ready" && runningScripts.length > 0 && (
-        <div className="workspace-scripts">
-          {runningScripts.map((name) => (
-            <span
-              key={name}
-              className="script-chip"
-              title={`Script running: ${name}`}
-            >
-              {name}
-            </span>
-          ))}
-        </div>
-      )}
       {status === "creating" && <div className="pending-label">creating…</div>}
       {status === "queued" && (
         <div className="pending-label" title="Tethys sets up one workspace at a time">

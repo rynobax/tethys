@@ -91,19 +91,15 @@ export interface RepoLink {
   docs?: { branch: string; checkout_path: string; linked_paths: string[] } | null;
 }
 
+/** The persisted half of a workspace's Claude session: enough to find its
+ *  tmux pane again or `claude --resume` the conversation. */
 export interface ClaudeSessionMeta {
   id: SessionId;
-  /** `null` => session is rooted at the workspace dir (parent of all repo worktrees). */
-  repo_key: string | null;
+  /** Where Claude runs. Fixed when the session first starts: the sole repo's
+   *  worktree for a one-repo workspace, else the workspace root. */
   cwd: string;
   claude_session_id: string | null;
   transcript_path: string | null;
-  /** Per-session override for the claude entry-point binary. Takes precedence
-   *  over the workspace's `claude_binary`. `null` falls back to it. */
-  claude_binary: string | null;
-  /** Cosmetic: when true the session is filtered out of the chip bar
-   *  unless the user toggles "show hidden". The tmux session keeps running. */
-  hidden: boolean;
 }
 
 /** A named place in the sidebar holding workspaces. Flat, and purely
@@ -130,9 +126,12 @@ export interface Workspace {
   branch: string;
   created_at: string;
   repo_links: RepoLink[];
-  sessions: ClaudeSessionMeta[];
-  /** Override the claude entry-point binary name for sessions in this workspace
-   *  (e.g. `claude-hipaa`). `null` falls back to the default `claude`. */
+  /** The workspace's one Claude session; `null` until the first start. */
+  session: ClaudeSessionMeta | null;
+  /** Override the claude entry-point binary for this workspace's session
+   *  (e.g. `claude-hipaa`). `null` falls back to the default `claude`.
+   *  Changed after creation via `switchClaudeBinary`, which restarts the
+   *  session under it. */
   claude_binary: string | null;
   /** Soft-delete marker. The workspace is hidden from the sidebar until the
    *  hourly purger runs (only purges entries older than 1 hour). */
@@ -194,9 +193,6 @@ export interface Repo {
   default_setup_script: string | null;
   setup_timeout_secs: number | null;
   copy_files: string[];
-  /** Named shell commands runnable inside a workspace's worktree of this repo
-   *  (e.g. `{ "dev": "yarn dev" }`). */
-  scripts: { [name: string]: string };
 }
 
 export type RegistryStatus =
@@ -226,11 +222,11 @@ export interface Discrepancies {
   missing_worktrees: MissingWorktree[];
 }
 
+/** The live half of a workspace's session, from the supervisor. Absent
+ *  entirely when nothing has been spawned or reattached this run. */
 export interface SessionInfo {
   id: string;
   workspace_id: string;
-  /** `null` => session is rooted at the workspace dir (parent of all repo worktrees). */
-  repo_key: string | null;
   cwd: string;
   running: boolean;
   runtime_state: SessionRuntimeState;
@@ -246,17 +242,6 @@ export interface SessionInfo {
   needs_turn: boolean;
   /** Whether Claude is actively working. Derived alongside `needs_turn`. */
   working: boolean;
-}
-
-export interface ScriptInfo {
-  id: string;
-  workspace_id: string;
-  repo_key: string;
-  script_name: string;
-  command: string;
-  cwd: string;
-  running: boolean;
-  started_at: string;
 }
 
 export interface TurnChangedEvent {
@@ -314,7 +299,6 @@ export interface Theme {
  *  Belongs to the workspace; lives only while Tethys runs. */
 export type Artifact = {
   id: string;
-  session_id: SessionId;
   label: string;
   /** Bumped each time the same artifact is seen again, so a page tab can
    *  reload in place. */

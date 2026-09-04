@@ -1,6 +1,6 @@
 # Tethys
 
-Desktop app for managing multiple Claude Code CLI sessions in parallel across git worktrees. Each "workspace" bundles N worktrees (one per repo) plus the Claude sessions running inside them, with "your turn" notifications driven by Claude Code hooks.
+Desktop app for managing multiple Claude Code CLI sessions in parallel across git worktrees. Each "workspace" bundles N worktrees (one per repo) plus the one Claude session running inside them, with "your turn" notifications driven by Claude Code hooks.
 
 **This is a personal tool built for Ryan.** No multi-user, no cross-platform, no distribution plans. macOS-only for the foreseeable future — feel free to take macOS-specific paths, shell invocations, or Tauri features without guarding them.
 
@@ -20,9 +20,21 @@ State lives at `~/Library/Application Support/app.tethys.dev/` (`state.json`, `l
 
 Tethys writes its hook entries into `~/.claude/settings.json` on every boot (keyed by `description: "Tethys session monitor"`). They're idempotent — safe to leave across reinstalls.
 
-It also generates a `CLAUDE.md` at each workspace root (`workspace_doc.rs`) explaining the worktree layout and telling sessions to ask for a missing repo rather than reading some other checkout. Rewritten on create, on repo-add, and at every boot. Claude Code reads CLAUDE.md from every parent dir, so the root file also applies to per-repo sessions.
+It also generates a `CLAUDE.md` at each workspace root (`workspace_doc.rs`) explaining the worktree layout and telling sessions to ask for a missing repo rather than reading some other checkout. Rewritten on create, on repo-add, and at every boot. Claude Code reads CLAUDE.md from every parent dir, so the root file also applies to a session running inside one repo's worktree.
 
 The prose lives in `repos.toml`, not in Rust: `[workspace_doc].body` (with `{branch}` / `{repo_list}` / `{available_repos}` / `{workspace_root}` / `{clone_dir}` placeholders) falling back to `DEFAULT_BODY`, plus per-repo `claude_notes`. Rust owns only the marker line and the "Repo notes" section.
+
+## The workspace's session
+
+A workspace runs **one** Claude session — `Workspace::session` is an `Option`, not a list. Several used to be allowed, each with its own tab in a chip bar above the terminal, its own cwd, a per-session binary override and a hidden flag; in practice every workspace ran exactly one, so the tab bar and everything behind it went. `Store::load` folds an old `sessions` list down to the newest visible entry with a saved conversation (`migrate_sessions`), lifts its binary override onto the workspace, and leaves the rest for the boot-time orphan reap to kill.
+
+Where it runs is decided once, by `Workspace::session_cwd`: the sole repo's worktree when the workspace has one repo — so that repo's own `CLAUDE.md` and settings are Claude's project — else the workspace root. An existing session keeps its cwd through every restart, so adding a second repo later doesn't move it. Handoffs follow the same rule rather than always landing at the root.
+
+Every way of putting the session on screen is one function, `sessions::open_session`, and one command, `start_claude_session`. It does the least that works, in order: return the running handle, reattach a tmux pane that outlived the app, `claude --resume` a conversation that is actually on disk (`transcript_is_resumable` — an empty transcript would fail with "No conversation found"), else start fresh. Start, Resume and Reconnect in the UI are all this call; the frontend auto-fires it for a dormant session with a saved conversation. A fresh spawn or a resume replaces the persisted meta and drops the old handle from the supervisor, since the tmux session name *is* the session id and a new tmux session means a new id.
+
+`switch_claude_binary` is the one way to change the binary after creation: it writes `Workspace::claude_binary`, kills the tmux session so the reattach step can't win, and calls `open_session`, which resumes if it can. It lives in the workspace header as a "run with" dropdown.
+
+Deliberately absent: a second session, any way to start a fresh conversation while one exists (`/clear` inside Claude does that), the per-repo **scripts** (`[repo.scripts]` in `repos.toml`, the `dev` chip and its terminal — a stale table in your `repos.toml` is ignored, not an error), and per-session anything.
 
 ## The session's MCP tools
 

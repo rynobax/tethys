@@ -18,7 +18,6 @@ import type {
   JobEvent,
   PendingPermission,
   RegistryStatus,
-  ScriptInfo,
   SessionInfo,
   SystemErrorEntry,
   Theme,
@@ -124,58 +123,29 @@ export const moveWorkspacesToFolder = (
     args: { workspace_ids: workspaceIds, folder },
   });
 
-// ── claude sessions ────────────────────────────────────────────────────────
+// ── the workspace's claude session ─────────────────────────────────────────
 
-export const listSessions = (workspaceId: WorkspaceId) =>
-  invoke<SessionInfo[]>("list_sessions", { workspaceId });
+/** `null` when the workspace's session is dormant (or never started). */
+export const getSession = (workspaceId: WorkspaceId) =>
+  invoke<SessionInfo | null>("get_session", { workspaceId });
 
-export const startClaudeSession = (
-  workspaceId: WorkspaceId,
-  repoKey: string | null,
-) =>
-  invoke<SessionInfo>("start_claude_session", {
-    args: { workspace_id: workspaceId, repo_key: repoKey },
-  });
+/** Reattach, resume, or start fresh — whichever the session's state calls
+ *  for. The one call behind Start, Resume and Reconnect alike. */
+export const startClaudeSession = (workspaceId: WorkspaceId) =>
+  invoke<SessionInfo>("start_claude_session", { workspaceId });
 
-export const resumeClaudeSession = (
-  workspaceId: WorkspaceId,
-  repoKey: string | null,
-  sessionMetaId: string,
-) =>
-  invoke<SessionInfo>("resume_claude_session", {
-    args: {
-      workspace_id: workspaceId,
-      repo_key: repoKey,
-      session_meta_id: sessionMetaId,
-    },
-  });
-
+/** Change the workspace's binary and restart its session under it, keeping
+ *  the conversation when there is one on disk. */
 export const switchClaudeBinary = (
   workspaceId: WorkspaceId,
-  sessionMetaId: string,
   claudeBinary: string,
 ) =>
   invoke<SessionInfo>("switch_claude_binary", {
-    args: {
-      workspace_id: workspaceId,
-      session_meta_id: sessionMetaId,
-      claude_binary: claudeBinary,
-    },
+    args: { workspace_id: workspaceId, claude_binary: claudeBinary },
   });
 
-export const setClaudeSessionHidden = (
-  workspaceId: WorkspaceId,
-  sessionId: string,
-  hidden: boolean,
-) =>
-  invoke<void>("set_claude_session_hidden", {
-    args: { workspace_id: workspaceId, session_id: sessionId, hidden },
-  });
-
-export const acknowledgeSessionTurn = (
-  workspaceId: WorkspaceId,
-  sessionId: string,
-) => invoke<void>("acknowledge_session_turn", { workspaceId, sessionId });
+export const acknowledgeSessionTurn = (workspaceId: WorkspaceId) =>
+  invoke<void>("acknowledge_session_turn", { workspaceId });
 
 // ── session pty ────────────────────────────────────────────────────────────
 
@@ -192,43 +162,6 @@ export const sendInput = (sessionId: string, data: number[]) =>
 
 export const resizeSession = (sessionId: string, cols: number, rows: number) =>
   invoke<void>("resize_session", { sessionId, cols, rows });
-
-// ── scripts ────────────────────────────────────────────────────────────────
-
-export const listScripts = (workspaceId: WorkspaceId) =>
-  invoke<ScriptInfo[]>("list_scripts", { workspaceId });
-
-export const startScript = (
-  workspaceId: WorkspaceId,
-  repoKey: string,
-  scriptName: string,
-) =>
-  invoke<ScriptInfo>("start_script", {
-    args: {
-      workspace_id: workspaceId,
-      repo_key: repoKey,
-      script_name: scriptName,
-    },
-  });
-
-export const dismissScript = (workspaceId: WorkspaceId, scriptId: string) =>
-  invoke<void>("dismiss_script", {
-    args: { workspace_id: workspaceId, script_id: scriptId },
-  });
-
-export const attachScript = (
-  scriptId: string,
-  onBytes: Channel<ArrayBuffer>,
-) => invoke<number[]>("attach_script", { scriptId, onBytes });
-
-export const detachScript = (scriptId: string, channelId: number) =>
-  invoke<void>("detach_script", { scriptId, channelId });
-
-export const sendInputScript = (scriptId: string, data: number[]) =>
-  invoke<void>("send_input_script", { scriptId, data });
-
-export const resizeScript = (scriptId: string, cols: number, rows: number) =>
-  invoke<void>("resize_script", { scriptId, cols, rows });
 
 // ── github ─────────────────────────────────────────────────────────────────
 

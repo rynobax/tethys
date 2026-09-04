@@ -27,11 +27,8 @@ use crate::provision_queue::ProvisionQueue;
 use crate::purge::Purger;
 use crate::reconcile::{self, Discrepancies};
 use crate::registry::{self, starter_template, RegistryLoad, Repo, RepoRegistry};
-use crate::scripts::{ScriptInfo, ScriptSupervisor};
-use crate::sessions::{start_session, SessionInfo, SessionSupervisor, StartSession};
-use crate::state::{
-    Folder, FolderId, Origin, ScriptRunMeta, SystemErrorEntry, Workspace, WorkspaceId,
-};
+use crate::sessions::{open_session, OpenSession, SessionInfo, SessionSupervisor};
+use crate::state::{Folder, FolderId, Origin, SystemErrorEntry, Workspace, WorkspaceId};
 use crate::store::Store;
 use crate::theme::Theme;
 use crate::tmux::{self, TmuxBin};
@@ -537,8 +534,8 @@ pub async fn add_repo_to_workspace(
     }
 }
 
-/// Soft delete: mark the workspace as deleted and kill any live PTY sessions
-/// so they can't keep writing to a worktree we're about to tear down. The
+/// Soft delete: mark the workspace as deleted and kill its live PTY session
+/// so it can't keep writing to a worktree we're about to tear down. The
 /// hourly purger does the actual git/worktree cleanup once the entry is
 /// older than the grace window. Use `cancel_delete_workspace` to undo
 /// before the purger runs.
@@ -547,27 +544,17 @@ pub async fn delete_workspace(
     app: AppHandle,
     store: State<'_, Arc<Store>>,
     tmux_bin: State<'_, TmuxBin>,
-    script_supervisor: State<'_, Arc<ScriptSupervisor>>,
     id: WorkspaceId,
 ) -> AppResult<()> {
-    let session_ids: Vec<String> = store
-        .with_workspace(&id, |w| w.sessions.iter().map(|m| m.id.clone()).collect())
+    let session_id: Option<String> = store
+        .with_workspace(&id, |w| w.session.as_ref().map(|m| m.id.clone()))
         .await?;
 
-    // Kill running scripts (dev servers etc.) before anything else — these
-    // would otherwise keep writing to the worktree we're about to tear down,
-    // and a long-lived `yarn dev` blocks the purger's `rm -rf`.
-    if !tmux_bin.0.as_os_str().is_empty() {
-        script_supervisor.kill_for_workspace(&id, &tmux_bin.0);
-    }
-
-    // Kill tmux sessions so claude processes stop writing to the worktree
-    // before the purger removes it. The supervisor reacts to the resulting
+    // Kill the tmux session so claude stops writing to the worktree before
+    // the purger removes it. The supervisor reacts to the resulting
     // session:exit and cleans up its own state.
-    if !tmux_bin.0.as_os_str().is_empty() {
-        for sid in &session_ids {
-            tmux::kill_session(&tmux_bin.0, sid);
-        }
+    if let Some(sid) = session_id.filter(|_| !tmux_bin.0.as_os_str().is_empty()) {
+        tmux::kill_session(&tmux_bin.0, &sid);
     }
 
     store
@@ -984,20 +971,14 @@ pub async fn forget_workspace(
     app: AppHandle,
     store: State<'_, Arc<Store>>,
     tmux_bin: State<'_, TmuxBin>,
-    script_supervisor: State<'_, Arc<ScriptSupervisor>>,
     id: WorkspaceId,
 ) -> AppResult<()> {
-    let session_ids: Vec<String> = store
+    let session_id: Option<String> = store
         .read(|s| {
             s.find_workspace(&id)
-                .map(|w| w.sessions.iter().map(|m| m.id.clone()).collect())
-                .unwrap_or_default()
+                .and_then(|w| w.session.as_ref().map(|m| m.id.clone()))
         })
         .await;
-
-    if !tmux_bin.0.as_os_str().is_empty() {
-        script_supervisor.kill_for_workspace(&id, &tmux_bin.0);
-    }
 
     let removed = store
         .mutate(|s| {
@@ -1011,12 +992,10 @@ pub async fn forget_workspace(
         return Err(AppError::WorkspaceNotFound(id));
     }
 
-    // State is gone — kill the tmux sessions too so they don't become
-    // orphans reaped on the next boot.
-    if !tmux_bin.0.as_os_str().is_empty() {
-        for sid in &session_ids {
-            tmux::kill_session(&tmux_bin.0, sid);
-        }
+    // State is gone — kill the tmux session too so it doesn't become an
+    // orphan reaped on the next boot.
+    if let Some(sid) = session_id.filter(|_| !tmux_bin.0.as_os_str().is_empty()) {
+        tmux::kill_session(&tmux_bin.0, &sid);
     }
 
     info!(%id, "forgot workspace (state-only removal)");
@@ -1024,38 +1003,44 @@ pub async fn forget_workspace(
     Ok(())
 }
 
+/// The live snapshot of a workspace's session. `None` when the workspace has
+/// never started one, or when this run hasn't spawned or reattached it yet —
+/// the frontend shows Start or Resume accordingly, and both lead to
+/// `start_claude_session`.
 #[tauri::command]
-pub fn list_sessions(
+pub async fn get_session(
     supervisor: State<'_, Arc<SessionSupervisor>>,
+    store: State<'_, Arc<Store>>,
     workspace_id: WorkspaceId,
-) -> Vec<SessionInfo> {
-    supervisor.list_for_workspace(&workspace_id)
+) -> AppResult<Option<SessionInfo>> {
+    let session_id = store
+        .read(|s| {
+            s.find_workspace(&workspace_id)
+                .and_then(|w| w.session.as_ref().map(|m| m.id.clone()))
+        })
+        .await;
+    Ok(session_id.and_then(|id| supervisor.info(&id)))
 }
 
+/// The user dismissed the workspace's "your turn" indicator.
 #[tauri::command]
 pub async fn acknowledge_session_turn(
     supervisor: State<'_, Arc<SessionSupervisor>>,
+    store: State<'_, Arc<Store>>,
     workspace_id: WorkspaceId,
-    session_id: String,
 ) -> AppResult<()> {
-    supervisor
-        .acknowledge_turn(&session_id, &workspace_id)
-        .await;
+    let session_id = store
+        .with_workspace(&workspace_id, |w| w.session.as_ref().map(|m| m.id.clone()))
+        .await?;
+    if let Some(session_id) = session_id {
+        supervisor.acknowledge_turn(&session_id, &workspace_id).await;
+    }
     Ok(())
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct StartClaudeArgs {
-    pub workspace_id: WorkspaceId,
-    /// `None` => start the session at the workspace root (the parent dir
-    /// containing each repo's worktree subdir).
-    #[serde(default)]
-    pub repo_key: Option<String>,
-}
-
-/// Spawn a fresh `claude` session in the given workspace/repo worktree.
-/// Also writes a `ClaudeSessionMeta` into state with `claude_session_id`
-/// left as `None` — it gets filled in by the `SessionStart` hook.
+/// Put the workspace's Claude session on screen: reattach it, resume it, or
+/// start it fresh, whichever is the least that gets there. See
+/// `sessions::open_session`.
 #[tauri::command]
 pub async fn start_claude_session(
     supervisor: State<'_, Arc<SessionSupervisor>>,
@@ -1063,105 +1048,15 @@ pub async fn start_claude_session(
     claude_bin: State<'_, ClaudeBin>,
     tmux_bin: State<'_, TmuxBin>,
     mcp: State<'_, Option<McpLaunch>>,
-    args: StartClaudeArgs,
+    workspace_id: WorkspaceId,
 ) -> AppResult<SessionInfo> {
-    start_session(StartSession {
+    open_session(OpenSession {
         supervisor: &supervisor,
         store: &store,
-        workspace_id: &args.workspace_id,
-        repo_key: args.repo_key,
+        workspace_id: &workspace_id,
         claude_bin: &claude_bin.0,
         tmux_bin: &tmux_bin.0,
         mcp: mcp.inner().as_ref(),
-        resume_claude_sid: None,
-        session_binary: None,
-        brief: None,
-    })
-    .await
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct ResumeClaudeArgs {
-    pub workspace_id: WorkspaceId,
-    /// `None` matches a workspace-root session.
-    #[serde(default)]
-    pub repo_key: Option<String>,
-    /// The `id` field from an existing `ClaudeSessionMeta` — its
-    /// `claude_session_id` will be passed to `claude --resume`.
-    pub session_meta_id: String,
-}
-
-#[tauri::command]
-pub async fn resume_claude_session(
-    supervisor: State<'_, Arc<SessionSupervisor>>,
-    store: State<'_, Arc<Store>>,
-    claude_bin: State<'_, ClaudeBin>,
-    tmux_bin: State<'_, TmuxBin>,
-    mcp: State<'_, Option<McpLaunch>>,
-    args: ResumeClaudeArgs,
-) -> AppResult<SessionInfo> {
-    // Pull claude_session_id + cwd + binary override from the
-    // ClaudeSessionMeta we already persisted on the previous run.
-    let (claude_sid, cwd, session_binary) = store
-        .read(|s| {
-            s.find_workspace(&args.workspace_id).and_then(|w| {
-                w.sessions
-                    .iter()
-                    .find(|sess| sess.id == args.session_meta_id)
-                    .map(|sess| {
-                        (
-                            sess.claude_session_id.clone(),
-                            sess.cwd.clone(),
-                            sess.claude_binary.clone(),
-                        )
-                    })
-            })
-        })
-        .await
-        .ok_or_else(|| {
-            AppError::Other(format!(
-                "no session {} in workspace {}",
-                args.session_meta_id, args.workspace_id
-            ))
-        })?;
-
-    // If the tmux session from a prior run is still alive, reattach to it
-    // — no claude respawn, no transcript replay. The Tethys SessionId is
-    // the tmux session name, so we can probe directly.
-    if !tmux_bin.0.as_os_str().is_empty()
-        && tmux::has_session(&tmux_bin.0, &args.session_meta_id)
-    {
-        info!(
-            session_id = %args.session_meta_id,
-            "reattaching to live tmux session"
-        );
-        let info = supervisor.reattach_tmux(
-            args.session_meta_id,
-            args.workspace_id.clone(),
-            args.repo_key,
-            &cwd,
-            &tmux_bin.0,
-        )?;
-        store.notify_changed(&args.workspace_id);
-        return Ok(info);
-    }
-
-    let claude_sid = claude_sid.ok_or_else(|| {
-        AppError::Other(
-            "session has no claude_session_id yet — resume not possible".into(),
-        )
-    })?;
-
-    start_session(StartSession {
-        supervisor: &supervisor,
-        store: &store,
-        workspace_id: &args.workspace_id,
-        repo_key: args.repo_key,
-        claude_bin: &claude_bin.0,
-        tmux_bin: &tmux_bin.0,
-        mcp: mcp.inner().as_ref(),
-        resume_claude_sid: Some(&claude_sid),
-        session_binary: session_binary.as_deref(),
         brief: None,
     })
     .await
@@ -1170,30 +1065,14 @@ pub async fn resume_claude_session(
 #[derive(Debug, serde::Deserialize)]
 pub struct SwitchClaudeBinaryArgs {
     pub workspace_id: WorkspaceId,
-    /// The `id` field from an existing `ClaudeSessionMeta`.
-    pub session_meta_id: String,
-    /// Binary name to switch to (e.g. `claude`, `claude-hipaa`). Stored as a
-    /// per-session override and used to relaunch the conversation.
+    /// Binary name to switch to (e.g. `claude`, `claude-hipaa`).
     pub claude_binary: String,
 }
 
-/// Whether a claude conversation can be resumed via `--resume`. Claude reports
-/// a `claude_session_id` at startup but only writes the transcript to disk once
-/// there's actual conversation, so `--resume` on a brand-new (empty) session
-/// fails with "No conversation found". A non-empty transcript file on disk is
-/// the reliable signal that resume will succeed.
-fn transcript_is_resumable(path: Option<&Path>) -> bool {
-    path.and_then(|p| std::fs::metadata(p).ok())
-        .map(|m| m.is_file() && m.len() > 0)
-        .unwrap_or(false)
-}
-
-/// Switch the entry-point binary for a chat. Kills the running tmux session
-/// (so the resume path can't just reattach the old process) and relaunches
-/// claude under the new binary. If the conversation has been persisted to
-/// disk, it resumes via `--resume <claude_session_id>` to preserve history;
-/// otherwise (a fresh chat with no messages yet) it starts a new session under
-/// the new binary — there's nothing to resume.
+/// Change the workspace's entry-point binary and restart its session under
+/// it. The running tmux session is killed first so `open_session` can't just
+/// reattach the old process; the conversation is resumed if it's on disk, and
+/// an empty chat simply starts over under the new binary.
 #[tauri::command]
 pub async fn switch_claude_binary(
     supervisor: State<'_, Arc<SessionSupervisor>>,
@@ -1211,84 +1090,28 @@ pub async fn switch_claude_binary(
     // down the running session.
     claude::resolve_named(&binary)?;
 
-    let (claude_sid, transcript_path, repo_key) = store
-        .read(|s| {
-            s.find_workspace(&args.workspace_id).and_then(|w| {
-                w.sessions
-                    .iter()
-                    .find(|sess| sess.id == args.session_meta_id)
-                    .map(|sess| {
-                        (
-                            sess.claude_session_id.clone(),
-                            sess.transcript_path.clone(),
-                            sess.repo_key.clone(),
-                        )
-                    })
-            })
+    let session_id = store
+        .update_workspace(&args.workspace_id, |ws| {
+            ws.claude_binary = Some(binary.clone());
+            Ok(ws.session.as_ref().map(|m| m.id.clone()))
         })
-        .await
-        .ok_or_else(|| {
-            AppError::Other(format!(
-                "no session {} in workspace {}",
-                args.session_meta_id, args.workspace_id
-            ))
-        })?;
+        .await?;
 
-    // Resume only when the conversation is actually on disk; otherwise the new
-    // binary starts a fresh session (an empty chat has nothing to resume).
-    let resume_sid = claude_sid
-        .as_deref()
-        .filter(|_| transcript_is_resumable(transcript_path.as_deref()));
-
-    // Kill the live tmux session so `spawn_claude` relaunches under the new
-    // binary instead of reattaching the old process. Harmless if it already
-    // exited.
-    if !tmux_bin.0.as_os_str().is_empty() {
-        tmux::kill_session(&tmux_bin.0, &args.session_meta_id);
+    // Harmless if it already exited.
+    if let Some(sid) = session_id.filter(|_| !tmux_bin.0.as_os_str().is_empty()) {
+        tmux::kill_session(&tmux_bin.0, &sid);
     }
 
-    start_session(StartSession {
+    open_session(OpenSession {
         supervisor: &supervisor,
         store: &store,
         workspace_id: &args.workspace_id,
-        repo_key,
         claude_bin: &claude_bin.0,
         tmux_bin: &tmux_bin.0,
         mcp: mcp.inner().as_ref(),
-        resume_claude_sid: resume_sid,
-        session_binary: Some(&binary),
         brief: None,
     })
     .await
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct SetClaudeHiddenArgs {
-    pub workspace_id: WorkspaceId,
-    pub session_id: String,
-    pub hidden: bool,
-}
-
-/// Toggle a Claude session's `hidden` flag in state. Cosmetic only — the
-/// tmux session and the supervisor's `SessionHandle` keep running.
-#[tauri::command]
-pub async fn set_claude_session_hidden(
-    store: State<'_, Arc<Store>>,
-    args: SetClaudeHiddenArgs,
-) -> AppResult<()> {
-    store
-        .update_workspace(&args.workspace_id, |ws| {
-            let meta = ws.session_mut(&args.session_id).ok_or_else(|| {
-                AppError::Other(format!(
-                    "session {} not found in workspace {}",
-                    args.session_id, args.workspace_id
-                ))
-            })?;
-            meta.hidden = args.hidden;
-            Ok(())
-        })
-        .await?;
-    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1361,197 +1184,6 @@ pub async fn dismiss_artifact(
 
 /// Newtype so `claude_bin` can be managed in Tauri state.
 pub struct ClaudeBin(pub std::path::PathBuf);
-
-#[tauri::command]
-pub fn list_scripts(
-    supervisor: State<'_, Arc<ScriptSupervisor>>,
-    workspace_id: WorkspaceId,
-) -> Vec<ScriptInfo> {
-    supervisor.list_for_workspace(&workspace_id)
-}
-
-#[derive(Debug, Deserialize)]
-pub struct StartScriptArgs {
-    pub workspace_id: WorkspaceId,
-    pub repo_key: String,
-    pub script_name: String,
-}
-
-/// Start a configured script in the given workspace+repo's worktree. Looks
-/// up the command in the live registry, spawns it under tmux, and persists
-/// a `ScriptRunMeta` so it can be reattached after a Tethys restart.
-#[tauri::command]
-pub async fn start_script(
-    app: AppHandle,
-    supervisor: State<'_, Arc<ScriptSupervisor>>,
-    store: State<'_, Arc<Store>>,
-    registry: State<'_, Arc<RegistryLoad>>,
-    tmux_bin: State<'_, TmuxBin>,
-    args: StartScriptArgs,
-) -> AppResult<ScriptInfo> {
-    if tmux_bin.0.as_os_str().is_empty() {
-        return Err(AppError::Other(
-            "tmux not found — install with `brew install tmux` and restart Tethys".into(),
-        ));
-    }
-
-    let reg = registry.require()?;
-    let repo = reg.find_repo(&args.repo_key).ok_or_else(|| {
-        AppError::Other(format!("unknown repo key: {}", args.repo_key))
-    })?;
-    let command = repo
-        .scripts
-        .get(&args.script_name)
-        .cloned()
-        .ok_or_else(|| {
-            AppError::Other(format!(
-                "no script '{}' configured for repo '{}'",
-                args.script_name, args.repo_key
-            ))
-        })?;
-
-    let cwd = store
-        .read(|s| {
-            s.find_workspace(&args.workspace_id)
-                .and_then(|w| w.link(&args.repo_key))
-                .map(|r| r.worktree_path.clone())
-        })
-        .await
-        .ok_or_else(|| {
-            AppError::Other(format!(
-                "no worktree for {}/{} in state",
-                args.workspace_id, args.repo_key
-            ))
-        })?;
-
-    // Replace any prior run for the same (repo, script_name) so the UI only
-    // ever shows one chip per configured script.
-    let existing_ids: Vec<String> = supervisor
-        .list_for_workspace(&args.workspace_id)
-        .into_iter()
-        .filter(|s| s.repo_key == args.repo_key && s.script_name == args.script_name)
-        .map(|s| s.id)
-        .collect();
-    for sid in existing_ids {
-        supervisor.dismiss(&sid, &tmux_bin.0);
-    }
-    store
-        .mutate(|s| {
-            if let Some(ws) = s.find_workspace_mut(&args.workspace_id) {
-                ws.script_runs.retain(|m| {
-                    !(m.repo_key == args.repo_key && m.script_name == args.script_name)
-                });
-            }
-            Ok(())
-        })
-        .await?;
-
-    let info = supervisor.start(
-        args.workspace_id.clone(),
-        args.repo_key.clone(),
-        args.script_name.clone(),
-        command.clone(),
-        &cwd,
-        &tmux_bin.0,
-    )?;
-
-    let meta = ScriptRunMeta {
-        id: info.id.clone(),
-        repo_key: args.repo_key,
-        script_name: args.script_name,
-        command,
-        cwd,
-        started_at: info.started_at,
-    };
-    store
-        .mutate(|s| {
-            let ws = s
-                .find_workspace_mut(&args.workspace_id)
-                .ok_or_else(|| AppError::WorkspaceNotFound(args.workspace_id.clone()))?;
-            ws.script_runs.push(meta);
-            Ok(())
-        })
-        .await?;
-
-    let _ = app.emit(
-        "script:changed",
-        serde_json::json!({ "workspace_id": args.workspace_id }),
-    );
-    Ok(info)
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DismissScriptArgs {
-    pub workspace_id: WorkspaceId,
-    pub script_id: String,
-}
-
-/// Drop a script's in-memory handle (and kill any underlying tmux session
-/// just in case). After this the chip disappears from the bar.
-#[tauri::command]
-pub async fn dismiss_script(
-    app: AppHandle,
-    supervisor: State<'_, Arc<ScriptSupervisor>>,
-    store: State<'_, Arc<Store>>,
-    tmux_bin: State<'_, TmuxBin>,
-    args: DismissScriptArgs,
-) -> AppResult<()> {
-    if !tmux_bin.0.as_os_str().is_empty() {
-        supervisor.dismiss(&args.script_id, &tmux_bin.0);
-    }
-    // The watcher would also do this on exit, but for an already-exited
-    // script the watcher already ran — clean state here to be safe.
-    store
-        .mutate(|s| {
-            if let Some(ws) = s.find_workspace_mut(&args.workspace_id) {
-                ws.script_runs.retain(|m| m.id != args.script_id);
-            }
-            Ok(())
-        })
-        .await?;
-    let _ = app.emit(
-        "script:changed",
-        serde_json::json!({ "workspace_id": args.workspace_id }),
-    );
-    Ok(())
-}
-
-#[tauri::command]
-pub fn attach_script(
-    supervisor: State<'_, Arc<ScriptSupervisor>>,
-    script_id: String,
-    on_bytes: tauri::ipc::Channel<InvokeResponseBody>,
-) -> AppResult<Vec<u8>> {
-    supervisor.attach(&script_id, on_bytes)
-}
-
-#[tauri::command]
-pub fn detach_script(
-    supervisor: State<'_, Arc<ScriptSupervisor>>,
-    script_id: String,
-    channel_id: u32,
-) {
-    supervisor.detach(&script_id, channel_id);
-}
-
-#[tauri::command]
-pub fn send_input_script(
-    supervisor: State<'_, Arc<ScriptSupervisor>>,
-    script_id: String,
-    data: Vec<u8>,
-) -> AppResult<()> {
-    supervisor.send_input(&script_id, &data)
-}
-
-#[tauri::command]
-pub fn resize_script(
-    supervisor: State<'_, Arc<ScriptSupervisor>>,
-    script_id: String,
-    cols: u16,
-    rows: u16,
-) -> AppResult<()> {
-    supervisor.resize(&script_id, cols, rows)
-}
 
 /// Subscribe to live PTY bytes and return the current scrollback. The
 /// channel carries raw bytes via `InvokeResponseBody::Raw` — no JSON
@@ -1714,41 +1346,4 @@ fn spawn_event_forwarder(channel: Channel<JobEvent>) -> JobTx {
         }
     });
     JobTx(tx)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    #[test]
-    fn transcript_none_is_not_resumable() {
-        assert!(!transcript_is_resumable(None));
-    }
-
-    #[test]
-    fn missing_transcript_is_not_resumable() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("missing.jsonl");
-        assert!(!transcript_is_resumable(Some(&path)));
-    }
-
-    #[test]
-    fn empty_transcript_is_not_resumable() {
-        // A fresh chat: claude reports a session id at startup but hasn't
-        // written any conversation yet — `--resume` would fail.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty.jsonl");
-        std::fs::File::create(&path).unwrap();
-        assert!(!transcript_is_resumable(Some(&path)));
-    }
-
-    #[test]
-    fn nonempty_transcript_is_resumable() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("convo.jsonl");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, r#"{{"type":"user","message":"hi"}}"#).unwrap();
-        assert!(transcript_is_resumable(Some(&path)));
-    }
 }

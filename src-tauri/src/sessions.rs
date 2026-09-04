@@ -26,7 +26,6 @@ const RING_CAPACITY: usize = 2 * 1024 * 1024; // 2 MB scrollback per session
 struct SpawnRequest<'a> {
     id: SessionId,
     workspace_id: String,
-    repo_key: Option<String>,
     cwd: &'a Path,
     program: &'a Path,
     args: &'a [String],
@@ -40,15 +39,12 @@ struct SpawnRequest<'a> {
 
 pub type SessionId = String;
 
-/// Snapshot returned to the frontend for the sessions list. Does not include
-/// the live byte stream — that flows over a `Channel` via `attach`.
+/// Snapshot of a workspace's session for the frontend. Does not include the
+/// live byte stream — that flows over a `Channel` via `attach`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionInfo {
     pub id: SessionId,
     pub workspace_id: String,
-    /// `None` => session is rooted at the workspace's parent dir (which
-    /// contains every repo subdir), not inside any one repo.
-    pub repo_key: Option<String>,
     pub cwd: PathBuf,
     pub running: bool,
     pub runtime_state: SessionRuntimeState,
@@ -63,7 +59,7 @@ pub struct SessionInfo {
     /// Derived here rather than in the frontend, which used to recompute it in
     /// four places from `running` / `runtime_state` / `turn_acknowledged` —
     /// and two of those four disagreed about whether `running` mattered, so
-    /// the sidebar aggregate and the chip dot could light differently for the
+    /// the sidebar row and the detail pane could light differently for the
     /// same session.
     pub needs_turn: bool,
     /// Whether Claude is actively working in this session. Derived alongside
@@ -128,7 +124,7 @@ impl SessionSupervisor {
         acknowledged: bool,
     ) {
         // Seeds publish nothing: the frontend isn't subscribed yet and
-        // `list_sessions` reads straight out of the tracker.
+        // `get_session` reads straight out of the tracker.
         self.turn.observe(
             session_id,
             "",
@@ -214,7 +210,7 @@ impl SessionSupervisor {
                     .workspaces
                     .iter()
                     .flat_map(|ws| {
-                        ws.sessions.iter().map(move |se| TrackedSession {
+                        ws.session.iter().map(move |se| TrackedSession {
                             workspace_id: ws.id.as_str(),
                             session_id: &se.id,
                             cwd: se.cwd.to_str(),
@@ -287,7 +283,6 @@ impl SessionSupervisor {
         let SpawnRequest {
             id,
             workspace_id,
-            repo_key,
             cwd,
             program,
             args,
@@ -302,7 +297,6 @@ impl SessionSupervisor {
         let info = SessionInfo {
             id: id.clone(),
             workspace_id: workspace_id.clone(),
-            repo_key,
             cwd: cwd.to_path_buf(),
             running: true,
             runtime_state: seed_state,
@@ -338,7 +332,7 @@ impl SessionSupervisor {
 
         self.sessions.lock().unwrap().insert(id.clone(), handle);
         // Seeds publish nothing — hooks refine the state moments later, and
-        // the frontend reads the seed out of `list_sessions`.
+        // the frontend reads the seed out of `get_session`.
         self.turn.observe(&id, &workspace_id, seed);
         let _ = self.app.emit(
             "session:changed",
@@ -364,7 +358,6 @@ impl SessionSupervisor {
     pub fn spawn_claude(
         &self,
         workspace_id: String,
-        repo_key: Option<String>,
         cwd: &Path,
         tmux_bin: &Path,
         claude_bin: &Path,
@@ -399,7 +392,6 @@ impl SessionSupervisor {
         let info = self.spawn_with_id(SpawnRequest {
             id,
             workspace_id: workspace_id.clone(),
-            repo_key,
             cwd,
             program: tmux_bin,
             args: &args,
@@ -433,7 +425,6 @@ impl SessionSupervisor {
         &self,
         session_id: SessionId,
         workspace_id: String,
-        repo_key: Option<String>,
         cwd: &Path,
         tmux_bin: &Path,
     ) -> AppResult<SessionInfo> {
@@ -451,7 +442,6 @@ impl SessionSupervisor {
         self.spawn_with_id(SpawnRequest {
             id: session_id,
             workspace_id,
-            repo_key,
             cwd,
             program: tmux_bin,
             args: &args,
@@ -497,8 +487,8 @@ impl SessionSupervisor {
         // diagram drawn before a tool call in the same turn is missed. The
         // debug line in `record_diagrams` is how we'd find out that matters.
         let Some(message) = msg.last_assistant_message.as_deref() else { return };
-        let Some((ws_id, sess_id)) = self.resolve_session(&msg).await else { return };
-        self.artifacts.record_diagrams(&ws_id, &sess_id, message).await;
+        let Some((ws_id, _)) = self.resolve_session(&msg).await else { return };
+        self.artifacts.record_diagrams(&ws_id, message).await;
     }
 
     /// PostToolUse for a file tool on an `.html` path, or a Bash `open` of
@@ -512,13 +502,13 @@ impl SessionSupervisor {
             cwd: msg.cwd.as_deref(),
         };
         let Some(path) = artifacts::page_written(&call) else { return };
-        let Some((ws_id, sess_id)) = self.resolve_session(msg).await else { return };
+        let Some((ws_id, _)) = self.resolve_session(msg).await else { return };
         let root = self
             .store
             .read(|s| s.find_workspace(&ws_id).and_then(|w| w.root_buf()))
             .await;
         let Some(root) = root else { return };
-        self.artifacts.record_page(&ws_id, &sess_id, &root, &path).await;
+        self.artifacts.record_page(&ws_id, &root, &path).await;
     }
 
     async fn handle_notify(&self, msg: HookMessage) {
@@ -593,6 +583,9 @@ impl SessionSupervisor {
     /// stable across the id rotation Claude does on compaction/resume; without
     /// it a rotated id means every hook silently misses until the 2s probe
     /// loop heals the id.
+    ///
+    /// Returns the workspace and its session's id: one implies the other, but
+    /// the turn tracker is keyed by session id, so both are handed back.
     async fn resolve_session(&self, msg: &HookMessage) -> Option<(WorkspaceId, SessionId)> {
         let Some(csid) = msg.session_id.as_deref() else {
             debug!(
@@ -613,22 +606,17 @@ impl SessionSupervisor {
             .read(|s| {
                 let mut by_cwd = None;
                 for ws in &s.workspaces {
-                    for sess in &ws.sessions {
-                        let tracked = sess.claude_session_id.as_deref();
-                        if tracked == Some(csid)
-                            || (parent_csid.is_some()
-                                && tracked == parent_csid.as_deref())
-                        {
-                            return Some((ws.id.clone(), sess.id.clone()));
-                        }
-                        // Remember a cwd match but keep looking for an id
-                        // match, which is always the better answer.
-                        if by_cwd.is_none()
-                            && cwd.is_some()
-                            && sess.cwd.to_str() == cwd
-                        {
-                            by_cwd = Some((ws.id.clone(), sess.id.clone()));
-                        }
+                    let Some(sess) = &ws.session else { continue };
+                    let tracked = sess.claude_session_id.as_deref();
+                    if tracked == Some(csid)
+                        || (parent_csid.is_some() && tracked == parent_csid.as_deref())
+                    {
+                        return Some((ws.id.clone(), sess.id.clone()));
+                    }
+                    // Remember a cwd match but keep looking for an id
+                    // match, which is always the better answer.
+                    if by_cwd.is_none() && cwd.is_some() && sess.cwd.to_str() == cwd {
+                        by_cwd = Some((ws.id.clone(), sess.id.clone()));
                     }
                 }
                 by_cwd
@@ -738,23 +726,28 @@ impl SessionSupervisor {
             .resize(cols, rows)
     }
 
-    pub fn list_for_workspace(&self, workspace_id: &str) -> Vec<SessionInfo> {
+    /// The live snapshot of a session, if this supervisor has a handle for it.
+    /// `None` means dormant: nothing has been spawned or reattached this run.
+    pub fn info(&self, session_id: &str) -> Option<SessionInfo> {
         let sessions = self.sessions.lock().unwrap();
-        sessions
-            .values()
-            .filter(|h| h.info.workspace_id == workspace_id)
-            .map(|h| {
-                let mut info = h.info.clone();
-                info.running = h.pty.is_running();
-                let turn = self.turn.get(&h.info.id);
-                info.needs_turn = turn.needs_turn(info.running);
-                info.working = turn.is_working(info.running);
-                info.runtime_state = turn.state;
-                info.notification_type = turn.notification_type;
-                info.turn_acknowledged = turn.acknowledged;
-                info
-            })
-            .collect()
+        let h = sessions.get(session_id)?;
+        let mut info = h.info.clone();
+        info.running = h.pty.is_running();
+        let turn = self.turn.get(&h.info.id);
+        info.needs_turn = turn.needs_turn(info.running);
+        info.working = turn.is_working(info.running);
+        info.runtime_state = turn.state;
+        info.notification_type = turn.notification_type;
+        info.turn_acknowledged = turn.acknowledged;
+        Some(info)
+    }
+
+    /// Drop the handle for a session that is no longer a workspace's session
+    /// — replaced by a fresh spawn. The PTY client it held is already dead or
+    /// about to be; what this removes is the exited scrollback nobody can
+    /// reach any more.
+    pub fn forget(&self, session_id: &str) {
+        self.sessions.lock().unwrap().remove(session_id);
     }
 }
 
@@ -840,7 +833,7 @@ async fn persist_turn(store: &Arc<Store>, changed: &TurnChanged) -> AppResult<()
 /// session as `Dormant`.
 ///
 /// Recording it is the part that used to be missing. The hook emitted a
-/// `Dormant` event but never wrote it anywhere, so `list_sessions` kept
+/// `Dormant` event but never wrote it anywhere, so `get_session` kept
 /// returning the pre-exit state — and the frontend's own refresh, racing the
 /// event, put the stale state straight back and re-lit the sidebar dot for a
 /// session that had already died.
@@ -1026,124 +1019,170 @@ fn plan_probe_reconciliation(
     out
 }
 
-/// One request to put a Claude session on screen, however it got there:
-/// a fresh start, a resume, a binary switch, or the session a handoff creates.
-pub struct StartSession<'a> {
+/// One request to put a workspace's Claude session on screen, whatever state
+/// it is in. Every caller — the Start/Resume/Reconnect button, the auto-start
+/// after provisioning, a binary switch, a handoff — goes through here.
+pub struct OpenSession<'a> {
     pub supervisor: &'a Arc<SessionSupervisor>,
     pub store: &'a Arc<Store>,
     pub workspace_id: &'a str,
-    /// `None` => start at the workspace root (the parent dir containing each
-    /// repo's worktree subdir).
-    pub repo_key: Option<String>,
-    /// App-wide binary resolved at boot; the fallback when neither the session
-    /// nor the workspace overrides it.
+    /// App-wide binary resolved at boot; the fallback when the workspace
+    /// doesn't override it.
     pub claude_bin: &'a Path,
     pub tmux_bin: &'a Path,
     /// Handoff tool config. Attached to every session Tethys spawns — whether
     /// an agent can hand off shouldn't depend on which workspace it landed in.
     pub mcp: Option<&'a McpLaunch>,
-    /// Resume an existing conversation via `claude --resume <id>`.
-    pub resume_claude_sid: Option<&'a str>,
-    /// Per-session binary override to run under and persist onto the new meta.
-    /// Takes precedence over the workspace default; `None` falls back to it.
-    pub session_binary: Option<&'a str>,
     /// The Brief, for the session a handoff creates. `None` everywhere else —
     /// a session the user started is one they're about to type into.
     pub brief: Option<&'a str>,
 }
 
-/// Resolve where the session runs and which binary it runs under, spawn it,
-/// and persist the `ClaudeSessionMeta` that makes it resumable across restarts.
-pub async fn start_session(req: StartSession<'_>) -> AppResult<SessionInfo> {
+/// Make the workspace's session live, doing the least that gets there.
+///
+/// In order: a handle that is already running is returned as is; a tmux pane
+/// that outlived the app is reattached; a conversation on disk is resumed with
+/// `claude --resume`; otherwise a fresh `claude` starts. Each step is what the
+/// user would have had to pick between when there were three buttons for it
+/// and a chip bar to pick them from — Start, Resume and Reconnect were all
+/// this function with the decision made by hand.
+///
+/// A fresh start or a resume replaces the persisted `ClaudeSessionMeta`: a new
+/// tmux session means a new id, and the old id's handle is dropped so its dead
+/// scrollback doesn't linger. The cwd is the one thing that carries over — see
+/// `Workspace::session_cwd`.
+pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
     if req.tmux_bin.as_os_str().is_empty() {
         return Err(AppError::Other(
             "tmux not found — install with `brew install tmux` and restart Tethys".into(),
         ));
     }
 
-    // Resolve the cwd: a specific repo's worktree, or — when repo_key is
-    // None — the workspace root (parent of every repo worktree).
-    // Also pull the per-workspace claude binary override, if any.
-    let (cwd, ws_binary) = req
+    let (existing, cwd, ws_binary) = req
         .store
         .read(|s| {
             let w = s.find_workspace(req.workspace_id)?;
-            let cwd = match req.repo_key.as_deref() {
-                Some(key) => w.link(key).map(|r| r.worktree_path.clone()),
-                None => w.root_buf(),
-            }?;
-            Some((cwd, w.claude_binary.clone()))
+            Some((w.session.clone(), w.session_cwd(), w.claude_binary.clone()))
         })
         .await
-        .ok_or_else(|| {
-            AppError::Other(match req.repo_key.as_deref() {
-                Some(key) => format!("no worktree for {}/{} in state", req.workspace_id, key),
-                None => format!(
-                    "workspace {} has no repos — can't resolve a root dir",
-                    req.workspace_id
-                ),
-            })
-        })?;
+        .ok_or_else(|| AppError::WorkspaceNotFound(req.workspace_id.to_string()))?;
+    let cwd = cwd.ok_or_else(|| {
+        AppError::Other(format!(
+            "workspace {} has no repos — nowhere to run Claude",
+            req.workspace_id
+        ))
+    })?;
 
-    // Session override wins over the workspace default, which wins over the
-    // app-wide binary resolved at boot.
-    let resolved_bin = match req.session_binary.or(ws_binary.as_deref()) {
+    if let Some(prev) = &existing {
+        if let Some(info) = req.supervisor.info(&prev.id).filter(|i| i.running) {
+            return Ok(info);
+        }
+        if tmux::has_session(req.tmux_bin, &prev.id) {
+            info!(session_id = %prev.id, "reattaching to live tmux session");
+            return req.supervisor.reattach_tmux(
+                prev.id.clone(),
+                req.workspace_id.to_string(),
+                &cwd,
+                req.tmux_bin,
+            );
+        }
+    }
+
+    // Resume only when the conversation is actually on disk. Claude reports
+    // its session id at startup but writes the transcript only once there's
+    // been an exchange, so `--resume` on an empty session fails with "No
+    // conversation found" — a fresh start is the right answer there.
+    let resume_sid = existing.as_ref().and_then(|prev| {
+        prev.claude_session_id
+            .as_deref()
+            .filter(|_| transcript_is_resumable(prev.transcript_path.as_deref()))
+    });
+
+    let resolved_bin = match ws_binary.as_deref() {
         Some(bin) => crate::claude::resolve_named(bin)?,
         None => req.claude_bin.to_path_buf(),
     };
 
     let (info, _token) = req.supervisor.spawn_claude(
         req.workspace_id.to_string(),
-        req.repo_key.clone(),
         &cwd,
         req.tmux_bin,
         &resolved_bin,
-        req.resume_claude_sid,
+        resume_sid,
         req.mcp,
         req.brief,
     )?;
 
-    // Persist a ClaudeSessionMeta entry so resume works across restarts.
-    // claude_session_id is filled in by the SessionStart hook once it
-    // arrives. We key on the Tethys-internal `id` (== SessionSupervisor id)
-    // so the UI and supervisor use a shared identifier.
+    // Persist the meta that makes this resumable across restarts. The
+    // claude_session_id is filled in by the SessionStart hook once it arrives.
     let meta = ClaudeSessionMeta {
         id: info.id.clone(),
-        repo_key: req.repo_key.clone(),
-        cwd: cwd.clone(),
+        cwd,
         claude_session_id: None,
         transcript_path: None,
-        claude_binary: req.session_binary.map(str::to_string),
-        hidden: false,
         runtime_state: None,
         notification_type: None,
         turn_acknowledged: false,
     };
-
     req.store
         .update_workspace(req.workspace_id, |ws| {
-            // Resuming? Drop the prior meta for this Claude conversation so
-            // we don't accumulate dormant duplicates with the same
-            // claude_session_id across runs.
-            if let Some(csid) = req.resume_claude_sid {
-                ws.sessions
-                    .retain(|m| m.claude_session_id.as_deref() != Some(csid));
-            }
-            // Defensive: no dupes of the new tethys id either.
-            ws.sessions.retain(|m| m.id != meta.id);
-            ws.sessions.push(meta);
+            ws.session = Some(meta);
             Ok(())
         })
         .await?;
+    if let Some(prev) = existing {
+        req.supervisor.forget(&prev.id);
+    }
 
     Ok(info)
 }
 
+/// Whether a conversation can be resumed via `--resume`: a non-empty
+/// transcript file on disk is the reliable signal.
+fn transcript_is_resumable(path: Option<&Path>) -> bool {
+    path.and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parent_session_from_subagent_path;
+    use std::io::Write;
+
+    use super::{parent_session_from_subagent_path, transcript_is_resumable};
     use super::{plan_probe_reconciliation, ProbeAction, ProbeView, TrackedSession};
     use crate::state::SessionRuntimeState;
+
+    #[test]
+    fn transcript_none_is_not_resumable() {
+        assert!(!transcript_is_resumable(None));
+    }
+
+    #[test]
+    fn missing_transcript_is_not_resumable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.jsonl");
+        assert!(!transcript_is_resumable(Some(&path)));
+    }
+
+    /// A fresh chat: claude reports a session id at startup but hasn't
+    /// written any conversation yet — `--resume` would fail.
+    #[test]
+    fn empty_transcript_is_not_resumable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.jsonl");
+        std::fs::File::create(&path).unwrap();
+        assert!(!transcript_is_resumable(Some(&path)));
+    }
+
+    #[test]
+    fn nonempty_transcript_is_resumable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("convo.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, r#"{{"type":"user","message":"hi"}}"#).unwrap();
+        assert!(transcript_is_resumable(Some(&path)));
+    }
 
     /// Claude rotated its session id and left the old probe file behind, so
     /// the cwd shows two probes: a stale one still bearing the id Tethys

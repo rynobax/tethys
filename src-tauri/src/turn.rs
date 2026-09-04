@@ -132,7 +132,7 @@ impl TurnTracker {
 
         let changed = match signal {
             // ── Seeds: establish initial state, tell nobody ────────────────
-            // The frontend isn't subscribed yet at boot, and `list_sessions`
+            // The frontend isn't subscribed yet at boot, and `get_session`
             // reads the value straight out of this map anyway.
             TurnSignal::Spawned => {
                 *current = TurnState {
@@ -295,7 +295,7 @@ mod tests {
 
     /// A fresh spawn lands at an empty prompt waiting on the user — "your
     /// turn", not "working". Seeds tell nobody: the frontend reads the value
-    /// out of `list_sessions` instead.
+    /// out of `get_session` instead.
     #[test]
     fn a_spawned_session_waits_for_input_and_emits_nothing() {
         let t = tracker();
@@ -451,7 +451,7 @@ mod tests {
     // ── exit ─────────────────────────────────────────────────────────────
 
     /// The bug this module was written for: the exit hook used to emit a
-    /// Dormant event without writing it anywhere, so `list_sessions` kept
+    /// Dormant event without writing it anywhere, so `get_session` kept
     /// reporting the pre-exit state and a refresh re-lit the dot for a dead
     /// session.
     #[test]

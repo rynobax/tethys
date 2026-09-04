@@ -49,7 +49,7 @@ const referenced = new Set(
 // ── events ─────────────────────────────────────────────────────────────────
 
 const emitted = new Set(
-  [...rustSource.matchAll(/"((?:workspace|session|script|github|system_status|theme|pending_permissions|artifact):\w+)"/g)].map(
+  [...rustSource.matchAll(/"((?:workspace|session|github|system_status|theme|pending_permissions|artifact):\w+)"/g)].map(
     (m) => m[1],
   ),
 );

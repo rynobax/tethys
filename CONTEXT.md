@@ -10,14 +10,14 @@ Desktop app for running multiple parallel Claude Code sessions across git worktr
 A git repository registered in `repos.toml`, identified by its stable `repo_key`. Tethys maintains its own clone of each repo and never touches checkouts the user manages separately.
 
 **Workspace**:
-A named unit of parallel work: one branch name shared across N repos, each checked out as a worktree, plus the Claude sessions running inside them.
+A named unit of parallel work: one branch name shared across N repos, each checked out as a worktree, plus the one Claude session running inside them.
 _Avoid_: Project, sandbox
 
 **Repo Link**:
 A repo's membership in a workspace — the worktree path plus per-repo state like whether Tethys created the branch.
 
 **Session**:
-A Claude Code CLI process attached to a workspace, either inside one repo's worktree or at the workspace root.
+The one Claude Code CLI process a workspace runs, inside its sole repo's worktree or, with several repos, at the workspace root. A workspace has at most one; starting, resuming and reconnecting it are the same act.
 
 **Notes**:
 Freeform per-workspace text the user writes in the UI.
@@ -43,7 +43,7 @@ A workspace that has a blocker: at most one at a time, though one blocker can ho
 ### Lifecycle
 
 **Soft Delete**:
-Marking a workspace deleted without touching disk. Reversible for the grace window; running scripts and tmux sessions are killed immediately.
+Marking a workspace deleted without touching disk. Reversible for the grace window; the session's tmux pane is killed immediately.
 
 **Purge**:
 The background teardown that runs after the grace window: worktrees removed, Tethys-created branches deleted, workspace dropped from state.
