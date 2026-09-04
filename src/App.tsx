@@ -26,6 +26,7 @@ import { GithubChip, PrDetachButton } from "./GithubChip";
 import { JobLogPane } from "./JobLogPane";
 import { ScriptTerminal } from "./ScriptTerminal";
 import { SessionTerminal } from "./SessionTerminal";
+import { SidePanel } from "./SidePanel";
 import { Sidebar } from "./Sidebar";
 import { SystemStatus } from "./SystemStatus";
 import { applyTheme, ThemeContext } from "./theme";
@@ -57,7 +58,9 @@ function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [registry, setRegistry] = useState<RegistryStatus | null>(null);
-  const [discrepancies, setDiscrepancies] = useState<Discrepancies | null>(null);
+  const [discrepancies, setDiscrepancies] = useState<Discrepancies | null>(
+    null,
+  );
   const [selectedId, setSelectedId] = useState<WorkspaceId | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -131,7 +134,8 @@ function App() {
   const [theme, setTheme] = useState<Theme | null>(null);
 
   useEffect(() => {
-    api.getTheme()
+    api
+      .getTheme()
       .then((t) => {
         setTheme(t);
         applyTheme(t);
@@ -247,9 +251,9 @@ function App() {
       // the round-trip is fast and the persisted flag is the source of truth.
       for (const [sessionId, info] of turnStates) {
         if (info.workspaceId !== workspace.id || !info.needsTurn) continue;
-        api.acknowledgeSessionTurn(workspace.id, sessionId).catch((e) =>
-          console.error("acknowledge_session_turn failed:", e),
-        );
+        api
+          .acknowledgeSessionTurn(workspace.id, sessionId)
+          .catch((e) => console.error("acknowledge_session_turn failed:", e));
       }
     },
     [turnStates],
@@ -331,7 +335,10 @@ function App() {
       // Pre-load sessions + scripts for every workspace so switching in
       // doesn't render a stale/empty list.
       await Promise.all(
-        list.flatMap((w) => [refreshSessionsFor(w.id), refreshScriptsFor(w.id)]),
+        list.flatMap((w) => [
+          refreshSessionsFor(w.id),
+          refreshScriptsFor(w.id),
+        ]),
       );
     } catch (e) {
       setError(String(e));
@@ -490,19 +497,14 @@ function App() {
     }
   }, []);
 
-  const handleRenameFolder = useCallback(
-    async (id: FolderId, name: string) => {
-      setFolders((prev) =>
-        prev.map((f) => (f.id === id ? { ...f, name } : f)),
-      );
-      try {
-        await api.renameFolder(id, name);
-      } catch (e) {
-        setError(`could not rename folder: ${String(e)}`);
-      }
-    },
-    [],
-  );
+  const handleRenameFolder = useCallback(async (id: FolderId, name: string) => {
+    setFolders((prev) => prev.map((f) => (f.id === id ? { ...f, name } : f)));
+    try {
+      await api.renameFolder(id, name);
+    } catch (e) {
+      setError(`could not rename folder: ${String(e)}`);
+    }
+  }, []);
 
   const handleDeleteFolder = useCallback(async (id: FolderId) => {
     // Its workspaces fall back to Default — mirrored locally so the rows
@@ -608,149 +610,154 @@ function App() {
   );
 
   const registryOk = registry?.kind === "ok";
-  const selectedRun = selectedId ? creationRuns.get(selectedId) ?? null : null;
+  const selectedRun = selectedId
+    ? (creationRuns.get(selectedId) ?? null)
+    : null;
 
   return (
     <ThemeContext.Provider value={theme}>
-    <div className="app">
-      <aside className="sidebar">
-        {/*
+      <div className="app">
+        <aside className="sidebar">
+          {/*
           Header and list share one rounded card so the "New workspace" action
           reads as the top of the workspace list rather than a separate bar.
           The card clips the list's scroll, keeping its corners rounded.
         */}
-        <div className="sidebar-panel">
-          <div className="sidebar-header">
-            <button
-              className="new-workspace"
-              onClick={() => setCreating(true)}
-              type="button"
-              disabled={!registryOk}
-              title={!registryOk ? "Configure repos.toml first" : undefined}
-            >
-              <span className="new-workspace-plus" aria-hidden="true">
-                +
-              </span>
-              New workspace
-            </button>
+          <div className="sidebar-panel">
+            <div className="sidebar-header">
+              <button
+                className="new-workspace"
+                onClick={() => setCreating(true)}
+                type="button"
+                disabled={!registryOk}
+                title={!registryOk ? "Configure repos.toml first" : undefined}
+              >
+                <span className="new-workspace-plus" aria-hidden="true">
+                  +
+                </span>
+                New workspace
+              </button>
+            </div>
+            <Sidebar
+              workspaces={visibleWorkspaces}
+              folders={folders}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              onReorder={handleReorder}
+              onMoveToFolder={handleMoveToFolder}
+              onReorderFolders={handleReorderFolders}
+              onCreateFolder={handleCreateFolder}
+              onRenameFolder={handleRenameFolder}
+              onDeleteFolder={handleDeleteFolder}
+              onSetFolderCollapsed={handleSetFolderCollapsed}
+              onDelete={handleDelete}
+              onClearTurn={handleClearTurn}
+              onSetBlocker={handleSetBlocker}
+              workspaceNeedsTurn={workspaceNeedsTurn}
+              workspaceWorking={workspaceWorking}
+              runningScriptNames={runningScriptNamesFor}
+            />
           </div>
-          <Sidebar
-            workspaces={visibleWorkspaces}
-            folders={folders}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            onReorder={handleReorder}
-            onMoveToFolder={handleMoveToFolder}
-            onReorderFolders={handleReorderFolders}
-            onCreateFolder={handleCreateFolder}
-            onRenameFolder={handleRenameFolder}
-            onDeleteFolder={handleDeleteFolder}
-            onSetFolderCollapsed={handleSetFolderCollapsed}
-            onDelete={handleDelete}
-            onClearTurn={handleClearTurn}
-            onSetBlocker={handleSetBlocker}
-            workspaceNeedsTurn={workspaceNeedsTurn}
-            workspaceWorking={workspaceWorking}
-            runningScriptNames={runningScriptNamesFor}
-          />
-        </div>
-        <div className="sidebar-footer">
-          <SystemStatus
-            allWorkspaces={workspaces}
-            registry={registry}
-            discrepancies={discrepancies}
-            onDiscrepancyChange={refresh}
-          />
-          <GithubAuthFooter />
-        </div>
-      </aside>
+          <div className="sidebar-footer">
+            <SystemStatus
+              allWorkspaces={workspaces}
+              registry={registry}
+              discrepancies={discrepancies}
+              onDiscrepancyChange={refresh}
+            />
+            <GithubAuthFooter />
+          </div>
+        </aside>
 
-      <main className="detail">
-        {error && <div className="error-banner">{error}</div>}
-        {registry && !registryOk && (
-          <RegistryNotice registry={registry} onChanged={refresh} />
-        )}
-        {/*
+        <main className="detail">
+          {error && <div className="error-banner">{error}</div>}
+          {registry && !registryOk && (
+            <RegistryNotice registry={registry} onChanged={refresh} />
+          )}
+          {/*
           Mount one runner per in-flight creation so the invoke stays
           alive — and its JobEvents stay in component state — regardless
           of which pane is visible. The runner only renders its
           JobLogPane when its workspace id is the current selection.
         */}
-        {Array.from(creationRuns.entries()).map(([id, args]) => (
-          <CreationRunner
-            key={id}
-            workspaceId={id}
-            args={args}
-            isShown={id === selectedId}
-            draftPrompt={draftPrompts.get(id) ?? ""}
-            onPromptChange={(value) =>
-              setDraftPrompts((prev) => {
-                const next = new Map(prev);
-                next.set(id, value);
-                return next;
-              })
-            }
-            onSuccess={handleCreateSuccess}
-            onDismiss={() => handleCreationDismiss(id)}
-          />
-        ))}
-        {!selectedRun && selected && selected.status.kind === "ready" && (
-          <WorkspaceDetail
-            workspace={selected}
-            sessions={sessionsByWorkspace.get(selected.id) ?? []}
-            scripts={scriptsByWorkspace.get(selected.id) ?? []}
-            registryRepos={
-              registry?.kind === "ok" ? registry.registry.repos : []
-            }
-            availableRepos={
-              registry?.kind === "ok"
-                ? registry.registry.repos.filter(
-                    (r) =>
-                      !selected.repo_links.some((l) => l.repo_key === r.key),
-                  )
-                : []
-            }
-            notes={noteDrafts.get(selected.id) ?? selected.notes}
-            onNotesChange={(value) =>
-              setNoteDrafts((prev) => {
-                const next = new Map(prev);
-                next.set(selected.id, value);
-                return next;
-              })
-            }
-            onRequestDelete={() => handleDelete(selected)}
-            onRepoAdded={refresh}
-          />
-        )}
-        {!selectedRun && !selected && registryOk && (
-          <div className="placeholder">
-            Select a workspace, or create one to get started.
-          </div>
-        )}
-      </main>
+          {Array.from(creationRuns.entries()).map(([id, args]) => (
+            <CreationRunner
+              key={id}
+              workspaceId={id}
+              args={args}
+              isShown={id === selectedId}
+              draftPrompt={draftPrompts.get(id) ?? ""}
+              onPromptChange={(value) =>
+                setDraftPrompts((prev) => {
+                  const next = new Map(prev);
+                  next.set(id, value);
+                  return next;
+                })
+              }
+              onSuccess={handleCreateSuccess}
+              onDismiss={() => handleCreationDismiss(id)}
+            />
+          ))}
+          {!selectedRun && selected && selected.status.kind === "ready" && (
+            <WorkspaceDetail
+              workspace={selected}
+              sessions={sessionsByWorkspace.get(selected.id) ?? []}
+              scripts={scriptsByWorkspace.get(selected.id) ?? []}
+              registryRepos={
+                registry?.kind === "ok" ? registry.registry.repos : []
+              }
+              availableRepos={
+                registry?.kind === "ok"
+                  ? registry.registry.repos.filter(
+                      (r) =>
+                        !selected.repo_links.some((l) => l.repo_key === r.key),
+                    )
+                  : []
+              }
+              notes={noteDrafts.get(selected.id) ?? selected.notes}
+              onNotesChange={(value) =>
+                setNoteDrafts((prev) => {
+                  const next = new Map(prev);
+                  next.set(selected.id, value);
+                  return next;
+                })
+              }
+              onRequestDelete={() => handleDelete(selected)}
+              onRepoAdded={refresh}
+            />
+          )}
+          {!selectedRun && !selected && registryOk && (
+            <div className="placeholder">
+              Select a workspace, or create one to get started.
+            </div>
+          )}
+        </main>
 
-      {creating && registry?.kind === "ok" && (
-        <CreateWorkspaceDialog
-          repos={registry.registry.repos}
-          folders={folders}
-          onClose={() => setCreating(false)}
-          onSubmit={(partial) => {
-            setCreating(false);
-            // Mint the workspace id on the frontend so we can select the
-            // row before the backend has even started provisioning. The
-            // backend uses the same id when it inserts the Creating draft.
-            const id = crypto.randomUUID();
-            const args: CreateWorkspaceArgs = { ...partial, workspace_id: id };
-            setCreationRuns((prev) => {
-              const next = new Map(prev);
-              next.set(id, args);
-              return next;
-            });
-            setSelectedId(id);
-          }}
-        />
-      )}
-    </div>
+        {creating && registry?.kind === "ok" && (
+          <CreateWorkspaceDialog
+            repos={registry.registry.repos}
+            folders={folders}
+            onClose={() => setCreating(false)}
+            onSubmit={(partial) => {
+              setCreating(false);
+              // Mint the workspace id on the frontend so we can select the
+              // row before the backend has even started provisioning. The
+              // backend uses the same id when it inserts the Creating draft.
+              const id = crypto.randomUUID();
+              const args: CreateWorkspaceArgs = {
+                ...partial,
+                workspace_id: id,
+              };
+              setCreationRuns((prev) => {
+                const next = new Map(prev);
+                next.set(id, args);
+                return next;
+              });
+              setSelectedId(id);
+            }}
+          />
+        )}
+      </div>
     </ThemeContext.Provider>
   );
 }
@@ -875,107 +882,6 @@ function scriptTabKey(repoKey: string, scriptName: string): string {
   return `script:${repoKey}:${scriptName}`;
 }
 
-/** Collapsible freeform notes overlay anchored to the top-right of a
- *  workspace's detail pane. Edits are debounced to `set_workspace_notes` and
- *  flushed on collapse/unmount so nothing is lost when switching workspaces.
- *  Keyed by workspace id at the call site so each workspace gets a fresh
- *  editor; the text itself lives in App's `noteDrafts` so it survives that
- *  remount (see the state's doc comment). */
-function WorkspaceNotes({
-  workspaceId,
-  notes,
-  onNotesChange,
-}: {
-  workspaceId: string;
-  notes: string;
-  onNotesChange: (notes: string) => void;
-}) {
-  // Auto-open for any workspace that already has notes, so switching in
-  // surfaces them without a click. Collapsing sticks until the next switch
-  // (the remount re-evaluates this seed).
-  const [open, setOpen] = useState(() => notes.trim().length > 0);
-  // Only steal focus when the user opened the panel themselves — an auto-open
-  // on workspace switch must leave the keyboard with the terminal.
-  const openedByUser = useRef(false);
-  const saveTimer = useRef<number | null>(null);
-  // Latest unsaved value, or null once it's been persisted. Lets the flush on
-  // unmount/collapse write the final keystrokes the debounce hasn't sent yet.
-  const pending = useRef<string | null>(null);
-
-  const save = useCallback(
-    (notes: string) => {
-      pending.current = null;
-      api.setWorkspaceNotes(workspaceId, notes).catch(() => {
-        // Best-effort persistence; the text stays in the editor regardless.
-      });
-    },
-    [workspaceId],
-  );
-
-  const flush = useCallback(() => {
-    if (saveTimer.current !== null) {
-      window.clearTimeout(saveTimer.current);
-      saveTimer.current = null;
-    }
-    if (pending.current !== null) save(pending.current);
-  }, [save]);
-
-  // Flush any pending edit when the editor unmounts (e.g. switching workspace).
-  useEffect(() => flush, [flush]);
-
-  const onChange = (value: string) => {
-    onNotesChange(value);
-    pending.current = value;
-    if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => {
-      saveTimer.current = null;
-      save(value);
-    }, 500);
-  };
-
-  if (!open) {
-    return (
-      <button
-        type="button"
-        className="notes-toggle"
-        onClick={() => {
-          openedByUser.current = true;
-          setOpen(true);
-        }}
-        title="Workspace notes"
-      >
-        {notes.trim() ? "Notes •" : "Notes"}
-      </button>
-    );
-  }
-
-  return (
-    <div className="notes-panel" role="dialog" aria-label="Workspace notes">
-      <div className="notes-panel-header">
-        <span>Notes</span>
-        <button
-          type="button"
-          className="notes-collapse"
-          onClick={() => {
-            flush();
-            setOpen(false);
-          }}
-          title="Collapse notes"
-        >
-          ✕
-        </button>
-      </div>
-      <textarea
-        className="notes-textarea"
-        value={notes}
-        placeholder="Jot down anything about this workspace…"
-        onChange={(e) => onChange(e.target.value)}
-        autoFocus={openedByUser.current}
-      />
-    </div>
-  );
-}
-
 function WorkspaceDetail({
   workspace,
   sessions,
@@ -1064,11 +970,11 @@ function WorkspaceDetail({
 
   const selectedScriptChip =
     selectedTab?.kind === "script"
-      ? scriptChips.find(
+      ? (scriptChips.find(
           (c) =>
             c.repoKey === selectedTab.repoKey &&
             c.scriptName === selectedTab.scriptName,
-        ) ?? null
+        ) ?? null)
       : null;
 
   // Effective session selection: only used when a session tab (or nothing)
@@ -1084,9 +990,9 @@ function WorkspaceDetail({
   })();
 
   const selected = effectiveSelected
-    ? ordered.find((m) => m.id === effectiveSelected) ?? null
+    ? (ordered.find((m) => m.id === effectiveSelected) ?? null)
     : null;
-  const selectedLive = selected ? liveById.get(selected.id) ?? null : null;
+  const selectedLive = selected ? (liveById.get(selected.id) ?? null) : null;
 
   // `repoKey === null` spawns at the workspace root (parent of every
   // repo worktree) — only offered when the workspace has 2+ repos.
@@ -1108,7 +1014,9 @@ function WorkspaceDetail({
   // persists turn_acknowledged + emits session:turn_changed, which clears
   // the chip dot (and folds into the workspace row aggregate).
   const clearSessionTurn = (sessionId: string) => {
-    api.acknowledgeSessionTurn(workspace.id, sessionId).catch((e) => console.error("acknowledge_session_turn failed:", e));
+    api
+      .acknowledgeSessionTurn(workspace.id, sessionId)
+      .catch((e) => console.error("acknowledge_session_turn failed:", e));
   };
 
   const setSessionHidden = async (sessionId: string, hidden: boolean) => {
@@ -1162,7 +1070,12 @@ function WorkspaceDetail({
     autoResumedRef.current.add(selected.id);
     void resumeMeta(selected.id, selected.repo_key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.id, selectedLive?.id, selected?.claude_session_id, selectedTab?.kind]);
+  }, [
+    selected?.id,
+    selectedLive?.id,
+    selected?.claude_session_id,
+    selectedTab?.kind,
+  ]);
 
   const startScript = async (repoKey: string, scriptName: string) => {
     setBusy(true);
@@ -1207,246 +1120,246 @@ function WorkspaceDetail({
 
   return (
     <div className="workspace-detail">
-      <header>
-        <h2>
-          <code>{workspace.branch}</code>
-          {workspace.repo_links.map((r) =>
-            // Skipped entirely for repos with no PRs, so the header's gap
-            // doesn't double up around an empty group.
-            r.prs.length > 0 ? (
-              <span className="gh-chip-group" key={r.repo_key}>
-                <RepoPrChips link={r} onDetach={detachPr} />
-              </span>
-            ) : null,
-          )}
-          <button
-            type="button"
-            className="gh-attach"
-            onClick={() => setAttachingPr(true)}
-            disabled={workspace.repo_links.length === 0}
-            title="Track another PR in this workspace (for a second branch you opened here)"
-          >
-            + PR
-          </button>
-        </h2>
-        <div className="actions">
-          <button type="button" onClick={() => setShowInfo(true)}>
-            Info
-          </button>
-          <button
-            type="button"
-            onClick={() => setAddingRepo(true)}
-            disabled={availableRepos.length === 0}
-            title={
-              availableRepos.length === 0
-                ? "Every repo in your registry is already in this workspace"
-                : "Add another repo's worktree to this workspace"
-            }
-          >
-            Add repo
-          </button>
-          <button
-            type="button"
-            onClick={() =>
-              api.openInVscode(workspace.id).catch((e) =>
-                setError(String(e)),
-              )
-            }
-            disabled={workspace.repo_links.length === 0}
-            title="Open this workspace in VS Code, reusing the existing window"
-          >
-            Open in VS Code
-          </button>
-          <button
-            type="button"
-            className="danger"
-            onClick={onRequestDelete}
-            disabled={busy}
-          >
-            Delete
-          </button>
-          <WorkspaceNotes
-            key={workspace.id}
-            workspaceId={workspace.id}
-            notes={notes}
-            onNotesChange={onNotesChange}
+      <div className="workspace-main">
+        <header>
+          <h2>
+            <code>{workspace.branch}</code>
+            {workspace.repo_links.map((r) =>
+              // Skipped entirely for repos with no PRs, so the header's gap
+              // doesn't double up around an empty group.
+              r.prs.length > 0 ? (
+                <span className="gh-chip-group" key={r.repo_key}>
+                  <RepoPrChips link={r} onDetach={detachPr} />
+                </span>
+              ) : null,
+            )}
+            <button
+              type="button"
+              className="gh-attach"
+              onClick={() => setAttachingPr(true)}
+              disabled={workspace.repo_links.length === 0}
+              title="Track another PR in this workspace (for a second branch you opened here)"
+            >
+              + PR
+            </button>
+          </h2>
+          <div className="actions">
+            <button type="button" onClick={() => setShowInfo(true)}>
+              Info
+            </button>
+            <button
+              type="button"
+              onClick={() => setAddingRepo(true)}
+              disabled={availableRepos.length === 0}
+              title={
+                availableRepos.length === 0
+                  ? "Every repo in your registry is already in this workspace"
+                  : "Add another repo's worktree to this workspace"
+              }
+            >
+              Add repo
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                api.openInVscode(workspace.id).catch((e) => setError(String(e)))
+              }
+              disabled={workspace.repo_links.length === 0}
+              title="Open this workspace in VS Code, reusing the existing window"
+            >
+              Open in VS Code
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={onRequestDelete}
+              disabled={busy}
+            >
+              Delete
+            </button>
+          </div>
+        </header>
+        {showInfo && (
+          <WorkspaceInfoDialog
+            workspace={workspace}
+            onClose={() => setShowInfo(false)}
           />
-        </div>
-      </header>
-      {showInfo && (
-        <WorkspaceInfoDialog
-          workspace={workspace}
-          onClose={() => setShowInfo(false)}
-        />
-      )}
-      {addingRepo && (
-        <AddRepoDialog
-          workspace={workspace}
-          availableRepos={availableRepos}
-          onClose={() => setAddingRepo(false)}
-          onSuccess={onRepoAdded}
-        />
-      )}
-      {attachingPr && (
-        <AttachPrDialog
-          workspace={workspace}
-          onClose={() => setAttachingPr(false)}
-        />
-      )}
+        )}
+        {addingRepo && (
+          <AddRepoDialog
+            workspace={workspace}
+            availableRepos={availableRepos}
+            onClose={() => setAddingRepo(false)}
+            onSuccess={onRepoAdded}
+          />
+        )}
+        {attachingPr && (
+          <AttachPrDialog
+            workspace={workspace}
+            onClose={() => setAttachingPr(false)}
+          />
+        )}
 
-      <div className="session-pane">
-        <SessionBar
-          visibleSessions={visibleOrdered}
-          hiddenSessions={hiddenOrdered}
-          showHidden={showHidden}
-          onToggleShowHidden={() => setShowHidden((v) => !v)}
-          liveById={liveById}
-          repos={workspace.repo_links}
-          selectedId={effectiveSelected}
-          onSelect={selectSession}
-          onStartInRepo={startInRepo}
-          onSetHidden={setSessionHidden}
-          onClearTurn={clearSessionTurn}
-          workspaceBinary={workspace.claude_binary}
-          onSwitchBinary={switchBinary}
-          scriptChips={scriptChips}
-          selectedScriptKey={
-            selectedTab?.kind === "script"
-              ? scriptTabKey(selectedTab.repoKey, selectedTab.scriptName)
-              : null
-          }
-          showRepoOnScript={workspace.repo_links.length > 1}
-          onScriptChipClick={handleScriptChipClick}
-          onScriptChipDismiss={dismissScript}
-          busy={busy}
-        />
-        {error && <div className="error-banner">{error}</div>}
-        {selectedScriptChip ? (
-          selectedScriptChip.run ? (
-            <>
-              {!selectedScriptChip.run.running && (
-                <div className="session-exit-banner">
-                  <span>
-                    Script <code>{selectedScriptChip.scriptName}</code> exited.
-                  </span>
-                  <button
-                    type="button"
-                    className="primary"
-                    onClick={() =>
-                      startScript(
-                        selectedScriptChip.repoKey,
-                        selectedScriptChip.scriptName,
-                      )
-                    }
-                    disabled={busy}
-                  >
-                    Restart
-                  </button>
-                </div>
-              )}
-              <ScriptTerminal scriptId={selectedScriptChip.run.id} />
-            </>
-          ) : (
-            <div className="session-dormant">
-              <p>
-                Script <code>{selectedScriptChip.scriptName}</code> is not
-                running.
-              </p>
-              <p className="muted">
-                <code>{selectedScriptChip.command}</code>
-              </p>
-              <button
-                type="button"
-                className="primary"
-                onClick={() =>
-                  startScript(
-                    selectedScriptChip.repoKey,
-                    selectedScriptChip.scriptName,
-                  )
-                }
-                disabled={busy}
-              >
-                {busy ? (
-                  <>
-                    <Spinner /> Starting…
-                  </>
-                ) : (
-                  "Start"
-                )}
-              </button>
-            </div>
-          )
-        ) : selected ? (
-          selectedLive ? (
-            <>
-              {!selectedLive.running && (
-                <div className="session-exit-banner">
-                  <span>Claude exited. Scrollback preserved below.</span>
-                  {selected.claude_session_id ? (
+        <div className="session-pane">
+          <SessionBar
+            visibleSessions={visibleOrdered}
+            hiddenSessions={hiddenOrdered}
+            showHidden={showHidden}
+            onToggleShowHidden={() => setShowHidden((v) => !v)}
+            liveById={liveById}
+            repos={workspace.repo_links}
+            selectedId={effectiveSelected}
+            onSelect={selectSession}
+            onStartInRepo={startInRepo}
+            onSetHidden={setSessionHidden}
+            onClearTurn={clearSessionTurn}
+            workspaceBinary={workspace.claude_binary}
+            onSwitchBinary={switchBinary}
+            scriptChips={scriptChips}
+            selectedScriptKey={
+              selectedTab?.kind === "script"
+                ? scriptTabKey(selectedTab.repoKey, selectedTab.scriptName)
+                : null
+            }
+            showRepoOnScript={workspace.repo_links.length > 1}
+            onScriptChipClick={handleScriptChipClick}
+            onScriptChipDismiss={dismissScript}
+            busy={busy}
+          />
+          {error && <div className="error-banner">{error}</div>}
+          {selectedScriptChip ? (
+            selectedScriptChip.run ? (
+              <>
+                {!selectedScriptChip.run.running && (
+                  <div className="session-exit-banner">
+                    <span>
+                      Script <code>{selectedScriptChip.scriptName}</code>{" "}
+                      exited.
+                    </span>
                     <button
                       type="button"
                       className="primary"
                       onClick={() =>
-                        resumeMeta(selected.id, selected.repo_key)
+                        startScript(
+                          selectedScriptChip.repoKey,
+                          selectedScriptChip.scriptName,
+                        )
                       }
                       disabled={busy}
                     >
-                      {busy ? (
-                        <>
-                          <Spinner /> Reconnecting…
-                        </>
-                      ) : (
-                        "Reconnect"
-                      )}
+                      Restart
                     </button>
-                  ) : (
-                    <span className="muted">
-                      No claude_session_id — can't reconnect.
-                    </span>
-                  )}
-                </div>
-              )}
-              <SessionTerminal sessionId={selectedLive.id} />
-            </>
-          ) : (
-            <div className="session-dormant">
-              <p>
-                This Claude session is dormant. Resume re-opens the
-                conversation with <code>claude --resume</code>.
-              </p>
-              {selected.claude_session_id ? (
+                  </div>
+                )}
+                <ScriptTerminal scriptId={selectedScriptChip.run.id} />
+              </>
+            ) : (
+              <div className="session-dormant">
+                <p>
+                  Script <code>{selectedScriptChip.scriptName}</code> is not
+                  running.
+                </p>
+                <p className="muted">
+                  <code>{selectedScriptChip.command}</code>
+                </p>
                 <button
                   type="button"
                   className="primary"
-                  onClick={() => resumeMeta(selected.id, selected.repo_key)}
+                  onClick={() =>
+                    startScript(
+                      selectedScriptChip.repoKey,
+                      selectedScriptChip.scriptName,
+                    )
+                  }
                   disabled={busy}
                 >
                   {busy ? (
                     <>
-                      <Spinner /> Resuming…
+                      <Spinner /> Starting…
                     </>
                   ) : (
-                    "Resume"
+                    "Start"
                   )}
                 </button>
-              ) : (
-                <p className="muted">
-                  No <code>claude_session_id</code> was captured for this
-                  session — can't resume. (If you just started it, wait a
-                  second for the SessionStart hook.)
+              </div>
+            )
+          ) : selected ? (
+            selectedLive ? (
+              <>
+                {!selectedLive.running && (
+                  <div className="session-exit-banner">
+                    <span>Claude exited. Scrollback preserved below.</span>
+                    {selected.claude_session_id ? (
+                      <button
+                        type="button"
+                        className="primary"
+                        onClick={() =>
+                          resumeMeta(selected.id, selected.repo_key)
+                        }
+                        disabled={busy}
+                      >
+                        {busy ? (
+                          <>
+                            <Spinner /> Reconnecting…
+                          </>
+                        ) : (
+                          "Reconnect"
+                        )}
+                      </button>
+                    ) : (
+                      <span className="muted">
+                        No claude_session_id — can't reconnect.
+                      </span>
+                    )}
+                  </div>
+                )}
+                <SessionTerminal sessionId={selectedLive.id} />
+              </>
+            ) : (
+              <div className="session-dormant">
+                <p>
+                  This Claude session is dormant. Resume re-opens the
+                  conversation with <code>claude --resume</code>.
                 </p>
-              )}
+                {selected.claude_session_id ? (
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={() => resumeMeta(selected.id, selected.repo_key)}
+                    disabled={busy}
+                  >
+                    {busy ? (
+                      <>
+                        <Spinner /> Resuming…
+                      </>
+                    ) : (
+                      "Resume"
+                    )}
+                  </button>
+                ) : (
+                  <p className="muted">
+                    No <code>claude_session_id</code> was captured for this
+                    session — can't resume. (If you just started it, wait a
+                    second for the SessionStart hook.)
+                  </p>
+                )}
+              </div>
+            )
+          ) : (
+            <div className="session-pane empty">
+              <p className="muted">No Claude sessions in this workspace yet.</p>
+              <p className="muted">
+                Click <strong>+ New</strong> above to start one.
+              </p>
             </div>
-          )
-        ) : (
-          <div className="session-pane empty">
-            <p className="muted">No Claude sessions in this workspace yet.</p>
-            <p className="muted">
-              Click <strong>+ New</strong> above to start one.
-            </p>
-          </div>
-        )}
+          )}
+        </div>
       </div>
+      <SidePanel
+        workspace={workspace}
+        notes={notes}
+        onNotesChange={onNotesChange}
+      />
     </div>
   );
 }
@@ -1825,11 +1738,7 @@ function SessionChipMenu({
   return (
     <div ref={ref} className="context-menu" style={{ left, top }} role="menu">
       {needsTurn && (
-        <button
-          type="button"
-          role="menuitem"
-          onClick={wrap(onClearTurn)}
-        >
+        <button type="button" role="menuitem" onClick={wrap(onClearTurn)}>
           Clear notification
         </button>
       )}
@@ -2141,10 +2050,7 @@ function AddRepoDialog({
   const isRunning = tempId !== null && state === "running";
 
   return (
-    <div
-      className="modal-backdrop"
-      onClick={isRunning ? undefined : onClose}
-    >
+    <div className="modal-backdrop" onClick={isRunning ? undefined : onClose}>
       <div
         className={`modal${tempId ? " add-repo-modal-running" : ""}`}
         onClick={(e) => e.stopPropagation()}

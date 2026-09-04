@@ -1,5 +1,6 @@
 import { useTauriEvent } from "../useTauriEvent";
 import type {
+  ArtifactChangedEvent,
   GithubAuthSnapshot,
   GithubStatusChangedEvent,
   Theme,
@@ -37,6 +38,7 @@ export interface AppEvents {
   "system_status:changed": null;
   "pending_permissions:changed": null;
   "theme:changed": Theme | null;
+  "artifact:changed": ArtifactChangedEvent;
 }
 
 export type AppEventName = keyof AppEvents;

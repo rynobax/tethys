@@ -1,13 +1,15 @@
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 /**
  * Re-exported so this module is genuinely the only file importing from
  * `@tauri-apps/api/core` — the rule is easier to keep than "only `invoke`
- * comes from there, `Channel` is fine".
+ * comes from there, `Channel` is fine". `convertFileSrc` turns a path into
+ * an `asset://` URL the Page iframe can load.
  */
-export { Channel };
+export { Channel, convertFileSrc };
 
 import type {
+  Artifact,
   Discrepancies,
   Folder,
   FolderId,
@@ -67,6 +69,16 @@ export const setWorkspaceNotes = (workspaceId: WorkspaceId, notes: string) =>
   invoke<void>("set_workspace_notes", {
     args: { workspace_id: workspaceId, notes },
   });
+
+export const listArtifacts = (workspaceId: WorkspaceId) =>
+  invoke<Artifact[]>("list_artifacts", { workspaceId });
+
+export const dismissArtifact = (workspaceId: WorkspaceId, artifactId: string) =>
+  invoke<void>("dismiss_artifact", { workspaceId, artifactId });
+
+/** Open a Page artifact in the default browser. */
+export const openArtifact = (workspaceId: WorkspaceId, artifactId: string) =>
+  invoke<void>("open_artifact", { workspaceId, artifactId });
 
 /** `blockerId: null` clears the link. Rejects on a cycle. */
 export const setWorkspaceBlocker = (

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use tauri::ipc::InvokeResponseBody;
 
+use crate::artifacts::{Artifact, ArtifactKind, ArtifactStore};
 use crate::claude;
 use crate::claude_local;
 use crate::error::{AppError, AppResult};
@@ -1310,6 +1311,50 @@ pub async fn set_workspace_notes(
             Ok(())
         })
         .await
+}
+
+#[tauri::command]
+pub fn list_artifacts(
+    artifacts: State<'_, Arc<ArtifactStore>>,
+    workspace_id: WorkspaceId,
+) -> Vec<Artifact> {
+    artifacts.list(&workspace_id)
+}
+
+/// Open a Page in the default browser. Goes through `open` rather than
+/// plugin-opener's `openPath`, which is scope-gated to paths fixed in the
+/// capability file — and a workspace's files live wherever `repos.toml` says.
+/// Only a path the store already holds can be opened, so the frontend can't
+/// hand over an arbitrary one.
+#[tauri::command]
+pub fn open_artifact(
+    artifacts: State<'_, Arc<ArtifactStore>>,
+    workspace_id: WorkspaceId,
+    artifact_id: String,
+) -> AppResult<()> {
+    let path = artifacts
+        .list(&workspace_id)
+        .into_iter()
+        .find(|a| a.id == artifact_id)
+        .and_then(|a| match a.kind {
+            ArtifactKind::Page { path } => Some(path),
+            ArtifactKind::Diagram { .. } => None,
+        })
+        .ok_or_else(|| AppError::Other("no such page".into()))?;
+    std::process::Command::new("open")
+        .arg(&path)
+        .status()
+        .map_err(|e| AppError::Other(format!("failed to open {}: {e}", path.display())))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn dismiss_artifact(
+    artifacts: State<'_, Arc<ArtifactStore>>,
+    workspace_id: WorkspaceId,
+    artifact_id: String,
+) {
+    artifacts.dismiss(&workspace_id, &artifact_id);
 }
 
 /// Newtype so `claude_bin` can be managed in Tauri state.

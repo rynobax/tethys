@@ -113,6 +113,22 @@ A group is often *smaller* than `stack.size`: six stacked branches with one chec
 
 Deliberately absent: no stacks in the sidebar (it keeps its flat chip list, so a stack is only visible once you open the workspace), no rollup of the stack's CI or review state onto the container, no `gh stack` invocation of any kind, no fetching the stack-mates the workspace doesn't already track, and no link between a stack and the blocker nesting — separate ideas that happen to look similar.
 
+## Side panel
+
+Every ready workspace has a **Side Panel** on the right (`SidePanel.tsx`): its Notes and its **Artifacts**, one tab each. An artifact is something a session produced that Tethys can show rather than leave as terminal text — a **Diagram** (mermaid source) or a **Page** (an HTML file). Collapsed, it's a 28px rail that is itself the button; width and collapsed state are UI chrome, so they live in `localStorage` and apply to every workspace. Notes used to be a floating overlay with its own header button and an auto-open-when-non-empty rule; both are gone, and the rail's dot is what says a workspace has notes.
+
+Artifacts come from **hooks, not from the screen** (`artifacts.rs`). Scraping xterm's buffer was the obvious route and is the wrong one: Claude's renderer uses the alternate screen, so only the visible fraction of a diagram is ever in the buffer, long lines wrap, and a half-streamed diagram is a parse error on every keystroke. The `Stop` hook already carries `last_assistant_message` — the exact markdown, complete — so a Diagram is a fence scan over that. A Page is `PostToolUse` for `Write`/`Edit`/`MultiEdit` on a `.html` path, which `tethys-hook` now forwards as `tool_name` + `tool_file_path` (the one field of any tool's input Tethys reads). Both reuse the session→workspace correlation the turn tracker uses (`resolve_session`), so a page a subagent writes lands on its parent's workspace for free.
+
+Two limits worth knowing. `last_assistant_message` is only the turn's *final* text block, so a diagram drawn before a tool call in the same turn is missed — `record_diagrams` logs at debug on a Stop with no fences, which is how we'd learn that matters. And a Page must resolve under the workspace root (`reconcile::is_under`), so a write to `/tmp` or another checkout can't put a tab in this workspace; an `.html` written via a Bash heredoc is invisible.
+
+Seeing the same thing again is a **bump, not a new tab**: same page path or identical diagram source moves the existing artifact to the newest position and increments `revision`, which is what the Page iframe is keyed on so a re-edited page reloads in place. Artifacts are in memory only, capped at 12 per workspace with the oldest evicted — a diagram goes stale the moment the design moves on, and persisting them would turn `state.json` into a graveyard.
+
+The one thing that overrides your collapsed/expanded choice is a fresh artifact for the workspace you're looking at: the panel expands and selects it, because a `/show-me` turn is one where you want the screen taken. Arrivals for other workspaces just accumulate. Tab labels for a Diagram come from a `title` in the source, else the heading or `**bold**` lead-in just above the fence, else the diagram keyword — cheap heuristics whose fallback is dull rather than wrong.
+
+Pages render in a sandboxed iframe (`allow-scripts`, no `allow-same-origin`) over Tauri's asset protocol, which is enabled with an *empty* static scope and opened at boot to `worktree_root` only (`lib.rs`), since that's runtime config from `repos.toml`. "Open in browser" goes through a Rust command rather than plugin-opener's `openPath`, which is scope-gated to paths fixed in the capability file. `mermaid` is a couple of megabytes and is imported on first use; a diagram that doesn't parse shows its source and the parser's complaint rather than nothing.
+
+Deliberately absent: persistence across restarts, keyboard shortcuts, close-all, zoom/pan on diagrams, filtering by session, reading the transcript for earlier text blocks, and any detection of files not written through a file tool.
+
 ## Logging & diagnostics
 
 Two log sinks, filtered independently (`logging.rs`):

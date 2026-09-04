@@ -9,11 +9,12 @@ use tauri::{AppHandle, Emitter};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::artifacts::{self, ArtifactStore};
 use crate::error::{AppError, AppResult};
 use crate::hook_listener::HookMessage;
 use crate::mcp::McpLaunch;
 use crate::pty::{OnExit, PtyProcess, PtySpawn, Ring};
-use crate::state::{ClaudeSessionMeta, SessionRuntimeState};
+use crate::state::{ClaudeSessionMeta, SessionRuntimeState, WorkspaceId};
 use crate::store::Store;
 use crate::turn::{TurnChanged, TurnSignal, TurnState, TurnTracker};
 use crate::tmux;
@@ -95,16 +96,20 @@ pub struct SessionSupervisor {
     /// `Arc` so the PTY exit hook can report a child exit without holding a
     /// reference back to the supervisor.
     turn: Arc<TurnTracker>,
+    /// Diagrams and pages sessions produce, fed from the same hooks that
+    /// drive the turn indicator.
+    artifacts: Arc<ArtifactStore>,
     store: Arc<Store>,
     app: AppHandle,
 }
 
 impl SessionSupervisor {
-    pub fn new(app: AppHandle, store: Arc<Store>) -> Self {
+    pub fn new(app: AppHandle, store: Arc<Store>, artifacts: Arc<ArtifactStore>) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             turn: Arc::new(TurnTracker::new()),
+            artifacts,
             store,
             app,
         }
@@ -460,7 +465,9 @@ impl SessionSupervisor {
     pub async fn handle_hook_event(&self, msg: HookMessage) {
         match msg.event.as_str() {
             "session-start" => self.handle_session_start(msg).await,
-            "user-submit" | "pre-tool" | "post-tool" => {
+            "user-submit" | "pre-tool" => self.handle_resume_working(msg).await,
+            "post-tool" => {
+                self.record_page_if_written(&msg).await;
                 self.handle_resume_working(msg).await
             }
             "stop" | "stop-failure" => self.handle_stop(msg).await,
@@ -486,6 +493,30 @@ impl SessionSupervisor {
     async fn handle_stop(&self, msg: HookMessage) {
         self.set_turn_from_hook(&msg, SessionRuntimeState::Idle, None)
             .await;
+        // The reply is only on `Stop`, and only its final text block — a
+        // diagram drawn before a tool call in the same turn is missed. The
+        // debug line in `record_diagrams` is how we'd find out that matters.
+        let Some(message) = msg.last_assistant_message.as_deref() else { return };
+        let Some((ws_id, sess_id)) = self.resolve_session(&msg).await else { return };
+        self.artifacts.record_diagrams(&ws_id, &sess_id, message);
+    }
+
+    /// PostToolUse for a file-writing tool on an `.html` path → a Page. Only
+    /// files under the workspace root count, so a stray write to `/tmp` or
+    /// another checkout can't put a tab in this workspace.
+    async fn record_page_if_written(&self, msg: &HookMessage) {
+        let Some(path) =
+            artifacts::page_written(msg.tool_name.as_deref(), msg.tool_file_path.as_deref())
+        else {
+            return;
+        };
+        let Some((ws_id, sess_id)) = self.resolve_session(msg).await else { return };
+        let root = self
+            .store
+            .read(|s| s.find_workspace(&ws_id).and_then(|w| w.root_buf()))
+            .await;
+        let Some(root) = root else { return };
+        self.artifacts.record_page(&ws_id, &sess_id, &root, &path);
     }
 
     async fn handle_notify(&self, msg: HookMessage) {
@@ -532,7 +563,26 @@ impl SessionSupervisor {
         .await;
     }
 
-    /// Find the Tethys session this hook belongs to and feed the tracker.
+    /// Feed the turn tracker for the session a hook belongs to.
+    async fn set_turn_from_hook(
+        &self,
+        msg: &HookMessage,
+        state: SessionRuntimeState,
+        notification_type: Option<String>,
+    ) {
+        let Some((ws_id, sess_id)) = self.resolve_session(msg).await else { return };
+        self.apply_signal(
+            &sess_id,
+            &ws_id,
+            TurnSignal::Hook {
+                state,
+                notification_type,
+            },
+        )
+        .await;
+    }
+
+    /// Find the Tethys session this hook belongs to.
     ///
     /// Matches first on `claude_session_id`. Falls back to the parent session
     /// when the hook comes from a subagent — subagent transcripts live at
@@ -541,12 +591,7 @@ impl SessionSupervisor {
     /// stable across the id rotation Claude does on compaction/resume; without
     /// it a rotated id means every hook silently misses until the 2s probe
     /// loop heals the id.
-    async fn set_turn_from_hook(
-        &self,
-        msg: &HookMessage,
-        state: SessionRuntimeState,
-        notification_type: Option<String>,
-    ) {
+    async fn resolve_session(&self, msg: &HookMessage) -> Option<(WorkspaceId, SessionId)> {
         let Some(csid) = msg.session_id.as_deref() else {
             debug!(
                 event = %msg.event,
@@ -554,7 +599,7 @@ impl SessionSupervisor {
                 spawn_token = ?msg.spawn_token,
                 "hook missing session_id — cannot correlate",
             );
-            return;
+            return None;
         };
         let parent_csid = msg
             .transcript_path
@@ -587,23 +632,14 @@ impl SessionSupervisor {
                 by_cwd
             })
             .await;
-        let Some((ws_id, sess_id)) = lookup else {
+        if lookup.is_none() {
             debug!(
                 claude_session_id = csid,
                 transcript_path = ?msg.transcript_path,
                 "hook for unknown Claude session (not a Tethys-spawned one)"
             );
-            return;
-        };
-        self.apply_signal(
-            &sess_id,
-            &ws_id,
-            TurnSignal::Hook {
-                state,
-                notification_type,
-            },
-        )
-        .await;
+        }
+        lookup
     }
 
     async fn handle_session_start(&self, msg: HookMessage) {

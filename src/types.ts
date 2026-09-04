@@ -308,3 +308,21 @@ export interface Theme {
   source_path: string;
   colors: ThemeColors;
 }
+
+/** Something a session produced that Tethys can show: a mermaid diagram
+ *  taken from its reply, or an HTML page it wrote inside the workspace.
+ *  Belongs to the workspace; lives only while Tethys runs. */
+export type Artifact = {
+  id: string;
+  session_id: SessionId;
+  label: string;
+  /** Bumped each time the same artifact is seen again, so a page tab can
+   *  reload in place. */
+  revision: number;
+} & ({ kind: "diagram"; source: string } | { kind: "page"; path: string });
+
+export interface ArtifactChangedEvent {
+  workspace_id: WorkspaceId;
+  /** The artifact that arrived or was bumped; null after a dismissal. */
+  artifact_id: string | null;
+}

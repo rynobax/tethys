@@ -74,3 +74,19 @@ The pull request open on a workspace's own branch. Tethys finds it by itself, by
 **Attached PR**:
 Any other pull request a workspace should show — a stacked PR, a follow-up, something cut off main in the same worktree. Named by the user in the attach dialog or by an agent linking one it opened, since nothing about the workspace implies it.
 _Avoid_: Extra PR, secondary PR
+
+### Side panel
+
+**Side Panel**:
+The collapsible pane on the right of a workspace, holding its Notes and its Artifacts, one tab each.
+_Avoid_: Inspector, drawer, right pane
+
+**Artifact**:
+Something a session produced that Tethys can show rather than leave as text in the terminal. Belongs to the workspace the session runs in, and kept only while Tethys is running.
+_Avoid_: Output, attachment
+
+**Diagram**:
+An Artifact that is a Mermaid diagram, taken from the source a session wrote in its reply.
+
+**Page**:
+An Artifact that is an HTML file a session wrote inside the workspace, shown as the file currently on disk.

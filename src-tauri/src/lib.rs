@@ -1,3 +1,4 @@
+mod artifacts;
 mod child_env;
 mod claude;
 mod claude_local;
@@ -41,6 +42,7 @@ use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tracing::{error, info, warn};
 
+use crate::artifacts::ArtifactStore;
 use crate::commands::ClaudeBin;
 use crate::github::GithubPoller;
 use crate::paths::Paths;
@@ -93,7 +95,18 @@ pub fn run() {
 
             let registry_load = RegistryLoad::load(&paths.repos_config_file());
             match &registry_load {
-                RegistryLoad::Ok { .. } => info!("registry ok"),
+                RegistryLoad::Ok { registry, .. } => {
+                    info!("registry ok");
+                    // Pages render in an iframe over the asset protocol, whose
+                    // scope is otherwise empty: only files under the worktree
+                    // root — where every workspace lives — are reachable.
+                    if let Err(e) = app
+                        .asset_protocol_scope()
+                        .allow_directory(&registry.worktree_root, true)
+                    {
+                        warn!(error = %e, "could not open worktree_root to the asset protocol; pages won't render");
+                    }
+                }
                 RegistryLoad::Missing { path } => {
                     info!(?path, "repos.toml missing — user will be prompted to create it")
                 }
@@ -165,8 +178,13 @@ pub fn run() {
             }
 
             // --- session supervisor + UDS listener --------------------------
-            let supervisor: Arc<SessionSupervisor> =
-                Arc::new(SessionSupervisor::new(handle.clone(), store.clone()));
+            let artifacts: Arc<ArtifactStore> = Arc::new(ArtifactStore::new(handle.clone()));
+            app.manage(artifacts.clone());
+            let supervisor: Arc<SessionSupervisor> = Arc::new(SessionSupervisor::new(
+                handle.clone(),
+                store.clone(),
+                artifacts,
+            ));
             app.manage(supervisor.clone());
 
             // --- script supervisor -----------------------------------------
@@ -340,6 +358,9 @@ pub fn run() {
             commands::switch_claude_binary,
             commands::set_claude_session_hidden,
             commands::set_workspace_notes,
+            commands::list_artifacts,
+            commands::dismiss_artifact,
+            commands::open_artifact,
             commands::attach_session,
             commands::detach_session,
             commands::send_input,

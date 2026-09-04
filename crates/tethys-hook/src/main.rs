@@ -37,6 +37,15 @@ struct HookInput {
     notification_type: Option<String>,
     stop_hook_active: Option<bool>,
     last_assistant_message: Option<String>,
+    tool_name: Option<String>,
+    tool_input: Option<ToolInput>,
+}
+
+/// The one field of a tool's argument object Tethys cares about.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct ToolInput {
+    file_path: Option<String>,
 }
 
 fn main() {
@@ -65,6 +74,8 @@ fn run() -> io::Result<()> {
         notification_type: input.notification_type,
         stop_hook_active: input.stop_hook_active,
         last_assistant_message: input.last_assistant_message,
+        tool_name: input.tool_name,
+        tool_file_path: input.tool_input.and_then(|t| t.file_path),
         spawn_token: env::var("TETHYS_SPAWN_TOKEN").ok(),
     };
 

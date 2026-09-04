@@ -478,65 +478,284 @@ html,
   text-align: center;
 }
 
+/* The detail is a row: the header + session pane on the left, the Side Panel
+   (or its collapsed rail) on the right. */
 .workspace-detail {
   flex: 1;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   min-height: 0;
   position: relative;
 }
 
-/* Collapsed notes lives inline in the header actions row. */
-.notes-toggle {
-  font-size: inherit;
-}
-
-/* Expanded notes floats over the top-right of the detail pane, below the
-   header, so it never shrinks the terminal area. */
-.notes-panel {
-  position: absolute;
-  top: 42px;
-  right: 16px;
-  z-index: 50;
-  width: 320px;
-  max-height: min(60vh, 520px);
+.workspace-main {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
-  overflow: hidden;
+  min-height: 0;
+  min-width: 0;
 }
 
-.notes-panel-header {
+/* ── Side panel ─────────────────────────────────────────────────────────── */
+
+/* Collapsed: a thin rail. The whole thing is the button that expands it. */
+.side-rail {
+  flex: none;
+  width: 28px;
+  /* Span the detail's vertical padding, like the terminal does below. */
+  margin: -24px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border: none;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--sidebar-bg);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.side-rail:hover {
+  color: var(--fg);
+}
+
+.side-rail-label {
+  writing-mode: vertical-rl;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  letter-spacing: 0.04em;
+}
+
+.side-rail-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.side-rail-count {
+  font-size: 10px;
+  font-weight: 600;
+  min-width: 16px;
+  padding: 1px 4px;
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--accent) 22%, transparent);
+  color: var(--fg);
+  text-align: center;
+}
+
+.side-panel {
+  flex: none;
+  margin: -24px 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.side-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 2;
+}
+
+.side-resize:hover {
+  background: color-mix(in oklab, var(--accent) 35%, transparent);
+}
+
+/* Notes fixed on the left, artifacts oldest→newest after it, the collapse
+   chevron pinned right. The strip scrolls sideways once it fills. */
+.side-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 4px 0 8px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex: none;
+}
+
+.side-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.side-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 8px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  flex: none;
+}
+
+.side-tab:hover {
+  color: var(--fg);
+}
+
+.side-tab.active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+
+.side-tab-glyph {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.side-tab-label {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.side-tab-close {
+  border: none;
+  background: transparent;
+  padding: 0 2px;
+  margin-left: 2px;
+  border-radius: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.side-tab:hover .side-tab-close,
+.side-tab.active .side-tab-close {
+  opacity: 1;
+}
+
+.side-tab-close:hover {
+  background: rgba(125, 125, 125, 0.16);
+  color: var(--fg);
+}
+
+.side-collapse {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 6px;
+  font-size: 14px;
+  cursor: pointer;
+  flex: none;
+  position: sticky;
+  right: 0;
+}
+
+.side-collapse:hover {
+  color: var(--fg);
+}
+
+.side-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.artifact-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.artifact-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 8px 6px 12px;
+  gap: 8px;
+  padding: 4px 8px 4px 12px;
   border-bottom: 1px solid var(--border);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 11px;
   color: var(--muted);
 }
 
-.notes-collapse {
+.artifact-toolbar-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-toolbar button {
+  font-size: 11px;
+  padding: 1px 8px;
+}
+
+/* Fit to width, grow as tall as it needs, scroll the panel. */
+.artifact-diagram {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+}
+
+.artifact-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.artifact-page {
+  flex: 1;
   border: none;
-  background: transparent;
-  padding: 2px 6px;
-  border-radius: 4px;
-  cursor: pointer;
-  color: var(--muted);
+  background: #fff;
 }
 
-.notes-collapse:hover {
-  background: rgba(125, 125, 125, 0.16);
+.artifact-broken {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.artifact-source {
+  margin: 0;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  color: var(--fg);
+}
+
+.artifact-error {
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--danger);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.artifact-pending {
+  padding: 16px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .notes-textarea {
   flex: 1;
-  min-height: 160px;
-  resize: vertical;
+  min-height: 0;
+  resize: none;
   border: none;
   outline: none;
   padding: 10px 12px;
