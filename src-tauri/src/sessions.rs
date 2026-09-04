@@ -501,15 +501,17 @@ impl SessionSupervisor {
         self.artifacts.record_diagrams(&ws_id, &sess_id, message);
     }
 
-    /// PostToolUse for a file-writing tool on an `.html` path → a Page. Only
-    /// files under the workspace root count, so a stray write to `/tmp` or
-    /// another checkout can't put a tab in this workspace.
+    /// PostToolUse for a file tool on an `.html` path, or a Bash `open` of
+    /// one → a Page. Only files under the workspace root count, so a stray
+    /// write to `/tmp` or another checkout can't put a tab in this workspace.
     async fn record_page_if_written(&self, msg: &HookMessage) {
-        let Some(path) =
-            artifacts::page_written(msg.tool_name.as_deref(), msg.tool_file_path.as_deref())
-        else {
-            return;
+        let call = artifacts::ToolCall {
+            tool_name: msg.tool_name.as_deref(),
+            file_path: msg.tool_file_path.as_deref(),
+            command: msg.tool_command.as_deref(),
+            cwd: msg.cwd.as_deref(),
         };
+        let Some(path) = artifacts::page_written(&call) else { return };
         let Some((ws_id, sess_id)) = self.resolve_session(msg).await else { return };
         let root = self
             .store

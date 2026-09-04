@@ -114,6 +114,9 @@ impl ArtifactStore {
             );
             return;
         }
+        // Canonical, so `./tmp/x.html` from an `open` and the absolute path
+        // from a `Write` are the same page. `is_under` just proved it resolves.
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let label = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -122,9 +125,7 @@ impl ArtifactStore {
             workspace_id,
             session_id,
             label,
-            ArtifactKind::Page {
-                path: path.to_path_buf(),
-            },
+            ArtifactKind::Page { path },
         );
     }
 
@@ -189,15 +190,82 @@ fn upsert(list: &mut Vec<Artifact>, session_id: &str, label: String, kind: Artif
     id
 }
 
-/// Whether a tool call is one that writes a Page: a file-writing tool whose
-/// path ends in `.html`/`.htm`. Returns the path when it is.
-pub fn page_written(tool_name: Option<&str>, file_path: Option<&str>) -> Option<PathBuf> {
-    if !matches!(tool_name, Some("Write" | "Edit" | "MultiEdit")) {
-        return None;
+/// What a tool call tells us about a Page, if anything.
+pub struct ToolCall<'a> {
+    pub tool_name: Option<&'a str>,
+    /// `tool_input.file_path` — set for the file tools.
+    pub file_path: Option<&'a str>,
+    /// `tool_input.command` — set for Bash.
+    pub command: Option<&'a str>,
+    /// Where a relative path in a Bash command resolves from.
+    pub cwd: Option<&'a str>,
+}
+
+/// The Page a tool call produced, if it produced one: a file tool writing an
+/// `.html` path, or a Bash command that `open`s one. The second is how the
+/// `/show-me` skill ends every page — `open path/to/show-me-*.html` — and it
+/// catches the file however it was written, which the file tools alone don't:
+/// the very first page a session made for this was a heredoc.
+pub fn page_written(call: &ToolCall<'_>) -> Option<PathBuf> {
+    match call.tool_name? {
+        "Write" | "Edit" | "MultiEdit" => html_path(PathBuf::from(call.file_path?)),
+        "Bash" => {
+            let opened = opened_paths(call.command?).into_iter().find_map(html_path)?;
+            Some(match call.cwd {
+                Some(cwd) if opened.is_relative() => Path::new(cwd).join(opened),
+                _ => opened,
+            })
+        }
+        _ => None,
     }
-    let path = PathBuf::from(file_path?);
+}
+
+fn html_path(path: PathBuf) -> Option<PathBuf> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     (ext == "html" || ext == "htm").then_some(path)
+}
+
+/// Every non-flag argument to an `open` anywhere in a shell command line —
+/// `mkdir -p x && open x/a.html; open -a Safari b.html` yields both files.
+/// Quotes are honoured, nothing else is: no expansion, no substitution.
+fn opened_paths(command: &str) -> Vec<PathBuf> {
+    command
+        .split(['\n', ';', '|', '&'])
+        .filter_map(|segment| {
+            let mut words = shell_words(segment).into_iter();
+            (words.next().as_deref() == Some("open")).then(|| {
+                words
+                    .filter(|w| !w.starts_with('-'))
+                    .map(PathBuf::from)
+                    .collect::<Vec<_>>()
+            })
+        })
+        .flatten()
+        .collect()
+}
+
+/// Whitespace split that keeps quoted spans together and drops the quotes.
+fn shell_words(s: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for c in s.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => cur.push(c),
+            (None, '\'' | '"') => quote = Some(c),
+            (None, c) if c.is_whitespace() => {
+                if !cur.is_empty() {
+                    words.push(std::mem::take(&mut cur));
+                }
+            }
+            (None, c) => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words
 }
 
 /// Pull every ` ```mermaid ` fence out of a markdown reply, each with the
@@ -440,15 +508,48 @@ flowchart LR
         assert_eq!(list[0].label, "3");
     }
 
+    fn call<'a>(
+        tool_name: &'a str,
+        file_path: Option<&'a str>,
+        command: Option<&'a str>,
+    ) -> ToolCall<'a> {
+        ToolCall {
+            tool_name: Some(tool_name),
+            file_path,
+            command,
+            cwd: Some("/w/repo"),
+        }
+    }
+
     #[test]
-    fn page_written_only_for_file_tools_and_html() {
+    fn file_tools_count_only_for_html() {
         assert_eq!(
-            page_written(Some("Write"), Some("/w/show-me-x.html")),
+            page_written(&call("Write", Some("/w/show-me-x.html"), None)),
             Some(PathBuf::from("/w/show-me-x.html"))
         );
-        assert!(page_written(Some("Edit"), Some("/w/a.HTM")).is_some());
-        assert!(page_written(Some("Bash"), Some("/w/a.html")).is_none());
-        assert!(page_written(Some("Write"), Some("/w/a.md")).is_none());
-        assert!(page_written(Some("Write"), None).is_none());
+        assert!(page_written(&call("Edit", Some("/w/a.HTM"), None)).is_some());
+        assert!(page_written(&call("Write", Some("/w/a.md"), None)).is_none());
+        assert!(page_written(&call("Write", None, None)).is_none());
+        assert!(page_written(&call("Read", Some("/w/a.html"), None)).is_none());
+    }
+
+    #[test]
+    fn bash_open_of_an_html_file_counts_and_resolves_against_cwd() {
+        let heredoc_then_open = "mkdir -p ./tmp && cat > ./tmp/x.html <<'HTML'\n<p>hi</p>\nHTML\nopen ./tmp/x.html";
+        assert_eq!(
+            page_written(&call("Bash", None, Some(heredoc_then_open))),
+            Some(PathBuf::from("/w/repo/./tmp/x.html"))
+        );
+        assert_eq!(
+            page_written(&call("Bash", None, Some("open -a \"Google Chrome\" /abs/p.html"))),
+            Some(PathBuf::from("/abs/p.html"))
+        );
+        assert_eq!(
+            page_written(&call("Bash", None, Some("open 'my page.html'"))),
+            Some(PathBuf::from("/w/repo/my page.html"))
+        );
+        assert!(page_written(&call("Bash", None, Some("open https://example.com"))).is_none());
+        assert!(page_written(&call("Bash", None, Some("cat > a.html <<EOF\nx\nEOF"))).is_none());
+        assert!(page_written(&call("Bash", None, Some("echo open a.html"))).is_none());
     }
 }

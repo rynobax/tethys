@@ -41,11 +41,12 @@ struct HookInput {
     tool_input: Option<ToolInput>,
 }
 
-/// The one field of a tool's argument object Tethys cares about.
+/// The two fields of a tool's argument object Tethys cares about.
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct ToolInput {
     file_path: Option<String>,
+    command: Option<String>,
 }
 
 fn main() {
@@ -75,7 +76,8 @@ fn run() -> io::Result<()> {
         stop_hook_active: input.stop_hook_active,
         last_assistant_message: input.last_assistant_message,
         tool_name: input.tool_name,
-        tool_file_path: input.tool_input.and_then(|t| t.file_path),
+        tool_file_path: input.tool_input.as_ref().and_then(|t| t.file_path.clone()),
+        tool_command: input.tool_input.and_then(|t| t.command),
         spawn_token: env::var("TETHYS_SPAWN_TOKEN").ok(),
     };
 

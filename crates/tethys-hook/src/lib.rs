@@ -32,10 +32,12 @@ pub struct HookMessage {
     pub last_assistant_message: Option<String>,
     /// PreToolUse / PostToolUse only: the tool Claude ran (`Write`, `Bash`, …).
     pub tool_name: Option<String>,
-    /// PreToolUse / PostToolUse only: `tool_input.file_path`, flattened out of
-    /// the tool's own argument object. The one field of any tool's input
-    /// Tethys reads, so the rest of the object never crosses the socket.
+    /// PreToolUse / PostToolUse only: `tool_input.file_path` (file tools) and
+    /// `tool_input.command` (Bash), flattened out of the tool's own argument
+    /// object. The only fields of any tool's input Tethys reads, so the rest
+    /// of the object never crosses the socket.
     pub tool_file_path: Option<String>,
+    pub tool_command: Option<String>,
     /// Tethys-injected: matches the UUID set as `TETHYS_SPAWN_TOKEN` on the
     /// PTY. `None` for sessions Tethys didn't spawn.
     pub spawn_token: Option<String>,
