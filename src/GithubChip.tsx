@@ -86,6 +86,30 @@ function BugbotIcon() {
   );
 }
 
+/** Octicon git-merge: the chip's whole story once a PR lands. */
+function MergedIcon() {
+  return (
+    <svg className="gh-state-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M5.45 5.154A4.25 4.25 0 0 0 9.25 7.5h1.378a2.251 2.251 0 1 1 0 1.5H9.25A5.734 5.734 0 0 1 5 7.123v3.505a2.25 2.25 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.95-.218ZM4.25 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm8.5-4.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM5 3.25a.75.75 0 1 0 0 .005V3.25Z"
+      />
+    </svg>
+  );
+}
+
+/** Octicon git-pull-request-closed. */
+function ClosedIcon() {
+  return (
+    <svg className="gh-state-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M3.25 1A2.25 2.25 0 0 1 4 5.372v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.251 2.251 0 0 1 3.25 1Zm9.5 5.5a.75.75 0 0 1 .75.75v3.378a2.251 2.251 0 1 1-1.5 0V7.25a.75.75 0 0 1 .75-.75Zm-2.03-5.273a.75.75 0 0 1 1.06 0l.97.97.97-.97a.748.748 0 0 1 1.265.332.75.75 0 0 1-.205.729l-.97.97.97.968a.75.75 0 1 1-1.06 1.06l-.97-.968-.97.969a.75.75 0 0 1-1.06-1.06l.97-.97-.97-.97a.75.75 0 0 1 0-1.06ZM2.5 13.25a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0ZM3.25 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm9.5 10.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z"
+      />
+    </svg>
+  );
+}
+
 function Square({
   kind,
   tone,
@@ -284,10 +308,18 @@ export function GithubChip({
         </span>
       )}
       {status.state === "merged" && (
-        <span className="gh-merged-badge">merged</span>
+        <span className="gh-state-badge" title="Merged" aria-label="Merged">
+          <MergedIcon />
+        </span>
       )}
       {status.state === "closed" && (
-        <span className="gh-merged-badge gh-closed-badge">closed</span>
+        <span
+          className="gh-state-badge gh-closed-badge"
+          title="Closed without merging"
+          aria-label="Closed without merging"
+        >
+          <ClosedIcon />
+        </span>
       )}
       {onDetach && (
         <PrDetachButton prNumber={status.pr_number} onDetach={onDetach} />

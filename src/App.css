@@ -355,16 +355,24 @@ html,
   height: 12px;
 }
 
-.gh-merged-badge {
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+.gh-state-badge {
+  display: inline-flex;
+  align-items: center;
   color: #a371f7;
-  font-weight: 600;
+}
+
+.gh-state-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.workspace-detail h2 .gh-state-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .gh-closed-badge {
-  color: var(--muted);
+  color: #e5534b;
 }
 
 .gh-note-badge {
