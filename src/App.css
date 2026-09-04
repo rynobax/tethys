@@ -375,6 +375,14 @@ html,
   color: #e5534b;
 }
 
+.gh-queue-pending {
+  color: #c69327;
+}
+
+.gh-queue-bad {
+  color: #e5534b;
+}
+
 .gh-note-badge {
   font-size: 9px;
   text-transform: uppercase;

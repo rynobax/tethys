@@ -33,6 +33,25 @@ pub enum ReviewDecision {
     ReviewRequired,
 }
 
+/// Where a PR sits in its repo's merge queue, mirroring GitHub's
+/// `MergeQueueEntryState`. Only a repo with a queue configured ever produces
+/// one, so `None` covers both "no queue here" and "not queued yet" — the chip
+/// draws nothing in either case, which is what it did before queues existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeQueueState {
+    /// In line, nothing running for it yet.
+    Queued,
+    /// At the front: GitHub is building and testing the merge branch.
+    AwaitingChecks,
+    /// Checks passed; it merges as soon as the queue reaches it.
+    Mergeable,
+    /// The queue is about to eject it — its merge branch failed or conflicts.
+    Unmergeable,
+    /// Held by a lock on the base branch (a deploy freeze, usually).
+    Locked,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GithubPrStatus {
     pub pr_number: u32,
@@ -63,6 +82,12 @@ pub struct GithubPrStatus {
     /// this only once the stack is a real object on its side.
     #[serde(default)]
     pub stack: Option<PrStack>,
+    /// Set only while the PR is sitting in a merge queue. This is what tells
+    /// "queued to merge" apart from "nobody has pressed the button yet": both
+    /// are `PrState::Open`, and GitHub reports no other difference between
+    /// them on the PR itself.
+    #[serde(default)]
+    pub merge_queue: Option<MergeQueueState>,
     pub head_sha: String,
     pub fetched_at: DateTime<Utc>,
     #[serde(default)]

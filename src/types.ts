@@ -23,6 +23,15 @@ export type ReviewDecision =
   | "changes_requested"
   | "review_required";
 
+/** Where a PR sits in its repo's merge queue. `null` covers both "no queue
+ *  configured" and "not queued yet" — neither draws anything. */
+export type MergeQueueState =
+  | "queued"
+  | "awaiting_checks"
+  | "mergeable"
+  | "unmergeable"
+  | "locked";
+
 export interface GithubPrStatus {
   pr_number: number;
   url: string;
@@ -41,6 +50,9 @@ export interface GithubPrStatus {
   /** Where the PR sits in a `gh stack`, if it's in one. `null` both for a lone
    *  PR and for PRs merely based on each other by hand. */
   stack: PrStack | null;
+  /** Set only while the PR is sitting in a merge queue. What tells "queued to
+   *  merge" apart from "nobody has pressed the button yet" — both are `open`. */
+  merge_queue: MergeQueueState | null;
   head_sha: string;
   fetched_at: string;
   last_error: string | null;

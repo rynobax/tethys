@@ -1,5 +1,5 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type { ChecksRollup, GithubPrStatus } from "./types";
+import type { ChecksRollup, GithubPrStatus, MergeQueueState } from "./types";
 import { isStale } from "./workspaceDerived";
 
 type SquareTone = "green" | "yellow" | "red" | "gray";
@@ -86,6 +86,34 @@ function BugbotIcon() {
   );
 }
 
+/** A train of entries advancing out of a queue. Deliberately unlike the merge
+    glyph next to it: being queued is the state right before merging, so the two
+    are worth telling apart at a glance. */
+function MergeQueueIcon() {
+  return (
+    <svg className="gh-state-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M4 3.2 V13"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        fill="none"
+      />
+      <circle cx="4" cy="3.8" r="1.7" fill="currentColor" />
+      <circle cx="4" cy="8.2" r="1.7" fill="currentColor" />
+      <circle cx="4" cy="12.6" r="1.7" fill="currentColor" />
+      <path
+        d="M6.6 3.8 H11.6 M10 2.2 L11.6 3.8 L10 5.4"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+      />
+    </svg>
+  );
+}
+
 /** Octicon git-merge: the chip's whole story once a PR lands. */
 function MergedIcon() {
   return (
@@ -131,6 +159,27 @@ function Square({
       {kind === "bugbot" && <BugbotIcon />}
     </span>
   );
+}
+
+/** Red once the queue is about to give up on the PR — those two need acting
+    on, where the rest of the queue is just waiting. */
+function mergeQueueTone(state: MergeQueueState): "pending" | "bad" {
+  return state === "unmergeable" || state === "locked" ? "bad" : "pending";
+}
+
+function mergeQueueTitle(state: MergeQueueState): string {
+  switch (state) {
+    case "queued":
+      return "In the merge queue, waiting its turn";
+    case "awaiting_checks":
+      return "In the merge queue: checks running on the merge branch";
+    case "mergeable":
+      return "In the merge queue: checks passed, merging shortly";
+    case "unmergeable":
+      return "In the merge queue, about to be ejected: the merge branch failed";
+    case "locked":
+      return "In the merge queue, held by a lock on the base branch";
+  }
 }
 
 function ciTone(checks: ChecksRollup, hasMergeConflicts: boolean): SquareTone {
@@ -275,6 +324,7 @@ export function GithubChip({
     `PR #${status.pr_number}`,
     status.head_branch,
     `state: ${status.state}${status.is_draft ? " (draft)" : ""}`,
+    status.merge_queue ? mergeQueueTitle(status.merge_queue) : null,
     status.last_error ? `error: ${status.last_error}` : null,
     stale ? `stale since ${new Date(status.fetched_at).toLocaleTimeString()}` : null,
   ]
@@ -305,6 +355,15 @@ export function GithubChip({
             tone={bugbotTone(status.bugbot)}
             title={bugbotTitle(status.bugbot)}
           />
+        </span>
+      )}
+      {status.merge_queue && (
+        <span
+          className={`gh-state-badge gh-queue-${mergeQueueTone(status.merge_queue)}`}
+          title={mergeQueueTitle(status.merge_queue)}
+          aria-label={mergeQueueTitle(status.merge_queue)}
+        >
+          <MergeQueueIcon />
         </span>
       )}
       {status.state === "merged" && (

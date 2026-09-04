@@ -159,6 +159,7 @@ mod tests {
             unresolved_threads: 0,
             head_branch: Some(head_branch.into()),
             stack: None,
+            merge_queue: None,
             head_sha: "sha".into(),
             fetched_at: Utc::now(),
             last_error: None,

@@ -939,6 +939,7 @@ mod tests {
             head_branch: None,
             head_sha: String::new(),
             stack: None,
+            merge_queue: None,
             fetched_at: Utc::now(),
             last_error: None,
         }

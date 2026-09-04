@@ -14,7 +14,9 @@ use std::collections::BTreeMap;
 use chrono::Utc;
 use serde_json::{json, Value};
 
-use crate::github::status::{ChecksRollup, GithubPrStatus, PrStack, PrState, ReviewDecision};
+use crate::github::status::{
+    ChecksRollup, GithubPrStatus, MergeQueueState, PrStack, PrState, ReviewDecision,
+};
 use crate::github::GithubSlug;
 use crate::state::{AppState, WorkspaceId};
 
@@ -112,6 +114,10 @@ pub fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
           state
           isDraft
           mergeable
+          isInMergeQueue
+          mergeQueueEntry {
+            state
+          }
           headRefName
           stack {
             number
@@ -406,10 +412,36 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
             .and_then(|v| v.as_str())
             .map(str::to_string),
         stack: parse_stack(pr),
+        merge_queue: parse_merge_queue(pr),
         head_sha,
         fetched_at: Utc::now(),
         last_error: None,
     })
+}
+
+/// Reads the PR's place in a merge queue. `isInMergeQueue` is the fact of the
+/// matter and `mergeQueueEntry` only refines it, so a PR GitHub says is queued
+/// still reports `Queued` when the entry is missing — losing the refinement is
+/// survivable, silently drawing the PR as un-queued is the bug this exists to
+/// prevent.
+fn parse_merge_queue(pr: &Value) -> Option<MergeQueueState> {
+    let queued = pr
+        .get("isInMergeQueue")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let entry_state = pr
+        .get("mergeQueueEntry")
+        .and_then(|e| e.get("state"))
+        .and_then(Value::as_str);
+    match entry_state {
+        Some("QUEUED") => Some(MergeQueueState::Queued),
+        Some("AWAITING_CHECKS") => Some(MergeQueueState::AwaitingChecks),
+        Some("MERGEABLE") => Some(MergeQueueState::Mergeable),
+        Some("UNMERGEABLE") => Some(MergeQueueState::Unmergeable),
+        Some("LOCKED") => Some(MergeQueueState::Locked),
+        _ if queued => Some(MergeQueueState::Queued),
+        _ => None,
+    }
 }
 
 /// Projects GraphQL's `stack` + `stackEntry` into one value. All three numbers
@@ -627,6 +659,7 @@ fn is_meaningful_change(old: Option<&GithubPrStatus>, new: Option<&GithubPrStatu
                 || a.unresolved_threads != b.unresolved_threads
                 || a.head_branch != b.head_branch
                 || a.stack != b.stack
+                || a.merge_queue != b.merge_queue
                 || a.head_sha != b.head_sha
                 || a.last_error != b.last_error
         }
@@ -1005,6 +1038,7 @@ mod tests {
             unresolved_threads: 0,
             head_branch: Some("feat/foo".into()),
             stack: None,
+            merge_queue: None,
             head_sha: "sha".into(),
             fetched_at: Utc::now(),
             last_error: None,
@@ -1473,6 +1507,72 @@ mod tests {
         assert_eq!(parse_one(&data).unwrap().stack, None);
     }
 
+    /// A queued PR and a PR nobody has merged yet are both `OPEN`; the queue
+    /// entry is the only thing that tells them apart.
+    #[test]
+    fn parse_captures_merge_queue_state() {
+        let s = parse_one(&pr_with(json!({
+            "isInMergeQueue": true,
+            "mergeQueueEntry": {"state": "AWAITING_CHECKS"},
+        })))
+        .unwrap();
+        assert_eq!(s.state, PrState::Open);
+        assert_eq!(s.merge_queue, Some(MergeQueueState::AwaitingChecks));
+    }
+
+    /// The refinement is optional; the fact isn't.
+    #[test]
+    fn parse_falls_back_to_queued_without_an_entry() {
+        let s = parse_one(&pr_with(json!({
+            "isInMergeQueue": true,
+            "mergeQueueEntry": null,
+        })))
+        .unwrap();
+        assert_eq!(s.merge_queue, Some(MergeQueueState::Queued));
+    }
+
+    /// Repos without a queue configured report the same shape as ones whose
+    /// queue this PR hasn't entered, and neither draws anything.
+    #[test]
+    fn parse_reports_no_queue_for_an_unqueued_pr() {
+        let s = parse_one(&pr_with(json!({
+            "isInMergeQueue": false,
+            "mergeQueueEntry": null,
+        })))
+        .unwrap();
+        assert_eq!(s.merge_queue, None);
+    }
+
+    /// Entering the queue is worth an event: it's the difference between the
+    /// two chips this field exists to tell apart.
+    #[test]
+    fn entering_the_merge_queue_is_a_meaningful_change() {
+        let before = parse_one(&pr_with(json!({"isInMergeQueue": false}))).unwrap();
+        let mut after = before.clone();
+        after.merge_queue = Some(MergeQueueState::Queued);
+        assert!(is_meaningful_change(Some(&before), Some(&after)));
+    }
+
+    /// Builds a branch-scan response for one open PR, merged with `extra`.
+    fn pr_with(extra: Value) -> Value {
+        let mut pr = json!({
+            "number": 1,
+            "url": "u",
+            "state": "OPEN",
+            "isDraft": false,
+            "headRefName": "feat/foo-0",
+            "reviewThreads": {"nodes": []},
+            "commits": {"nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]}
+        });
+        let (Some(pr_obj), Some(extra_obj)) = (pr.as_object_mut(), extra.as_object()) else {
+            panic!("both have to be objects");
+        };
+        for (k, v) in extra_obj {
+            pr_obj.insert(k.clone(), v.clone());
+        }
+        json!({"q0": {"ref": {"associatedPullRequests": {"nodes": [pr]}}}})
+    }
+
     #[test]
     fn pr_target_query_uses_pull_request_by_number() {
         let targets = vec![mk_target_kind(0, TargetKind::Pr(512))];
@@ -1557,6 +1657,7 @@ mod tests {
             unresolved_threads: 0,
             head_branch: None,
             stack: None,
+            merge_queue: None,
             head_sha: "sha".into(),
             fetched_at: Utc::now(),
             last_error: None,
