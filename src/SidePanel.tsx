@@ -608,14 +608,23 @@ function PrView({
   resizing: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const modalOpen = useModalOpen();
 
   // Position/show the webview to match the host, and keep it matched as the
   // layout changes. Re-runs on `url` so switching PR tabs swaps webviews in
-  // place, and on `resizing` so the guard strip appears when a drag starts and
-  // closes up the moment it ends.
+  // place, on `resizing` so the guard strip appears when a drag starts and
+  // closes up the moment it ends, and on `modalOpen` so a dialog can take the
+  // screen and give it back.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    // A native view sits above every DOM layer, so a dialog's backdrop can't
+    // dim it and the dialog itself would render underneath. Hide it for as
+    // long as one is up.
+    if (modalOpen) {
+      api.hidePrView().catch(() => {});
+      return;
+    }
     const inset = resizing ? DRAG_GUARD_PX : 0;
     const sync = () => {
       const r = host.getBoundingClientRect();
@@ -642,7 +651,7 @@ function PrView({
       observer.disconnect();
       window.removeEventListener("resize", sync);
     };
-  }, [url, resizing]);
+  }, [url, resizing, modalOpen]);
 
   // Hide only when the PR view actually leaves the screen — kept separate from
   // the sync effect so switching between two PR tabs never flashes to hidden.
@@ -673,6 +682,24 @@ function PrView({
       <div ref={hostRef} className="pr-view-host" />
     </div>
   );
+}
+
+/**
+ * Whether any modal dialog is currently in the document. Every dialog in the
+ * app renders a `.modal-backdrop` over the whole window, and they're owned by
+ * several components (the create dialog by `App`, Info / Add repo / Attach PR
+ * by the detail pane), so watching the DOM is simpler and more complete than
+ * threading a flag down from each owner.
+ */
+function useModalOpen(): boolean {
+  const query = () => document.querySelector(".modal-backdrop") !== null;
+  const [open, setOpen] = useState(query);
+  useEffect(() => {
+    const observer = new MutationObserver(() => setOpen(query()));
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, []);
+  return open;
 }
 
 function errorText(e: unknown): string {
