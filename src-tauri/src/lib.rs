@@ -17,6 +17,7 @@ mod mcp;
 mod memwatch;
 mod paths;
 mod pending_permissions;
+mod pr_view;
 mod probe;
 mod provision;
 mod provision_queue;
@@ -358,6 +359,8 @@ pub fn run() {
             commands::resize_session,
             commands::get_theme,
             commands::read_clipboard_file_paths,
+            commands::show_pr_view,
+            commands::hide_pr_view,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

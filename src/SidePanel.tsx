@@ -1,16 +1,64 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 import * as api from "./ipc/commands";
 import { useAppEvent } from "./ipc/events";
 import { useTheme } from "./theme";
 import type { Artifact, Workspace } from "./types";
+import { useHorizontalScroll } from "./useHorizontalScroll";
 
-const WIDTH_KEY = "tethys.sidePanel.width";
-const COLLAPSED_KEY = "tethys.sidePanel.collapsed";
-const DEFAULT_WIDTH = 420;
+/** JSON map of workspace id → panel width in px. A workspace with no entry
+ *  opens at half the detail pane (see `DEFAULT_WIDTH`). */
+const WIDTHS_KEY = "tethys.sidePanel.widths";
+/** JSON map of workspace id → collapsed. A workspace with no entry starts
+ *  collapsed: the terminal is the point until something asks for the panel. */
+const COLLAPSED_KEY = "tethys.sidePanel.collapsedByWorkspace";
+/** The width until you drag it: an even split with the terminal. A CSS
+ *  percentage rather than a measured pixel count, so it stays an even split
+ *  as the window resizes and needs no layout pass to compute. */
+const DEFAULT_WIDTH = "50%";
 const MIN_WIDTH = 280;
 
+/** Read one of the per-workspace maps out of `localStorage`, keeping only the
+ *  entries `valid` vouches for. Missing or unparseable starts fresh: nothing
+ *  in here is worth recovering. */
+function loadMap<T>(
+  key: string,
+  valid: (v: unknown) => v is T,
+): Record<string, T> {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? "");
+    if (parsed && typeof parsed === "object") {
+      return Object.fromEntries(
+        Object.entries(parsed as Record<string, unknown>).filter(
+          (e): e is [string, T] => valid(e[1]),
+        ),
+      );
+    }
+  } catch {
+    // fall through
+  }
+  return {};
+}
+
+const isPanelWidth = (v: unknown): v is number =>
+  typeof v === "number" && v >= MIN_WIDTH;
+const isBoolean = (v: unknown): v is boolean => typeof v === "boolean";
+/** How far the PR webview's left edge pulls back from the panel's while the
+ *  panel is being resized. At a fast drag the native view trails the DOM by a
+ *  frame or two — tens of pixels — and this keeps the cursor off it. */
+const DRAG_GUARD_PX = 64;
+
+// "notes", an artifact id, or a `pr:<url>` id for an embedded PR tab.
 type TabId = "notes" | string;
+
+interface PrTab {
+  /** `pr:<url>` — unique per PR, and distinct from any artifact id. */
+  id: string;
+  number: number;
+  url: string;
+  repoKey: string;
+}
 
 interface Props {
   workspace: Workspace;
@@ -25,31 +73,46 @@ interface Props {
  * right of the detail pane.
  *
  * Collapses to a thin rail; the rail is the whole affordance for expanding it
- * again. Width and collapsed state are UI chrome, so they live in
- * `localStorage` and apply to every workspace — a per-workspace collapse
- * would surprise you on every switch. The one thing that overrides your
- * choice is a fresh artifact for the workspace you're looking at: that
- * expands the panel and selects the new tab, because a `/show-me` turn is one
- * where you want the screen taken.
+ * again. Collapsed state and width are both per workspace — one that's mostly
+ * a PR page wants half the screen open, one that's just a terminal wants the
+ * rail — and both live in `localStorage` as id-keyed maps. A workspace you've
+ * never touched starts collapsed at an even split. The one thing that
+ * overrides your choice is a fresh artifact for the workspace you're looking
+ * at: that expands the panel and selects the new tab, because a `/show-me`
+ * turn is one where you want the screen taken.
  */
 export function SidePanel({ workspace, notes, onNotesChange }: Props) {
-  const [collapsed, setCollapsed] = useState(
-    () => localStorage.getItem(COLLAPSED_KEY) !== "false",
+  // True for the length of a resize drag; the PR webview keeps a guard strip
+  // clear of the cursor meanwhile (see `PrView`).
+  const [resizing, setResizing] = useState(false);
+  const [collapsedMap, setCollapsedMap] = useState(() =>
+    loadMap(COLLAPSED_KEY, isBoolean),
   );
-  const [width, setWidth] = useState(() => {
-    const stored = Number(localStorage.getItem(WIDTH_KEY));
-    return stored >= MIN_WIDTH ? stored : DEFAULT_WIDTH;
-  });
+  const collapsed = collapsedMap[workspace.id] ?? true;
+  const persistCollapsed = (value: boolean) => {
+    setCollapsedMap((prev) => {
+      const next = { ...prev, [workspace.id]: value };
+      localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+  const [widths, setWidths] = useState(() =>
+    loadMap(WIDTHS_KEY, isPanelWidth),
+  );
+  // Pixels once this workspace's panel has been dragged, else the default split.
+  const width: number | string = widths[workspace.id] ?? DEFAULT_WIDTH;
+  const setWorkspaceWidth = (w: number) => {
+    setWidths((prev) => {
+      const next = { ...prev, [workspace.id]: w };
+      localStorage.setItem(WIDTHS_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   // Remembered per workspace so switching back paints the tab you left.
   const [selectedByWorkspace, setSelectedByWorkspace] = useState<
     Map<string, TabId>
   >(new Map());
-
-  const persistCollapsed = (value: boolean) => {
-    setCollapsed(value);
-    localStorage.setItem(COLLAPSED_KEY, String(value));
-  };
 
   const select = useCallback(
     (tab: TabId) => {
@@ -83,15 +146,59 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
     }
   });
 
+  // One tab per linked PR that has been fetched at least once (a `null`
+  // status has no URL to load). Deduped by URL so a PR tracked twice is one
+  // tab, and labelled by repo so two repos' `#123`s are told apart.
+  const prTabs = useMemo<PrTab[]>(() => {
+    const seen = new Set<string>();
+    const tabs: PrTab[] = [];
+    for (const link of workspace.repo_links) {
+      for (const pr of link.prs) {
+        const url = pr.status?.url;
+        if (!url || seen.has(url)) continue;
+        seen.add(url);
+        tabs.push({
+          id: `pr:${url}`,
+          number: pr.number,
+          url,
+          repoKey: link.repo_key,
+        });
+      }
+    }
+    return tabs;
+  }, [workspace.repo_links]);
+
   // Effective tab: the remembered pick when it still exists, else the newest
-  // artifact (last in the list), else Notes.
+  // artifact (last in the list), else Notes. A PR tab is only ever reached by
+  // an explicit click, never auto-selected.
   const remembered = selectedByWorkspace.get(workspace.id);
   const selected: TabId =
     remembered !== undefined &&
-    (remembered === "notes" || artifacts.some((a) => a.id === remembered))
+    (remembered === "notes" ||
+      artifacts.some((a) => a.id === remembered) ||
+      prTabs.some((t) => t.id === remembered))
       ? remembered
       : (artifacts[artifacts.length - 1]?.id ?? "notes");
   const selectedArtifact = artifacts.find((a) => a.id === selected) ?? null;
+  const selectedPr = prTabs.find((t) => t.id === selected) ?? null;
+
+  // The tab strip scrolls sideways once it fills, and the active tab is kept
+  // in view — a fresh artifact selects itself, and it's appended at the far
+  // end, exactly where an overflowing strip has scrolled away from.
+  const strip = useRef<HTMLDivElement | null>(null);
+  const wheelRef = useHorizontalScroll<HTMLDivElement>();
+  const tabsRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      strip.current = el;
+      wheelRef(el);
+    },
+    [wheelRef],
+  );
+  useEffect(() => {
+    strip.current
+      ?.querySelector(".side-tab.active")
+      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [selected, collapsed]);
 
   const dismiss = (id: string) => {
     // Pick the neighbour before the list shrinks: right, else left, else Notes.
@@ -128,13 +235,11 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
   return (
     <aside className="side-panel" style={{ width }}>
       <ResizeHandle
-        width={width}
-        onResize={(w) => {
-          setWidth(w);
-          localStorage.setItem(WIDTH_KEY, String(w));
-        }}
+        onResize={setWorkspaceWidth}
+        onDragStart={() => setResizing(true)}
+        onDragEnd={() => setResizing(false)}
       />
-      <div className="side-tabs" role="tablist">
+      <div className="side-tabs" role="tablist" ref={tabsRef}>
         <button
           type="button"
           role="tab"
@@ -168,6 +273,19 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
             </button>
           </div>
         ))}
+        {prTabs.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            className={`side-tab pr ${selected === t.id ? "active" : ""}`}
+            onClick={() => select(t.id)}
+            title={`${t.repoKey} #${t.number}`}
+          >
+            <span className="side-tab-glyph">⑂</span>
+            <span className="side-tab-label">#{t.number}</span>
+          </button>
+        ))}
         <button
           type="button"
           className="side-collapse"
@@ -178,7 +296,14 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
         </button>
       </div>
       <div className="side-body">
-        {selectedArtifact === null ? (
+        {selectedPr ? (
+          <PrView
+            url={selectedPr.url}
+            number={selectedPr.number}
+            repoKey={selectedPr.repoKey}
+            resizing={resizing}
+          />
+        ) : selectedArtifact === null ? (
           <NotesTab
             key={workspace.id}
             workspaceId={workspace.id}
@@ -199,32 +324,68 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
 }
 
 /** Drag the panel's left edge to resize it. */
+/**
+ * The drag handle on the panel's left edge.
+ *
+ * Uses pointer capture so every move and the final release come to the handle
+ * itself, wherever the cursor has wandered — over the terminal, off the window.
+ * The one thing capture can't cross is the native PR webview, which sits above
+ * the whole DOM and swallows events at the OS level: a drag that ended over it
+ * never saw its mouseup and kept resizing forever. Two defences: the drag is
+ * bracketed by `onDragStart`/`onDragEnd` so the panel can keep that webview
+ * clear of the cursor, and a move that arrives with no button held means the
+ * release happened where we couldn't see it, so the drag ends there. A window
+ * blur (Cmd-Tab mid-drag) ends it too, since no release is coming.
+ */
 function ResizeHandle({
-  width,
   onResize,
+  onDragStart,
+  onDragEnd,
 }: {
-  width: number;
   onResize: (width: number) => void;
+  onDragStart: () => void;
+  onDragEnd: () => void;
 }) {
-  const onMouseDown = (e: React.MouseEvent) => {
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
     e.preventDefault();
+    const handle = e.currentTarget;
     const startX = e.clientX;
-    const startWidth = width;
+    // Measured, not passed in: until it's been dragged the panel's width is a
+    // percentage, and the drag has to start from the pixels that resolves to.
+    const startWidth =
+      handle.parentElement?.getBoundingClientRect().width ?? MIN_WIDTH;
     const max = Math.floor(window.innerWidth * 0.7);
-    const onMove = (ev: MouseEvent) => {
+
+    const onMove = (ev: PointerEvent) => {
+      if ((ev.buttons & 1) === 0) {
+        finish();
+        return;
+      }
       const next = startWidth + (startX - ev.clientX);
       onResize(Math.max(MIN_WIDTH, Math.min(max, next)));
     };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+    const finish = () => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", finish);
+      handle.removeEventListener("pointercancel", finish);
+      window.removeEventListener("blur", finish);
+      if (handle.hasPointerCapture(e.pointerId)) {
+        handle.releasePointerCapture(e.pointerId);
+      }
       document.body.style.cursor = "";
+      onDragEnd();
     };
+
+    onDragStart();
     document.body.style.cursor = "col-resize";
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    handle.setPointerCapture(e.pointerId);
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
+    window.addEventListener("blur", finish);
   };
-  return <div className="side-resize" onMouseDown={onMouseDown} />;
+  return <div className="side-resize" onPointerDown={onPointerDown} />;
 }
 
 /**
@@ -413,6 +574,103 @@ function PageView({
         src={api.convertFileSrc(artifact.path)}
         sandbox="allow-scripts"
       />
+    </div>
+  );
+}
+
+/**
+ * The live GitHub PR page for one linked PR. The page can't be shown in an
+ * iframe — GitHub forbids being framed — so it renders in a native child
+ * webview (`pr_view.rs`) that floats over this component's host `<div>`. This
+ * component owns only the geometry and the show/hide lifecycle: it measures
+ * the host rect and hands it to Rust, re-measuring whenever the panel or
+ * window resizes, and hides the webview when it unmounts (a switch to Notes,
+ * an artifact, another workspace, or a collapsed panel).
+ *
+ * Login lives in the webview's own persistent cookie store, shared across
+ * workspaces and restarts — you sign in to GitHub once, inside Tethys.
+ */
+function PrView({
+  url,
+  number,
+  repoKey,
+  resizing,
+}: {
+  url: string;
+  number: number;
+  repoKey: string;
+  /** True while the panel's edge is being dragged. The webview stays on
+   *  screen and follows the host, but with its left edge inset by
+   *  `DRAG_GUARD_PX`: it's a native view above the DOM, so if the cursor ever
+   *  lands on it the page stops hearing the drag. The webview tracks the host
+   *  a frame or so behind, and a quick pull to the right can put the cursor
+   *  inside that stale rectangle; the guard strip is where it lands instead. */
+  resizing: boolean;
+}) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+
+  // Position/show the webview to match the host, and keep it matched as the
+  // layout changes. Re-runs on `url` so switching PR tabs swaps webviews in
+  // place, and on `resizing` so the guard strip appears when a drag starts and
+  // closes up the moment it ends.
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const inset = resizing ? DRAG_GUARD_PX : 0;
+    const sync = () => {
+      const r = host.getBoundingClientRect();
+      // A zero-size or off-screen host means the panel is mid-collapse or
+      // hidden; don't paint a webview into nothing.
+      if (r.width - inset < 2 || r.height < 2) {
+        api.hidePrView().catch(() => {});
+        return;
+      }
+      api
+        .showPrView(url, {
+          x: r.left + inset,
+          y: r.top,
+          width: r.width - inset,
+          height: r.height,
+        })
+        .catch((e) => console.error("show_pr_view failed:", e));
+    };
+    sync();
+    const observer = new ResizeObserver(sync);
+    observer.observe(host);
+    window.addEventListener("resize", sync);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", sync);
+    };
+  }, [url, resizing]);
+
+  // Hide only when the PR view actually leaves the screen — kept separate from
+  // the sync effect so switching between two PR tabs never flashes to hidden.
+  useEffect(() => {
+    return () => {
+      api.hidePrView().catch(() => {});
+    };
+  }, []);
+
+  return (
+    <div className="artifact-view">
+      <div className="artifact-toolbar">
+        <span
+          className="artifact-toolbar-title"
+          title={`${repoKey} #${number}`}
+        >
+          {repoKey} #{number}
+        </span>
+        <button
+          type="button"
+          onClick={() =>
+            openUrl(url).catch((e) => console.error("openUrl failed:", e))
+          }
+        >
+          Open in browser
+        </button>
+      </div>
+      <div ref={hostRef} className="pr-view-host" />
     </div>
   );
 }

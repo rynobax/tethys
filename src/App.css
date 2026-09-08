@@ -345,12 +345,12 @@ html,
   color: var(--muted);
 }
 
-.workspace-detail h2 .gh-sq {
+.header-prs .gh-sq {
   width: 18px;
   height: 18px;
 }
 
-.workspace-detail h2 .gh-sq-icon {
+.header-prs .gh-sq-icon {
   width: 12px;
   height: 12px;
 }
@@ -366,7 +366,7 @@ html,
   height: 12px;
 }
 
-.workspace-detail h2 .gh-state-icon {
+.header-prs .gh-state-icon {
   width: 14px;
   height: 14px;
 }
@@ -416,16 +416,16 @@ html,
   white-space: nowrap;
 }
 
-.workspace-detail h2 .gh-stack {
+.header-prs .gh-stack {
   padding: 2px 5px;
   border-radius: 15px;
 }
 
-.workspace-detail h2 .gh-stack-sep {
+.header-prs .gh-stack-sep {
   font-size: 12px;
 }
 
-.workspace-detail h2 .gh-stack-count {
+.header-prs .gh-stack-count {
   font-size: 10px;
 }
 
@@ -561,35 +561,62 @@ html,
   background: var(--bg);
 }
 
+/* Sits entirely *outside* the panel, over the terminal's right edge. Inside
+   the panel the native PR webview is above the DOM and would eat half of a
+   straddling handle — which is why grabbing it used to miss so often. */
 .side-resize {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: -3px;
-  width: 6px;
+  left: -9px;
+  width: 10px;
   cursor: col-resize;
   z-index: 2;
+  touch-action: none;
 }
 
 .side-resize:hover {
   background: color-mix(in oklab, var(--accent) 35%, transparent);
 }
 
-/* Notes fixed on the left, artifacts oldest→newest after it, the collapse
-   chevron pinned right. The strip scrolls sideways once it fills. */
+/* Notes fixed on the left, artifacts oldest→newest after it, then PR tabs,
+   the collapse chevron pinned right. The strip scrolls sideways once it
+   fills (see `.h-strip`). */
 .side-tabs {
   display: flex;
   align-items: stretch;
   gap: 2px;
   padding: 0 4px 0 8px;
   border-bottom: 1px solid var(--border);
-  overflow-x: auto;
-  scrollbar-width: none;
   flex: none;
 }
 
-.side-tabs::-webkit-scrollbar {
-  display: none;
+/* A single row that scrolls sideways instead of wrapping — the side panel's
+   tab strip and the header's PR chips. The scrollbar is a 4px track that
+   only colours in on hover, so a strip that fits looks exactly as it did;
+   `useHorizontalScroll` turns a mouse wheel into sideways travel, since a
+   wheel only ever produces vertical deltas. WebKit-only selectors are fine:
+   this app renders in WKWebView and nowhere else. */
+.side-tabs,
+.header-prs {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.side-tabs::-webkit-scrollbar,
+.header-prs::-webkit-scrollbar {
+  height: 4px;
+}
+
+.side-tabs::-webkit-scrollbar-thumb,
+.header-prs::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 2px;
+}
+
+.side-tabs:hover::-webkit-scrollbar-thumb,
+.header-prs:hover::-webkit-scrollbar-thumb {
+  background: rgba(125, 125, 125, 0.4);
 }
 
 .side-tab {
@@ -662,6 +689,8 @@ html,
   flex: none;
   position: sticky;
   right: 0;
+  /* Opaque so the tabs scrolling underneath don't show through. */
+  background: var(--bg);
 }
 
 .side-collapse:hover {
@@ -673,6 +702,14 @@ html,
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* The native PR webview floats over this host, so it only needs to reserve
+   the space and sit under the overlay until the page paints. */
+.pr-view-host {
+  flex: 1;
+  min-height: 0;
+  background: var(--bg);
 }
 
 .artifact-view {
@@ -766,35 +803,70 @@ html,
   line-height: 1.5;
 }
 
+/* Two rows: the branch name with the action buttons, then the PR strip. */
 .workspace-detail header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px 10px;
+}
+
+.header-row {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
   gap: 16px;
-  border-bottom: 1px solid var(--border);
-  padding: 0 16px 10px;
 }
 
 .workspace-detail h2 {
   margin: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
-  row-gap: 6px;
-  flex-wrap: wrap;
-  /* Takes the leftover width and wraps its own chips, rather than pushing on
-     the action buttons and forcing their labels to wrap. */
-  flex: 1;
   min-width: 0;
 }
 
-.workspace-detail h2 .gh-chip {
+.workspace-detail h2 > code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The PR row: the strip takes the width and scrolls sideways; "+ PR" stays
+   put at its end however many PRs there are. */
+.header-prs-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.header-prs-row > .gh-attach {
+  flex: none;
+}
+
+.header-prs {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+  /* Room for the hover scrollbar without it sitting on the chips. */
+  padding-bottom: 2px;
+}
+
+.header-prs .gh-chip-group {
+  flex: none;
+  flex-wrap: nowrap;
+}
+
+.header-prs .gh-chip {
   font-size: 12px;
   padding: 2px 10px;
   border-radius: 12px;
 }
 
-.workspace-detail h2 .gh-pr {
+.header-prs .gh-pr {
   font-size: 12px;
 }
 

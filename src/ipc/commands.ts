@@ -79,6 +79,19 @@ export const dismissArtifact = (workspaceId: WorkspaceId, artifactId: string) =>
 export const openArtifact = (workspaceId: WorkspaceId, artifactId: string) =>
   invoke<void>("open_artifact", { workspaceId, artifactId });
 
+/**
+ * Show the embedded GitHub PR webview over `rect` (logical pixels in the main
+ * window), navigating it to `url`. The child webview floats above the DOM, so
+ * the caller re-sends its rectangle on every layout change. See `pr_view.rs`.
+ */
+export const showPrView = (
+  url: string,
+  rect: { x: number; y: number; width: number; height: number },
+) => invoke<void>("show_pr_view", { url, ...rect });
+
+/** Hide the embedded PR webview (a non-PR tab is showing, or the panel closed). */
+export const hidePrView = () => invoke<void>("hide_pr_view");
+
 /** `blockerId: null` clears the link. Rejects on a cycle. */
 export const setWorkspaceBlocker = (
   workspaceId: WorkspaceId,

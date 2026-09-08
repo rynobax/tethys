@@ -267,6 +267,26 @@ pub async fn open_in_vscode(
     open_workspace_in_editor(&workspace_root)
 }
 
+/// Show the embedded GitHub PR webview over `(x, y, width, height)` — logical
+/// pixels in the main window — navigating it to `url`. See [`crate::pr_view`].
+#[tauri::command]
+pub fn show_pr_view(
+    app: AppHandle,
+    url: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> AppResult<()> {
+    crate::pr_view::show(&app, url, x, y, width, height)
+}
+
+/// Hide the embedded PR webview when a non-PR tab takes the panel.
+#[tauri::command]
+pub fn hide_pr_view(app: AppHandle) -> AppResult<()> {
+    crate::pr_view::hide(&app)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateWorkspaceArgs {
     /// Frontend-minted UUID. Lets us insert a `Creating` draft into state

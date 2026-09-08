@@ -29,6 +29,7 @@ import { Sidebar } from "./Sidebar";
 import { SystemStatus } from "./SystemStatus";
 import { applyTheme, ThemeContext } from "./theme";
 import { useBackendJob, type JobDescriptor } from "./useBackendJob";
+import { useHorizontalScroll } from "./useHorizontalScroll";
 import { useAppEvent } from "./ipc/events";
 import {
   linkPrEntries,
@@ -809,6 +810,7 @@ function WorkspaceDetail({
   // Sessions already auto-opened this app-run — guards against a retry loop
   // if the spawn fails, while a manual Resume click can still try again.
   const autoOpenedRef = useRef<Set<string>>(new Set());
+  const prStripRef = useHorizontalScroll<HTMLDivElement>();
 
   const meta = workspace.session;
 
@@ -875,28 +877,11 @@ function WorkspaceDetail({
     <div className="workspace-detail">
       <div className="workspace-main">
         <header>
-          <h2>
-            <code>{workspace.branch}</code>
-            {workspace.repo_links.map((r) =>
-              // Skipped entirely for repos with no PRs, so the header's gap
-              // doesn't double up around an empty group.
-              r.prs.length > 0 ? (
-                <span className="gh-chip-group" key={r.repo_key}>
-                  <RepoPrChips link={r} onDetach={detachPr} />
-                </span>
-              ) : null,
-            )}
-            <button
-              type="button"
-              className="gh-attach"
-              onClick={() => setAttachingPr(true)}
-              disabled={workspace.repo_links.length === 0}
-              title="Track another PR in this workspace (for a second branch you opened here)"
-            >
-              + PR
-            </button>
-          </h2>
-          <div className="actions">
+          <div className="header-row">
+            <h2>
+              <code>{workspace.branch}</code>
+            </h2>
+            <div className="actions">
             <BinaryMenu
               current={workspace.claude_binary ?? CLAUDE_BINARIES[0]}
               disabled={busy}
@@ -934,6 +919,33 @@ function WorkspaceDetail({
               disabled={busy}
             >
               Delete
+            </button>
+          </div>
+          </div>
+          {/* The PRs get a row of their own under the title: one line that
+              scrolls sideways rather than wrapping, since sharing the title
+              row with the action buttons left it a few chips wide once the
+              side panel took its share. "+ PR" is pinned at its end. */}
+          <div className="header-prs-row">
+            <div className="header-prs" ref={prStripRef}>
+              {workspace.repo_links.map((r) =>
+                // Skipped entirely for repos with no PRs, so the row's gap
+                // doesn't double up around an empty group.
+                r.prs.length > 0 ? (
+                  <span className="gh-chip-group" key={r.repo_key}>
+                    <RepoPrChips link={r} onDetach={detachPr} />
+                  </span>
+                ) : null,
+              )}
+            </div>
+            <button
+              type="button"
+              className="gh-attach"
+              onClick={() => setAttachingPr(true)}
+              disabled={workspace.repo_links.length === 0}
+              title="Track another PR in this workspace (for a second branch you opened here)"
+            >
+              + PR
             </button>
           </div>
         </header>
