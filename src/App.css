@@ -56,25 +56,8 @@ html,
   min-height: 0;
 }
 
-/*
- * The workspace list lives in an inset rounded card rather than running edge to
- * edge, so the sidebar reads as one object with the "New workspace" action at
- * its top. `overflow: hidden` keeps the scrolling list inside the rounding.
- */
-.sidebar-panel {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  flex: 1;
-  margin: 10px 8px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: color-mix(in oklab, var(--fg) 3%, var(--sidebar-bg));
-  overflow: hidden;
-}
-
 .sidebar-header {
-  padding: 8px 8px 4px;
+  padding: 10px 8px 4px;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -85,8 +68,8 @@ html,
   width: 100%;
 }
 
-/* Outlined rather than filled: it sits inside the list card, so a solid accent
-   block would out-shout the rows it introduces. */
+/* Outlined rather than filled: it sits directly above the rows, so a solid
+   accent block would out-shout the rows it introduces. */
 .new-workspace {
   display: flex;
   align-items: center;
@@ -119,8 +102,8 @@ html,
   flex: 1;
 }
 
-/* Rows are separated, rounded blocks — the selection reads as a pill inside the
-   card instead of a full-bleed stripe across it. */
+/* Rows are separated, rounded blocks — the selection reads as a pill instead
+   of a full-bleed stripe across the sidebar. */
 .workspace-list > li {
   position: relative;
   padding: 7px 10px;
@@ -1737,7 +1720,7 @@ li.is-dragging {
   text-transform: none;
 }
 
-/* Sits below the scrolling list, at the foot of the card. Quieter than
+/* Sits below the scrolling list, above the footer. Quieter than
    New workspace above it — creating a folder is housekeeping, not the thing
    the sidebar is for. */
 .sidebar-newfolder {

@@ -537,45 +537,38 @@ function App() {
     <ThemeContext.Provider value={theme}>
       <div className="app">
         <aside className="sidebar">
-          {/*
-          Header and list share one rounded card so the "New workspace" action
-          reads as the top of the workspace list rather than a separate bar.
-          The card clips the list's scroll, keeping its corners rounded.
-        */}
-          <div className="sidebar-panel">
-            <div className="sidebar-header">
-              <button
-                className="new-workspace"
-                onClick={() => setCreating(true)}
-                type="button"
-                disabled={!registryOk}
-                title={!registryOk ? "Configure repos.toml first" : undefined}
-              >
-                <span className="new-workspace-plus" aria-hidden="true">
-                  +
-                </span>
-                New workspace
-              </button>
-            </div>
-            <Sidebar
-              workspaces={visibleWorkspaces}
-              folders={folders}
-              selectedId={selectedId}
-              onSelect={setSelectedId}
-              onReorder={handleReorder}
-              onMoveToFolder={handleMoveToFolder}
-              onReorderFolders={handleReorderFolders}
-              onCreateFolder={handleCreateFolder}
-              onRenameFolder={handleRenameFolder}
-              onDeleteFolder={handleDeleteFolder}
-              onSetFolderCollapsed={handleSetFolderCollapsed}
-              onDelete={handleDelete}
-              onClearTurn={handleClearTurn}
-              onSetBlocker={handleSetBlocker}
-              workspaceNeedsTurn={workspaceNeedsTurn}
-              workspaceWorking={workspaceWorking}
-            />
+          <div className="sidebar-header">
+            <button
+              className="new-workspace"
+              onClick={() => setCreating(true)}
+              type="button"
+              disabled={!registryOk}
+              title={!registryOk ? "Configure repos.toml first" : undefined}
+            >
+              <span className="new-workspace-plus" aria-hidden="true">
+                +
+              </span>
+              New workspace
+            </button>
           </div>
+          <Sidebar
+            workspaces={visibleWorkspaces}
+            folders={folders}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            onReorder={handleReorder}
+            onMoveToFolder={handleMoveToFolder}
+            onReorderFolders={handleReorderFolders}
+            onCreateFolder={handleCreateFolder}
+            onRenameFolder={handleRenameFolder}
+            onDeleteFolder={handleDeleteFolder}
+            onSetFolderCollapsed={handleSetFolderCollapsed}
+            onDelete={handleDelete}
+            onClearTurn={handleClearTurn}
+            onSetBlocker={handleSetBlocker}
+            workspaceNeedsTurn={workspaceNeedsTurn}
+            workspaceWorking={workspaceWorking}
+          />
           <div className="sidebar-footer">
             <SystemStatus
               allWorkspaces={workspaces}
