@@ -1,6 +1,6 @@
 # Tethys
 
-Desktop app for running multiple parallel Claude Code sessions across git worktrees. One person's tool: workspaces bundle worktrees and sessions, and Tethys owns the lifecycle around them.
+Desktop app for running multiple parallel agent CLI sessions across git worktrees. One person's tool: workspaces bundle worktrees and sessions, and Tethys owns the lifecycle around them.
 
 ## Language
 
@@ -10,14 +10,18 @@ Desktop app for running multiple parallel Claude Code sessions across git worktr
 A git repository registered in `repos.toml`, identified by its stable `repo_key`. Tethys maintains its own clone of each repo and never touches checkouts the user manages separately.
 
 **Workspace**:
-A named unit of parallel work: one branch name shared across N repos, each checked out as a worktree, plus the one Claude session running inside them.
+A named unit of parallel work: one branch name shared across N repos, each checked out as a worktree, plus the one agent session running inside them.
 _Avoid_: Project, sandbox
 
 **Repo Link**:
 A repo's membership in a workspace — the worktree path plus per-repo state like whether Tethys created the branch.
 
+**Agent**:
+Which agent CLI a workspace's session runs — Claude Code or codex. Chosen when the workspace is created, inherited by a handoff, and changeable afterwards, though changing it necessarily starts a new conversation. Distinct from the **binary**, the executable name the agent runs as (`claude-hipaa` is a Claude): the agent decides how a session is spawned, hooked and resumed, and is never inferred from the binary's spelling.
+_Avoid_: Harness, model, provider
+
 **Session**:
-The one Claude Code CLI process a workspace runs, at the workspace root. A workspace has at most one; starting, resuming and reconnecting it are the same act.
+The one agent CLI process a workspace runs, at the workspace root. A workspace has at most one; starting, resuming and reconnecting it are the same act.
 
 **Notes**:
 Freeform per-workspace text the user writes in the UI.
@@ -53,7 +57,7 @@ The line workspaces wait in to be provisioned, because Tethys sets up one at a t
 _Avoid_: Job queue, build queue
 
 **Pending Permissions**:
-Workspace-local Claude permission grants captured at purge for the user to later fold into the shared per-repo settings or discard.
+Workspace-local Claude permission grants captured at purge (Claude only — codex has no equivalent to capture) for the user to later fold into the shared per-repo settings or discard.
 
 ### Handoff
 
