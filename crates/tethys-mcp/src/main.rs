@@ -254,7 +254,7 @@ impl ServerHandler for TethysServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("tethys", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Tethys manages parallel Claude sessions across git worktrees. \
+                "Tethys manages parallel agent sessions across git worktrees. \
                  Use create_workspace to hand a distinct piece of work to a fresh \
                  workspace with its own branch and its own session.",
             )
