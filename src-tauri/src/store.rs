@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::{AppError, AppResult};
 use crate::github::GithubPrStatus;
-use crate::state::{AppState, ClaudeSessionMeta, Folder, Workspace, WorkspaceStatus};
+use crate::state::{AppState, AgentSessionMeta, Folder, Workspace, WorkspaceStatus};
 
 /// Where the `Store` announces that a workspace changed so the UI can refresh.
 ///
@@ -432,11 +432,11 @@ fn migrate_sessions(state: &mut AppState, raw: &[u8]) {
         if ws.session.is_some() {
             continue;
         }
-        match serde_json::from_value::<ClaudeSessionMeta>(chosen.clone()) {
+        match serde_json::from_value::<AgentSessionMeta>(chosen.clone()) {
             Ok(meta) => {
                 ws.session = Some(meta);
-                if ws.claude_binary.is_none() {
-                    ws.claude_binary = chosen
+                if ws.agent_binary.is_none() {
+                    ws.agent_binary = chosen
                         .get("claude_binary")
                         .and_then(|b| b.as_str())
                         .map(str::to_string);
@@ -493,7 +493,8 @@ mod tests {
             created_at: Utc::now(),
             repo_links: Vec::new(),
             session: None,
-            claude_binary: None,
+            agent: Default::default(),
+            agent_binary: None,
             origin: Origin::Ui,
             deleted_at: None,
             folder: None,
@@ -967,14 +968,14 @@ mod tests {
         let ws = f.store.read(|s| s.workspaces[0].clone()).await;
         let session = ws.session.expect("one session survives");
         assert_eq!(session.id, "kept");
-        assert_eq!(session.claude_session_id.as_deref(), Some("csid-kept"));
+        assert_eq!(session.agent_session_id.as_deref(), Some("csid-kept"));
         assert_eq!(session.cwd, PathBuf::from("/tmp/ws-0/api"));
         assert_eq!(
             session.runtime_state,
             Some(crate::state::SessionRuntimeState::WaitingInput)
         );
         // The per-session override moves to where the setting now lives.
-        assert_eq!(ws.claude_binary.as_deref(), Some("claude-hipaa"));
+        assert_eq!(ws.agent_binary.as_deref(), Some("claude-hipaa"));
     }
 
     /// A file already carrying `session` is left exactly as it is, even if a

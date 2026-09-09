@@ -669,6 +669,7 @@ mod tests {
                 let mut ws = crate::state::Workspace::draft(
                     "ws-0".into(),
                     "feat/thing".into(),
+                    crate::agent::Agent::Claude,
                     None,
                     crate::state::Origin::Ui,
                     None,

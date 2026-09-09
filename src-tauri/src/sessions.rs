@@ -11,15 +11,33 @@ use uuid::Uuid;
 
 use crate::artifacts::{self, ArtifactStore};
 use crate::error::{AppError, AppResult};
+use crate::agent::Agent;
+use crate::agent_bin::AgentBins;
+use crate::agent_cmd;
 use crate::hook_listener::HookMessage;
 use crate::mcp::McpLaunch;
 use crate::pty::{OnExit, PtyProcess, PtySpawn, Ring};
-use crate::state::{ClaudeSessionMeta, SessionRuntimeState, WorkspaceId};
+use crate::state::{AgentSessionMeta, SessionRuntimeState, WorkspaceId};
 use crate::store::Store;
 use crate::turn::{TurnChanged, TurnSignal, TurnState, TurnTracker};
 use crate::tmux;
 
 const RING_CAPACITY: usize = 2 * 1024 * 1024; // 2 MB scrollback per session
+
+/// Inputs to `SessionSupervisor::spawn_agent`.
+pub struct SpawnAgent<'a> {
+    pub agent: Agent,
+    pub workspace_id: String,
+    pub cwd: &'a Path,
+    pub tmux_bin: &'a Path,
+    /// The already-resolved binary — the workspace's override, or the agent's
+    /// default from `AgentBins`.
+    pub agent_bin: &'a Path,
+    /// The agent's own id for a conversation to pick up where it left off.
+    pub resume_session_id: Option<&'a str>,
+    pub mcp: Option<&'a McpLaunch>,
+    pub brief: Option<&'a str>,
+}
 
 /// Inputs to `SessionSupervisor::spawn_with_id`. Bundled in a struct so the
 /// inner function doesn't trip clippy's `too_many_arguments` lint.
@@ -86,7 +104,7 @@ pub struct SessionSupervisor {
     sessions: Mutex<HashMap<SessionId, SessionHandle>>,
     /// Maps the `TETHYS_SPAWN_TOKEN` we set on the PTY env to the
     /// session metadata we need to update once Claude's SessionStart hook
-    /// tells us the claude_session_id.
+    /// tells us the agent_session_id.
     pending: Mutex<HashMap<String, PendingSpawn>>,
     /// Owns every rule about what a session's turn indicator shows.
     /// `Arc` so the PTY exit hook can report a child exit without holding a
@@ -166,7 +184,7 @@ impl SessionSupervisor {
 
     /// Reconcile hook-derived turn state against Claude's own status probe
     /// files. For each probe correlated to a running Tethys session
-    /// (`sessionId` == `claude_session_id`), compare the probe-derived state
+    /// (`sessionId` == `agent_session_id`), compare the probe-derived state
     /// to what we're currently showing; on a mismatch, log it (the reason
     /// this exists — instrumentation to judge whether probes beat hooks) and
     /// apply the probe state as authoritative. The probe survives subagent
@@ -214,7 +232,7 @@ impl SessionSupervisor {
                             workspace_id: ws.id.as_str(),
                             session_id: &se.id,
                             cwd: se.cwd.to_str(),
-                            claude_session_id: se.claude_session_id.as_deref(),
+                            agent_session_id: se.agent_session_id.as_deref(),
                             running: running.contains(&se.id),
                         })
                     })
@@ -230,7 +248,7 @@ impl SessionSupervisor {
                 warn!(
                     session_id = %sess_id,
                     %new_csid,
-                    "healed stale claude_session_id — Claude rotated its session id (compaction/resume)"
+                    "healed stale agent_session_id — Claude rotated its session id (compaction/resume)"
                 );
                 let ws = ws_id.clone();
                 let sid = sess_id.clone();
@@ -239,7 +257,7 @@ impl SessionSupervisor {
                     .store
                     .update_workspace_quiet(&ws, move |ws| {
                         if let Some(m) = ws.session_mut(&sid) {
-                            m.claude_session_id = Some(csid);
+                            m.agent_session_id = Some(csid);
                         }
                         Ok(())
                     })
@@ -341,58 +359,44 @@ impl SessionSupervisor {
         Ok(info)
     }
 
-    /// Spawn `claude` inside a fresh tmux session. The tmux server (socket
-    /// label `tethys`) keeps the claude process alive across Tethys
-    /// restarts — it only dies on reboot, explicit kill, or claude itself
-    /// exiting. Pass `resume_claude_session_id` to resume an existing
-    /// conversation (`claude --resume <id>`).
+    /// Spawn an agent CLI inside a fresh tmux session. The tmux server (socket
+    /// label `tethys`) keeps the agent process alive across Tethys restarts —
+    /// it only dies on reboot, explicit kill, or the agent itself exiting.
+    /// Pass `resume_session_id` to resume an existing conversation.
     ///
-    /// The `TETHYS_SPAWN_TOKEN` correlation var reaches claude via tmux's
-    /// `-e` flag (per-session env), so the SessionStart hook still maps
-    /// back to the right Tethys session.
+    /// The `TETHYS_SPAWN_TOKEN` correlation var reaches the agent via tmux's
+    /// `-e` flag (per-session env), so the session-start hook still maps back
+    /// to the right Tethys session.
     ///
     /// `mcp` puts the handoff tool in this session's hands; `brief` is the
     /// first message it starts with, set only for the session a handoff
-    /// creates.
-    #[allow(clippy::too_many_arguments)]
-    pub fn spawn_claude(
-        &self,
-        workspace_id: String,
-        cwd: &Path,
-        tmux_bin: &Path,
-        claude_bin: &Path,
-        resume_claude_session_id: Option<&str>,
-        mcp: Option<&McpLaunch>,
-        brief: Option<&str>,
-    ) -> AppResult<(SessionInfo, String)> {
+    /// creates. The argv itself is per-agent — see `agent_cmd`.
+    pub fn spawn_agent(&self, req: SpawnAgent<'_>) -> AppResult<(SessionInfo, String)> {
         let token = Uuid::new_v4().to_string();
         let id = new_session_id();
 
-        let mut command = vec![claude_bin.to_string_lossy().into_owned()];
-        if let Some(csid) = resume_claude_session_id {
-            command.push("--resume".into());
-            command.push(csid.to_string());
-        }
-        // Rendered here rather than by the caller because the config bakes in
-        // the session id, and this is where that id is minted.
-        if let Some(mcp) = mcp {
-            command.extend(mcp.claude_args(&workspace_id, &id));
-        }
-        // The Brief goes last: `claude [options] [prompt]`. tmux passes argv
-        // through verbatim, so a multi-line brief with quotes in it survives.
-        if let Some(brief) = brief {
-            command.push(brief.to_string());
-        }
+        let command = agent_cmd::build(agent_cmd::Spawn {
+            agent: req.agent,
+            agent_bin: req.agent_bin,
+            workspace_id: &req.workspace_id,
+            session_id: &id,
+            resume_session_id: req.resume_session_id,
+            mcp: req.mcp,
+            brief: req.brief,
+        })?;
+
         let args = tmux::new_session_args(
             &id,
             &[("TETHYS_SPAWN_TOKEN", token.clone())],
             &command,
         );
 
+        let workspace_id = req.workspace_id;
+        let tmux_bin = req.tmux_bin;
         let info = self.spawn_with_id(SpawnRequest {
             id,
             workspace_id: workspace_id.clone(),
-            cwd,
+            cwd: req.cwd,
             program: tmux_bin,
             args: &args,
             tmux_bin: tmux_bin.to_path_buf(),
@@ -420,7 +424,7 @@ impl SessionSupervisor {
     /// app restarts and finds the tmux session still alive — claude keeps
     /// running in the tmux server, we just reconnect a new PTY to it.
     /// Returns `AppError` if the tmux session doesn't exist (caller should
-    /// fall back to `spawn_claude(..., Some(claude_session_id))`).
+    /// fall back to `spawn_claude(..., Some(agent_session_id))`).
     pub fn reattach_tmux(
         &self,
         session_id: SessionId,
@@ -576,7 +580,7 @@ impl SessionSupervisor {
 
     /// Find the Tethys session this hook belongs to.
     ///
-    /// Matches first on `claude_session_id`. Falls back to the parent session
+    /// Matches first on `agent_session_id`. Falls back to the parent session
     /// when the hook comes from a subagent — subagent transcripts live at
     /// `.../<parent-uuid>/subagents/agent-*.jsonl`, so the parent's id is
     /// recoverable from `transcript_path`. Falls back last to `cwd`, which is
@@ -607,7 +611,7 @@ impl SessionSupervisor {
                 let mut by_cwd = None;
                 for ws in &s.workspaces {
                     let Some(sess) = &ws.session else { continue };
-                    let tracked = sess.claude_session_id.as_deref();
+                    let tracked = sess.agent_session_id.as_deref();
                     if tracked == Some(csid)
                         || (parent_csid.is_some() && tracked == parent_csid.as_deref())
                     {
@@ -624,7 +628,7 @@ impl SessionSupervisor {
             .await;
         if lookup.is_none() {
             debug!(
-                claude_session_id = csid,
+                agent_session_id = csid,
                 transcript_path = ?msg.transcript_path,
                 "hook for unknown Claude session (not a Tethys-spawned one)"
             );
@@ -637,7 +641,7 @@ impl SessionSupervisor {
             debug!("SessionStart without spawn_token — not a Tethys session");
             return;
         };
-        let Some(claude_session_id) = msg.session_id.clone() else {
+        let Some(agent_session_id) = msg.session_id.clone() else {
             warn!("SessionStart hook missing session_id");
             return;
         };
@@ -661,7 +665,7 @@ impl SessionSupervisor {
                 let Some(session) = ws.session_mut(&session_id) else {
                     return Ok(false);
                 };
-                session.claude_session_id = Some(claude_session_id.clone());
+                session.agent_session_id = Some(agent_session_id.clone());
                 session.transcript_path = transcript_path.clone();
                 Ok(true)
             })
@@ -671,14 +675,14 @@ impl SessionSupervisor {
             Ok(true) => {
                 info!(
                     %session_id,
-                    %claude_session_id,
+                    %agent_session_id,
                     source = msg.source.as_deref().unwrap_or("?"),
                     "correlated SessionStart hook",
                 );
             }
             Ok(false) => warn!(
                 %session_id,
-                "SessionStart: no matching ClaudeSessionMeta in state"
+                "SessionStart: no matching AgentSessionMeta in state"
             ),
             Err(e) => warn!(error = %e, "store mutate during SessionStart failed"),
         }
@@ -925,12 +929,12 @@ struct TrackedSession<'a> {
     workspace_id: &'a str,
     session_id: &'a SessionId,
     cwd: Option<&'a str>,
-    claude_session_id: Option<&'a str>,
+    agent_session_id: Option<&'a str>,
     running: bool,
 }
 
 /// One reconciliation decision: apply `state` to `session_id`, first
-/// rewriting its stored `claude_session_id` when `heal_to` is set.
+/// rewriting its stored `agent_session_id` when `heal_to` is set.
 #[derive(Debug, PartialEq)]
 struct ProbeAction {
     workspace_id: String,
@@ -981,13 +985,13 @@ fn plan_probe_reconciliation(
     sessions: &[TrackedSession],
 ) -> Vec<ProbeAction> {
     let probes = freshest_probe_per_cwd(probes);
-    // Every session id Claude currently reports. A stored `claude_session_id`
+    // Every session id Claude currently reports. A stored `agent_session_id`
     // absent from this set has rotated away — the trigger for cwd healing.
     let live_sids: HashSet<&str> = probes.iter().map(|p| p.sid).collect();
     let mut out = Vec::new();
     for p in probes {
         if let Some(s) =
-            sessions.iter().find(|s| s.claude_session_id == Some(p.sid))
+            sessions.iter().find(|s| s.agent_session_id == Some(p.sid))
         {
             if s.running {
                 out.push(ProbeAction {
@@ -1003,7 +1007,7 @@ fn plan_probe_reconciliation(
         let mut stale_in_cwd = sessions.iter().filter(|s| {
             s.running
                 && s.cwd == Some(cwd)
-                && s.claude_session_id.is_none_or(|c| !live_sids.contains(c))
+                && s.agent_session_id.is_none_or(|c| !live_sids.contains(c))
         });
         if let Some(s) = stale_in_cwd.next() {
             if stale_in_cwd.next().is_none() {
@@ -1026,9 +1030,10 @@ pub struct OpenSession<'a> {
     pub supervisor: &'a Arc<SessionSupervisor>,
     pub store: &'a Arc<Store>,
     pub workspace_id: &'a str,
-    /// App-wide binary resolved at boot; the fallback when the workspace
-    /// doesn't override it.
-    pub claude_bin: &'a Path,
+    /// Each agent's default binary, resolved at boot. The fallback when the
+    /// workspace doesn't override it; which one is used depends on the
+    /// workspace's agent.
+    pub agent_bins: &'a AgentBins,
     pub tmux_bin: &'a Path,
     /// Handoff tool config. Attached to every session Tethys spawns — whether
     /// an agent can hand off shouldn't depend on which workspace it landed in.
@@ -1041,13 +1046,13 @@ pub struct OpenSession<'a> {
 /// Make the workspace's session live, doing the least that gets there.
 ///
 /// In order: a handle that is already running is returned as is; a tmux pane
-/// that outlived the app is reattached; a conversation on disk is resumed with
-/// `claude --resume`; otherwise a fresh `claude` starts. Each step is what the
+/// that outlived the app is reattached; a conversation on disk is resumed;
+/// otherwise a fresh session starts. Each step is what the
 /// user would have had to pick between when there were three buttons for it
 /// and a chip bar to pick them from — Start, Resume and Reconnect were all
 /// this function with the decision made by hand.
 ///
-/// A fresh start or a resume replaces the persisted `ClaudeSessionMeta`: a new
+/// A fresh start or a resume replaces the persisted `AgentSessionMeta`: a new
 /// tmux session means a new id, and the old id's handle is dropped so its dead
 /// scrollback doesn't linger. The cwd is the one thing that carries over — see
 /// `Workspace::session_cwd`.
@@ -1058,18 +1063,24 @@ pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
         ));
     }
 
-    let (existing, cwd, ws_binary) = req
+    let (existing, cwd, agent, ws_binary) = req
         .store
         .read(|s| {
             let w = s.find_workspace(req.workspace_id)?;
-            Some((w.session.clone(), w.session_cwd(), w.claude_binary.clone()))
+            Some((
+                w.session.clone(),
+                w.session_cwd(),
+                w.agent,
+                w.agent_binary.clone(),
+            ))
         })
         .await
         .ok_or_else(|| AppError::WorkspaceNotFound(req.workspace_id.to_string()))?;
     let cwd = cwd.ok_or_else(|| {
         AppError::Other(format!(
-            "workspace {} has no repos — nowhere to run Claude",
-            req.workspace_id
+            "workspace {} has no repos — nowhere to run {}",
+            req.workspace_id,
+            agent.label()
         ))
     })?;
 
@@ -1088,37 +1099,38 @@ pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
         }
     }
 
-    // Resume only when the conversation is actually on disk. Claude reports
-    // its session id at startup but writes the transcript only once there's
-    // been an exchange, so `--resume` on an empty session fails with "No
-    // conversation found" — a fresh start is the right answer there.
+    // Resume only when the conversation is actually on disk. Both CLIs report
+    // a session id at startup but write the transcript only once there's been
+    // an exchange, so resuming an empty session fails with "No conversation
+    // found" — a fresh start is the right answer there.
     let resume_sid = existing.as_ref().and_then(|prev| {
-        prev.claude_session_id
+        prev.agent_session_id
             .as_deref()
             .filter(|_| transcript_is_resumable(prev.transcript_path.as_deref()))
     });
 
     let resolved_bin = match ws_binary.as_deref() {
-        Some(bin) => crate::claude::resolve_named(bin)?,
-        None => req.claude_bin.to_path_buf(),
+        Some(bin) => crate::agent_bin::resolve_named(bin)?,
+        None => req.agent_bins.get(agent).to_path_buf(),
     };
 
-    let (info, _token) = req.supervisor.spawn_claude(
-        req.workspace_id.to_string(),
-        &cwd,
-        req.tmux_bin,
-        &resolved_bin,
-        resume_sid,
-        req.mcp,
-        req.brief,
-    )?;
+    let (info, _token) = req.supervisor.spawn_agent(SpawnAgent {
+        agent,
+        workspace_id: req.workspace_id.to_string(),
+        cwd: &cwd,
+        tmux_bin: req.tmux_bin,
+        agent_bin: &resolved_bin,
+        resume_session_id: resume_sid,
+        mcp: req.mcp,
+        brief: req.brief,
+    })?;
 
     // Persist the meta that makes this resumable across restarts. The
-    // claude_session_id is filled in by the SessionStart hook once it arrives.
-    let meta = ClaudeSessionMeta {
+    // agent_session_id is filled in by the SessionStart hook once it arrives.
+    let meta = AgentSessionMeta {
         id: info.id.clone(),
         cwd,
-        claude_session_id: None,
+        agent_session_id: None,
         transcript_path: None,
         runtime_state: None,
         notification_type: None,
@@ -1137,8 +1149,8 @@ pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
     Ok(info)
 }
 
-/// Whether a conversation can be resumed via `--resume`: a non-empty
-/// transcript file on disk is the reliable signal.
+/// Whether a conversation can be resumed: a non-empty transcript file on disk
+/// is the reliable signal, for either agent.
 fn transcript_is_resumable(path: Option<&Path>) -> bool {
     path.and_then(|p| std::fs::metadata(p).ok())
         .map(|m| m.is_file() && m.len() > 0)
@@ -1215,7 +1227,7 @@ mod tests {
             workspace_id: &ws_id,
             session_id: &sess_id,
             cwd: Some(cwd),
-            claude_session_id: Some(&stored_id),
+            agent_session_id: Some(&stored_id),
             running: true,
         }];
 
@@ -1249,7 +1261,7 @@ mod tests {
             workspace_id: &ws_id,
             session_id: &sess_id,
             cwd: Some("/wt/a"),
-            claude_session_id: Some(&stored_id),
+            agent_session_id: Some(&stored_id),
             running: true,
         }];
         let actions = plan_probe_reconciliation(&probes, &sessions);
@@ -1281,7 +1293,7 @@ mod tests {
             workspace_id: &ws_id,
             session_id: &sess_id,
             cwd: Some("/wt/a"),
-            claude_session_id: Some(&stored_id),
+            agent_session_id: Some(&stored_id),
             running: false,
         }];
         assert!(plan_probe_reconciliation(&probes, &sessions).is_empty());

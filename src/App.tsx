@@ -8,6 +8,7 @@ import {
 } from "react";
 import * as api from "./ipc/commands";
 import type {
+  Agent,
   CreateWorkspaceArgs,
   Discrepancies,
   Folder,
@@ -39,9 +40,25 @@ import {
 } from "./workspaceDerived";
 import "./App.css";
 
-/** Selectable claude entry-point binaries, shared by the new-workspace form
- *  and the workspace header's "run with" switcher. First entry is the default. */
-const CLAUDE_BINARIES = ["claude", "claude-hipaa", "claude-unsafe"] as const;
+/** The agent CLIs a workspace can run, shared by the new-workspace form and
+ *  the workspace header's "run with" switcher. First entry is the default.
+ *
+ *  One list, two fields: the binary is what gets executed, the agent is what
+ *  decides how it's spawned, resumed and hooked. The agent is carried here
+ *  rather than derived from the name, so a differently-spelled wrapper (or a
+ *  second `claude-*` variant) can't be mistaken for the wrong harness. */
+const AGENT_CHOICES = [
+  { binary: "claude", agent: "claude" },
+  { binary: "claude-hipaa", agent: "claude" },
+  { binary: "claude-unsafe", agent: "claude" },
+  { binary: "codex", agent: "codex" },
+] as const satisfies readonly { binary: string; agent: Agent }[];
+
+/** The agent a binary name belongs to. Falls back to Claude for a name the
+ *  list no longer carries — a workspace pinned to a retired binary keeps
+ *  working rather than becoming unopenable. */
+const agentFor = (binary: string): Agent =>
+  AGENT_CHOICES.find((c) => c.binary === binary)?.agent ?? "claude";
 
 /** Bracketed-paste markers: Claude Code treats the wrapped bytes as pasted
  *  text rather than typed keystrokes, so the draft lands in the prompt box
@@ -96,8 +113,8 @@ function App() {
   >(new Map());
   /**
    * Draft "initial prompt" text the user types while a workspace is still
-   * provisioning, keyed by workspace_id. Once that workspace's first Claude
-   * session reports a `claude_session_id` (its SessionStart hook fired, so the
+   * provisioning, keyed by workspace_id. Once that workspace's first agent
+   * session reports a `agent_session_id` (its SessionStart hook fired, so the
    * TUI is up), the draft is pasted into the session — bracketed paste, no
    * submit — and the entry is dropped.
    */
@@ -283,9 +300,9 @@ function App() {
     refreshSessionFor(payload.workspace_id);
   });
 
-  // Paste any draft initial-prompt into a workspace's Claude session once
+  // Paste any draft initial-prompt into a workspace's agent session once
   // it's up. `workspace:changed` fires (and refreshes `workspaces`) when the
-  // SessionStart hook populates `claude_session_id`, which is our signal
+  // SessionStart hook populates `agent_session_id`, which is our signal
   // that the TUI is ready to receive a paste.
   useEffect(() => {
     for (const [workspaceId, prompt] of draftPrompts) {
@@ -294,7 +311,7 @@ function App() {
       const ws = workspaces.find((w) => w.id === workspaceId);
       if (!ws || ws.status.kind !== "ready") continue;
       const session = ws.session;
-      if (!session || session.claude_session_id === null) continue;
+      if (!session || session.agent_session_id === null) continue;
 
       flushedDraftsRef.current.add(workspaceId);
       const sessionId = session.id;
@@ -347,13 +364,13 @@ function App() {
         next.delete(workspaceId);
         return next;
       });
-      // Auto-start the workspace's Claude session. Where it runs — the
+      // Auto-start the workspace's agent session. Where it runs — the
       // only repo's worktree, or the workspace root — is the backend's
       // call (`Workspace::session_cwd`).
       try {
-        await api.startClaudeSession(ws.id);
+        await api.startAgentSession(ws.id);
       } catch (e) {
-        setError(`auto-start claude failed: ${String(e)}`);
+        setError(`auto-start failed: ${String(e)}`);
       }
     },
     [],
@@ -717,7 +734,7 @@ function CreationRunner({
           autoFocus
           value={draftPrompt}
           onChange={(e) => onPromptChange(e.target.value)}
-          placeholder="Write your first prompt while the workspace provisions — it'll be pasted into Claude once the session opens."
+          placeholder="Write your first prompt while the workspace provisions — it'll be pasted into the session once it opens."
         />
       </label>
     </div>
@@ -813,7 +830,7 @@ function WorkspaceDetail({
     setBusy(true);
     setError(null);
     try {
-      await api.startClaudeSession(workspace.id);
+      await api.startAgentSession(workspace.id);
       // App-level listener on `session:changed` refreshes the cache.
     } catch (e) {
       setError(String(e));
@@ -822,12 +839,16 @@ function WorkspaceDetail({
     }
   };
 
-  // Restart the session under another entry-point binary, keeping history.
-  const switchBinary = async (binary: string) => {
+  // How to name this workspace's agent in the session status copy.
+  const agentLabel = workspace.agent === "codex" ? "codex" : "Claude";
+
+  // Restart the session under another entry-point binary. History carries
+  // over between binaries of the same agent; switching agent starts fresh.
+  const switchBinary = async (agent: Agent, binary: string) => {
     setBusy(true);
     setError(null);
     try {
-      await api.switchClaudeBinary(workspace.id, binary);
+      await api.switchAgent(workspace.id, agent, binary);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -838,12 +859,12 @@ function WorkspaceDetail({
   // A dormant session with a saved conversation resumes without a click.
   useEffect(() => {
     if (!meta || session) return;
-    if (!meta.claude_session_id) return;
+    if (!meta.agent_session_id) return;
     if (autoOpenedRef.current.has(meta.id)) return;
     autoOpenedRef.current.add(meta.id);
     void openSession();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [meta?.id, meta?.claude_session_id, session?.id]);
+  }, [meta?.id, meta?.agent_session_id, session?.id]);
 
   // The backend emits `workspace:changed`, which refreshes the chip row. It
   // also records the number as dismissed, so a PR detached from the workspace's
@@ -876,7 +897,7 @@ function WorkspaceDetail({
             </h2>
             <div className="actions">
             <BinaryMenu
-              current={workspace.claude_binary ?? CLAUDE_BINARIES[0]}
+              current={workspace.agent_binary ?? AGENT_CHOICES[0].binary}
               disabled={busy}
               onSwitch={switchBinary}
             />
@@ -969,14 +990,14 @@ function WorkspaceDetail({
             <>
               {!session.running && (
                 <div className="session-exit-banner">
-                  <span>Claude exited. Scrollback preserved below.</span>
+                  <span>{agentLabel} exited. Scrollback preserved below.</span>
                   <button
                     type="button"
                     className="primary"
                     onClick={openSession}
                     disabled={busy}
                   >
-                    {meta?.claude_session_id
+                    {meta?.agent_session_id
                       ? openLabel("Reconnect")
                       : openLabel("Start again")}
                   </button>
@@ -987,15 +1008,10 @@ function WorkspaceDetail({
           ) : meta ? (
             <div className="session-dormant">
               <p>
-                This workspace's Claude session is dormant.{" "}
-                {meta.claude_session_id ? (
-                  <>
-                    Resume re-opens the conversation with{" "}
-                    <code>claude --resume</code>.
-                  </>
-                ) : (
-                  "No conversation was saved, so Resume starts a fresh one."
-                )}
+                This workspace's {agentLabel} session is dormant.{" "}
+                {meta.agent_session_id
+                  ? "Resume re-opens the saved conversation."
+                  : "No conversation was saved, so Resume starts a fresh one."}
               </p>
               <button
                 type="button"
@@ -1008,7 +1024,9 @@ function WorkspaceDetail({
             </div>
           ) : (
             <div className="session-dormant">
-              <p className="muted">No Claude session in this workspace yet.</p>
+              <p className="muted">
+                No {agentLabel} session in this workspace yet.
+              </p>
               <button
                 type="button"
                 className="primary"
@@ -1016,11 +1034,11 @@ function WorkspaceDetail({
                 disabled={busy || workspace.repo_links.length === 0}
                 title={
                   workspace.repo_links.length === 0
-                    ? "Add a repo first — there's nowhere to run Claude"
+                    ? `Add a repo first — there's nowhere to run ${agentLabel}`
                     : undefined
                 }
               >
-                {openLabel("Start Claude")}
+                {openLabel(`Start ${agentLabel}`)}
               </button>
             </div>
           )}
@@ -1036,7 +1054,7 @@ function WorkspaceDetail({
 }
 
 /**
- * Which claude entry-point binary the workspace's session runs under. Picking
+ * Which agent binary the workspace's session runs under. Picking
  * another restarts the session under it, keeping the conversation when there
  * is one on disk.
  */
@@ -1047,7 +1065,7 @@ function BinaryMenu({
 }: {
   current: string;
   disabled: boolean;
-  onSwitch: (binary: string) => void;
+  onSwitch: (agent: Agent, binary: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -1070,7 +1088,7 @@ function BinaryMenu({
         onClick={() => setOpen((v) => !v)}
         disabled={disabled}
         aria-expanded={open}
-        title="The claude binary this workspace's session runs under. Switching restarts the session and keeps the conversation."
+        title="The agent binary this workspace's session runs under. Switching restarts the session; the conversation carries over between binaries of the same agent."
       >
         <code>{current}</code>
         <span className="caret">▾</span>
@@ -1078,18 +1096,18 @@ function BinaryMenu({
       {open && (
         <div className="binary-menu" role="menu">
           <div className="context-menu-label">Run with</div>
-          {CLAUDE_BINARIES.map((b) => (
+          {AGENT_CHOICES.map(({ binary, agent }) => (
             <button
-              key={b}
+              key={binary}
               type="button"
               role="menuitem"
-              disabled={b === current}
+              disabled={binary === current}
               onClick={() => {
                 setOpen(false);
-                onSwitch(b);
+                onSwitch(agent, binary);
               }}
             >
-              {b === current ? `${b} ✓` : b}
+              {binary === current ? `${binary} ✓` : binary}
             </button>
           ))}
         </div>
@@ -1499,7 +1517,9 @@ function CreateWorkspaceDialog({
   const [selected, setSelected] = useState<Set<string>>(() =>
     loadLastRepoSelection(repos),
   );
-  const [claudeBinary, setClaudeBinary] = useState("claude");
+  const [agentBinary, setAgentBinary] = useState<string>(
+    AGENT_CHOICES[0].binary,
+  );
   const [folder, setFolder] = useState<FolderId | null>(() =>
     loadLastFolder(folders),
   );
@@ -1530,7 +1550,9 @@ function CreateWorkspaceDialog({
     onSubmit({
       branch: branch.trim(),
       repo_selections: repoSelections,
-      claude_binary: claudeBinary === "claude" ? null : claudeBinary,
+      agent: agentFor(agentBinary),
+      agent_binary:
+        agentBinary === AGENT_CHOICES[0].binary ? null : agentBinary,
       folder,
     });
   };
@@ -1595,14 +1617,14 @@ function CreateWorkspaceDialog({
           </label>
         )}
         <label>
-          Claude binary
+          Run with
           <select
-            value={claudeBinary}
-            onChange={(e) => setClaudeBinary(e.target.value)}
+            value={agentBinary}
+            onChange={(e) => setAgentBinary(e.target.value)}
           >
-            {CLAUDE_BINARIES.map((b) => (
-              <option key={b} value={b}>
-                {b}
+            {AGENT_CHOICES.map(({ binary }) => (
+              <option key={binary} value={binary}>
+                {binary}
               </option>
             ))}
           </select>

@@ -95,14 +95,17 @@ export interface RepoLink {
   docs?: { branch: string; checkout_path: string; linked_paths: string[] } | null;
 }
 
-/** The persisted half of a workspace's Claude session: enough to find its
- *  tmux pane again or `claude --resume` the conversation. */
-export interface ClaudeSessionMeta {
+/** Which agent CLI a workspace's session runs. */
+export type Agent = "claude" | "codex";
+
+/** The persisted half of a workspace's agent session: enough to find its
+ *  tmux pane again or resume the conversation. */
+export interface AgentSessionMeta {
   id: SessionId;
   /** Where the agent runs. Fixed when the session first starts: the workspace
    *  root. Sessions started before that rule may sit inside a worktree. */
   cwd: string;
-  claude_session_id: string | null;
+  agent_session_id: string | null;
   transcript_path: string | null;
 }
 
@@ -130,13 +133,14 @@ export interface Workspace {
   branch: string;
   created_at: string;
   repo_links: RepoLink[];
-  /** The workspace's one Claude session; `null` until the first start. */
-  session: ClaudeSessionMeta | null;
-  /** Override the claude entry-point binary for this workspace's session
-   *  (e.g. `claude-hipaa`). `null` falls back to the default `claude`.
-   *  Changed after creation via `switchClaudeBinary`, which restarts the
-   *  session under it. */
-  claude_binary: string | null;
+  /** The workspace's one agent session; `null` until the first start. */
+  session: AgentSessionMeta | null;
+  /** Which agent CLI this workspace's session runs. */
+  agent: Agent;
+  /** Override the entry-point binary for this workspace's session (e.g.
+   *  `claude-hipaa`). `null` falls back to the agent's own default. Changed
+   *  after creation via `switchAgent`, which restarts the session under it. */
+  agent_binary: string | null;
   /** Soft-delete marker. The workspace is hidden from the sidebar until the
    *  hourly purger runs (only purges entries older than 1 hour). */
   deleted_at: string | null;
@@ -185,7 +189,9 @@ export interface CreateWorkspaceArgs {
   workspace_id: WorkspaceId;
   branch: string;
   repo_selections: string[];
-  claude_binary?: string | null;
+  /** `null`/absent is Claude. */
+  agent?: Agent | null;
+  agent_binary?: string | null;
   /** Folder the new workspace lands in; `null`/absent is Default. */
   folder?: FolderId | null;
 }

@@ -61,7 +61,7 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateWorkspace {
     /// Workspace the calling session belongs to. Recorded as the new
-    /// workspace's `Origin`, and the source of the `claude_binary` the new
+    /// workspace's `Origin`, and the source of the `agent_binary` the new
     /// workspace inherits.
     pub from_workspace: String,
     /// Calling session's Tethys id. `None` only if the config predates the

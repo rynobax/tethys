@@ -19,7 +19,7 @@ use serde::Serialize;
 
 use crate::state::SessionRuntimeState;
 
-/// Per-session turn state. The persisted mirror lives on `ClaudeSessionMeta`
+/// Per-session turn state. The persisted mirror lives on `AgentSessionMeta`
 /// so all three fields survive a restart.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TurnState {

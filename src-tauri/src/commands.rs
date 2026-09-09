@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 
 use tauri::ipc::InvokeResponseBody;
 
+use crate::agent::Agent;
 use crate::artifacts::{Artifact, ArtifactKind, ArtifactStore};
-use crate::claude;
+use crate::agent_bin::{self, AgentBins};
 use crate::claude_local;
 use crate::error::{AppError, AppResult};
 use crate::github::poller::{AuthSnapshot, GithubPoller};
@@ -296,10 +297,14 @@ pub struct CreateWorkspaceArgs {
     pub workspace_id: WorkspaceId,
     pub branch: String,
     pub repo_selections: Vec<String>,
+    /// Which agent CLI the workspace's session runs. `None` means Claude,
+    /// which is what every workspace created before codex support was.
+    #[serde(default)]
+    pub agent: Option<Agent>,
     /// Optional alternate entry-point binary name (e.g. `claude-hipaa`).
     /// Resolved on the login-shell PATH at spawn time.
     #[serde(default)]
-    pub claude_binary: Option<String>,
+    pub agent_binary: Option<String>,
     /// Folder the new workspace lands in; `None` is the Default folder.
     #[serde(default)]
     pub folder: Option<FolderId>,
@@ -331,14 +336,14 @@ pub async fn create_workspace(
             "pick at least one repo to include in the workspace".into(),
         ));
     }
-    let claude_binary = args
-        .claude_binary
+    let agent_binary = args
+        .agent_binary
         .as_ref()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     // Validate up-front so the user finds out before we clone repos.
-    if let Some(bin) = claude_binary.as_deref() {
-        claude::resolve_named(bin)?;
+    if let Some(bin) = agent_binary.as_deref() {
+        agent_bin::resolve_named(bin)?;
     }
 
     let reg = registry.require()?;
@@ -368,7 +373,8 @@ pub async fn create_workspace(
     let draft = Workspace::draft(
         id.clone(),
         branch.clone(),
-        claude_binary,
+        args.agent.unwrap_or_default(),
+        agent_binary,
         Origin::Ui,
         args.folder.clone(),
     );
@@ -1058,14 +1064,14 @@ pub async fn acknowledge_session_turn(
     Ok(())
 }
 
-/// Put the workspace's Claude session on screen: reattach it, resume it, or
+/// Put the workspace's agent session on screen: reattach it, resume it, or
 /// start it fresh, whichever is the least that gets there. See
 /// `sessions::open_session`.
 #[tauri::command]
-pub async fn start_claude_session(
+pub async fn start_agent_session(
     supervisor: State<'_, Arc<SessionSupervisor>>,
     store: State<'_, Arc<Store>>,
-    claude_bin: State<'_, ClaudeBin>,
+    agent_bins: State<'_, AgentBins>,
     tmux_bin: State<'_, TmuxBin>,
     mcp: State<'_, Option<McpLaunch>>,
     workspace_id: WorkspaceId,
@@ -1074,7 +1080,7 @@ pub async fn start_claude_session(
         supervisor: &supervisor,
         store: &store,
         workspace_id: &workspace_id,
-        claude_bin: &claude_bin.0,
+        agent_bins: &agent_bins,
         tmux_bin: &tmux_bin.0,
         mcp: mcp.inner().as_ref(),
         brief: None,
@@ -1083,37 +1089,56 @@ pub async fn start_claude_session(
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub struct SwitchClaudeBinaryArgs {
+pub struct SwitchAgentArgs {
     pub workspace_id: WorkspaceId,
-    /// Binary name to switch to (e.g. `claude`, `claude-hipaa`).
-    pub claude_binary: String,
+    /// The agent the chosen binary is. Sent alongside the name rather than
+    /// inferred from it: the kind decides how the session is spawned and
+    /// resumed, and must not hinge on spelling.
+    pub agent: Agent,
+    /// Binary name to switch to (e.g. `claude`, `claude-hipaa`, `codex`).
+    pub agent_binary: String,
 }
 
-/// Change the workspace's entry-point binary and restart its session under
-/// it. The running tmux session is killed first so `open_session` can't just
-/// reattach the old process; the conversation is resumed if it's on disk, and
-/// an empty chat simply starts over under the new binary.
+/// Change the workspace's agent and/or entry-point binary and restart its
+/// session under it. The running tmux session is killed first so
+/// `open_session` can't just reattach the old process; the conversation is
+/// resumed if it's on disk, and an empty chat simply starts over.
+///
+/// Switching between binaries of the *same* agent resumes the conversation.
+/// Switching agent cannot: the two keep their transcripts in different places
+/// in different formats, so the old conversation is left where it is and a
+/// fresh one starts.
 #[tauri::command]
-pub async fn switch_claude_binary(
+pub async fn switch_agent(
     supervisor: State<'_, Arc<SessionSupervisor>>,
     store: State<'_, Arc<Store>>,
-    claude_bin: State<'_, ClaudeBin>,
+    agent_bins: State<'_, AgentBins>,
     tmux_bin: State<'_, TmuxBin>,
     mcp: State<'_, Option<McpLaunch>>,
-    args: SwitchClaudeBinaryArgs,
+    args: SwitchAgentArgs,
 ) -> AppResult<SessionInfo> {
-    let binary = args.claude_binary.trim().to_string();
+    let binary = args.agent_binary.trim().to_string();
     if binary.is_empty() {
-        return Err(AppError::Other("no claude binary name provided".into()));
+        return Err(AppError::Other("no agent binary name provided".into()));
     }
     // Fail fast if the binary isn't on the login-shell PATH, before we tear
     // down the running session.
-    claude::resolve_named(&binary)?;
+    agent_bin::resolve_named(&binary)?;
 
     let session_id = store
         .update_workspace(&args.workspace_id, |ws| {
-            ws.claude_binary = Some(binary.clone());
-            Ok(ws.session.as_ref().map(|m| m.id.clone()))
+            // Read the id out before anything below can drop it — it's what
+            // kills the old tmux session further down.
+            let previous = ws.session.as_ref().map(|m| m.id.clone());
+            // Changing agent strands the old conversation: the new CLI can't
+            // read the other's transcript, so `open_session` would find
+            // nothing resumable anyway. Dropping the meta says so outright.
+            if ws.agent != args.agent {
+                ws.session = None;
+            }
+            ws.agent = args.agent;
+            ws.agent_binary = Some(binary.clone());
+            Ok(previous)
         })
         .await?;
 
@@ -1126,7 +1151,7 @@ pub async fn switch_claude_binary(
         supervisor: &supervisor,
         store: &store,
         workspace_id: &args.workspace_id,
-        claude_bin: &claude_bin.0,
+        agent_bins: &agent_bins,
         tmux_bin: &tmux_bin.0,
         mcp: mcp.inner().as_ref(),
         brief: None,
@@ -1201,9 +1226,6 @@ pub async fn dismiss_artifact(
     artifacts.dismiss(&workspace_id, &artifact_id).await;
     Ok(())
 }
-
-/// Newtype so `claude_bin` can be managed in Tauri state.
-pub struct ClaudeBin(pub std::path::PathBuf);
 
 /// Subscribe to live PTY bytes and return the current scrollback. The
 /// channel carries raw bytes via `InvokeResponseBody::Raw` — no JSON

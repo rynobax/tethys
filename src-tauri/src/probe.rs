@@ -34,7 +34,7 @@ pub struct Probe {
     pub status: Option<String>,
     /// Session working directory. Stable across the session-id rotation
     /// Claude does on compaction/resume, so it's the correlation key we fall
-    /// back to when the stored `claude_session_id` has gone stale.
+    /// back to when the stored `agent_session_id` has gone stale.
     pub cwd: Option<String>,
     /// Epoch-ms of the last status transition. Not a heartbeat (see module
     /// docs), so it can't detect a stuck session — but it does order two

@@ -565,6 +565,7 @@ mod tests {
                         s.workspaces.push(Workspace::draft(
                             id.into(),
                             format!("feat/{}", &id[3..]),
+                            crate::agent::Agent::Claude,
                             None,
                             crate::state::Origin::Ui,
                             None,

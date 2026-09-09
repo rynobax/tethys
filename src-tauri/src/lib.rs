@@ -1,6 +1,8 @@
+mod agent;
 mod artifacts;
 mod child_env;
-mod claude;
+mod agent_bin;
+mod agent_cmd;
 mod claude_local;
 mod claude_settings;
 mod commands;
@@ -43,7 +45,7 @@ use tauri_plugin_dialog::DialogExt;
 use tracing::{error, info, warn};
 
 use crate::artifacts::ArtifactStore;
-use crate::commands::ClaudeBin;
+use crate::agent_bin::AgentBins;
 use crate::github::GithubPoller;
 use crate::paths::Paths;
 use crate::purge::Purger;
@@ -132,17 +134,11 @@ pub fn run() {
             })?;
             handle.manage::<Arc<Store>>(store.clone());
 
-            // --- claude binary (non-fatal if missing; surface to UI later) --
-            let claude_bin_path = match claude::resolve() {
-                Ok(path) => path,
-                Err(e) => {
-                    warn!(error = %e, "claude binary not resolved at startup");
-                    // Still manage a placeholder so commands can surface
-                    // the error at spawn time rather than panicking.
-                    std::path::PathBuf::new()
-                }
-            };
-            app.manage(ClaudeBin(claude_bin_path.clone()));
+            // --- agent binaries (non-fatal if missing; an unresolved agent
+            // holds an empty path so the error surfaces at spawn time, against
+            // the workspace the user tried to start, rather than at boot).
+            let agent_bins = AgentBins::resolve_all();
+            app.manage(agent_bins.clone());
 
             // --- tmux binary (claude sessions run inside a tmux server so
             // they survive app restarts until reboot).
@@ -233,7 +229,7 @@ pub fn run() {
                 provision_queue,
                 supervisor.clone(),
                 tmux_bin_path.clone().unwrap_or_default(),
-                claude_bin_path,
+                agent_bins,
                 mcp_launch,
             ));
             let mcp_socket = paths.mcp_socket();
@@ -347,8 +343,8 @@ pub fn run() {
             commands::forget_workspace,
             commands::get_session,
             commands::acknowledge_session_turn,
-            commands::start_claude_session,
-            commands::switch_claude_binary,
+            commands::start_agent_session,
+            commands::switch_agent,
             commands::set_workspace_notes,
             commands::list_artifacts,
             commands::dismiss_artifact,
@@ -389,7 +385,7 @@ async fn refresh_workspace_docs(store: &Arc<Store>, registry: &RegistryLoad, pat
     }
 }
 
-/// For every persisted `ClaudeSessionMeta` whose tmux pane is still
+/// For every persisted `AgentSessionMeta` whose tmux pane is still
 /// alive, spawn a reattach client now. This means `get_session` will
 /// return `running: true` for those sessions by the time the frontend
 /// asks, so switching into a workspace shows the terminal immediately
@@ -454,7 +450,7 @@ fn prewarm_live_sessions(
 }
 
 /// Kill any tmux session on our private server whose name isn't a known
-/// `ClaudeSessionMeta.id`. Catches leftovers from app crashes between spawn
+/// `AgentSessionMeta.id`. Catches leftovers from app crashes between spawn
 /// and state.json flush, from workspaces that were deleted while their tmux
 /// sessions were still alive, and — once — the extra sessions a workspace
 /// carried before there was one per workspace.

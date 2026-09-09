@@ -282,6 +282,7 @@ mod tests {
         Workspace {
             id: "ws-1".into(),
             branch: "feat/thing".into(),
+            agent: Default::default(),
             created_at: Utc::now(),
             repo_links: keys
                 .iter()
@@ -295,7 +296,7 @@ mod tests {
                 })
                 .collect(),
             session: None,
-            claude_binary: None,
+            agent_binary: None,
             origin: Origin::Ui,
             deleted_at: None,
             folder: None,

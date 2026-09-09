@@ -9,6 +9,7 @@ import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 export { Channel, convertFileSrc };
 
 import type {
+  Agent,
   Artifact,
   Discrepancies,
   Folder,
@@ -136,7 +137,7 @@ export const moveWorkspacesToFolder = (
     args: { workspace_ids: workspaceIds, folder },
   });
 
-// ── the workspace's claude session ─────────────────────────────────────────
+// ── the workspace's agent session ──────────────────────────────────────────
 
 /** `null` when the workspace's session is dormant (or never started). */
 export const getSession = (workspaceId: WorkspaceId) =>
@@ -144,17 +145,24 @@ export const getSession = (workspaceId: WorkspaceId) =>
 
 /** Reattach, resume, or start fresh — whichever the session's state calls
  *  for. The one call behind Start, Resume and Reconnect alike. */
-export const startClaudeSession = (workspaceId: WorkspaceId) =>
-  invoke<SessionInfo>("start_claude_session", { workspaceId });
+export const startAgentSession = (workspaceId: WorkspaceId) =>
+  invoke<SessionInfo>("start_agent_session", { workspaceId });
 
-/** Change the workspace's binary and restart its session under it, keeping
- *  the conversation when there is one on disk. */
-export const switchClaudeBinary = (
+/** Change the workspace's agent and/or binary and restart its session under
+ *  it. The conversation survives a switch between binaries of the same agent;
+ *  switching agent starts a fresh one, since neither CLI can read the other's
+ *  transcript. */
+export const switchAgent = (
   workspaceId: WorkspaceId,
-  claudeBinary: string,
+  agent: Agent,
+  agentBinary: string,
 ) =>
-  invoke<SessionInfo>("switch_claude_binary", {
-    args: { workspace_id: workspaceId, claude_binary: claudeBinary },
+  invoke<SessionInfo>("switch_agent", {
+    args: {
+      workspace_id: workspaceId,
+      agent,
+      agent_binary: agentBinary,
+    },
   });
 
 export const acknowledgeSessionTurn = (workspaceId: WorkspaceId) =>

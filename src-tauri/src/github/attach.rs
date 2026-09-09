@@ -134,7 +134,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn workspace() -> Workspace {
-        let mut ws = Workspace::draft("ws-1".into(), "feat/thing".into(), None, Origin::Ui, None);
+        let mut ws = Workspace::draft("ws-1".into(), "feat/thing".into(), crate::agent::Agent::Claude, None, Origin::Ui, None);
         ws.repo_links.push(RepoLink {
             repo_key: "api".into(),
             worktree_path: PathBuf::from("/tmp/ws-1/api"),

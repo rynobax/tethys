@@ -13,7 +13,7 @@
 //!   just an expensive empty workspace.
 //! - The branch is auto-suffixed rather than refused when taken. "Pick another
 //!   name" is advice a non-interactive caller can't take.
-//! - It inherits the calling workspace's `claude_binary`, and the agent can't
+//! - It inherits the calling workspace's `agent_binary`, and the agent can't
 //!   ask for a different one. Handing work from a `claude-hipaa` workspace to a
 //!   plain `claude` one would move it across that boundary by accident.
 
@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
+use crate::agent_bin::AgentBins;
 use crate::error::{AppError, AppResult};
 use crate::inprogress::InProgressWorkspaces;
 use crate::job::JobTx;
@@ -56,7 +57,7 @@ pub struct Handoff {
     /// Empty when tmux didn't resolve at boot, in which case the workspace
     /// still gets provisioned and only its session is skipped.
     tmux_bin: PathBuf,
-    claude_bin: PathBuf,
+    agent_bins: AgentBins,
     /// The config handed to the new workspace's session, so it can hand off in
     /// turn. Uniform on purpose: whether an agent can hand off shouldn't depend
     /// on how its workspace came to exist.
@@ -73,7 +74,7 @@ impl Handoff {
         queue: ProvisionQueue,
         supervisor: Arc<SessionSupervisor>,
         tmux_bin: PathBuf,
-        claude_bin: PathBuf,
+        agent_bins: AgentBins,
         mcp: Option<McpLaunch>,
     ) -> Self {
         Self {
@@ -84,7 +85,7 @@ impl Handoff {
             queue,
             supervisor,
             tmux_bin,
-            claude_bin,
+            agent_bins,
             mcp,
         }
     }
@@ -146,7 +147,8 @@ impl Handoff {
         let draft = Workspace::draft(
             id.clone(),
             branch.clone(),
-            caller.claude_binary.clone(),
+            caller.agent,
+            caller.agent_binary.clone(),
             Origin::Handoff {
                 from_workspace: caller.id.clone(),
                 from_session: req.from_session.clone(),
@@ -254,7 +256,7 @@ impl Handoff {
             supervisor: &self.supervisor,
             store: &self.store,
             workspace_id: &workspace_id,
-            claude_bin: &self.claude_bin,
+            agent_bins: &self.agent_bins,
             tmux_bin: &self.tmux_bin,
             mcp: self.mcp.as_ref(),
             brief: Some(&brief),

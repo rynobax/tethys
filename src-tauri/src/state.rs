@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::agent::Agent;
 use crate::artifacts::Artifact;
 use crate::github::GithubPrStatus;
 
@@ -35,21 +36,29 @@ pub struct Workspace {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub repo_links: Vec<RepoLink>,
-    /// The workspace's one Claude session, or `None` until the first start.
+    /// The workspace's one agent session, or `None` until the first start.
     ///
     /// One per workspace, by design. Several used to be allowed — a tab bar
     /// of chips, each with its own cwd, binary override and hidden flag — and
     /// the whole apparatus went unused: every workspace in practice ran
     /// exactly one. `Store::load` folds the old `sessions` list down to this.
     #[serde(default)]
-    pub session: Option<ClaudeSessionMeta>,
-    /// Override the entry-point binary name for this workspace's session
-    /// (e.g. `claude-hipaa`). `None` falls back to the app-wide `claude`
-    /// resolved at boot. Chosen at creation, inherited by handoffs, and
-    /// changed after the fact by `switch_claude_binary`, which restarts the
-    /// session under the new one.
+    pub session: Option<AgentSessionMeta>,
+    /// Which agent CLI this workspace's session runs. Chosen at creation,
+    /// inherited by handoffs, and changed after the fact by `switch_agent`.
+    ///
+    /// Stored rather than derived from `agent_binary`: the kind decides how
+    /// hooks are installed, how a conversation resumes and how MCP is wired,
+    /// none of which may hinge on how an executable is spelled.
     #[serde(default)]
-    pub claude_binary: Option<String>,
+    pub agent: Agent,
+    /// Override the entry-point binary name for this workspace's session
+    /// (e.g. `claude-hipaa`). `None` falls back to the agent's own default
+    /// binary, resolved at boot. Chosen at creation, inherited by handoffs,
+    /// and changed after the fact by `switch_agent`, which restarts the
+    /// session under the new one.
+    #[serde(default, alias = "claude_binary")]
+    pub agent_binary: Option<String>,
     /// Where this workspace came from. Defaults to `Ui` for everything
     /// persisted before handoffs existed, which is what those were.
     #[serde(default)]
@@ -224,19 +233,24 @@ pub struct TrackedPr {
     pub status: Option<GithubPrStatus>,
 }
 
-/// The persisted half of a workspace's Claude session: what it takes to find
+/// The persisted half of a workspace's agent session: what it takes to find
 /// the tmux pane again (`id` is the tmux session name) or, failing that, to
-/// `claude --resume` the conversation.
+/// resume the conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaudeSessionMeta {
+pub struct AgentSessionMeta {
     pub id: SessionId,
-    /// Where Claude runs. Fixed when the session is first started — see
+    /// Where the agent runs. Fixed when the session is first started — see
     /// [`Workspace::session_cwd`] — and reused by every restart after, so a
     /// resumed conversation keeps its project directory.
     pub cwd: PathBuf,
-    pub claude_session_id: Option<String>,
+    /// The agent's *own* id for this conversation, as opposed to `id`, which
+    /// is Tethys's. Learned from the session-start hook, and the handle both
+    /// CLIs resume by. Claude rotates it on compaction; codex's is a stable
+    /// UUIDv7.
+    #[serde(alias = "claude_session_id")]
+    pub agent_session_id: Option<String>,
     pub transcript_path: Option<PathBuf>,
-    /// Last turn state observed via Claude Code hooks. Persisted so the
+    /// Last turn state observed via the agent's hooks. Persisted so the
     /// "your turn" indicator survives Tethys restarts. `None` until the
     /// first hook lands (or for state.json from before this field existed).
     #[serde(default)]
@@ -280,7 +294,8 @@ impl Workspace {
     pub fn draft(
         id: WorkspaceId,
         branch: String,
-        claude_binary: Option<String>,
+        agent: Agent,
+        agent_binary: Option<String>,
         origin: Origin,
         folder: Option<FolderId>,
     ) -> Self {
@@ -290,7 +305,8 @@ impl Workspace {
             created_at: Utc::now(),
             repo_links: Vec::new(),
             session: None,
-            claude_binary,
+            agent,
+            agent_binary,
             origin,
             deleted_at: None,
             folder,
@@ -341,7 +357,7 @@ impl Workspace {
     /// this workspace no longer runs — the previous one, killed by a binary
     /// switch, whose exit hook fires late — must not be written onto the
     /// current one.
-    pub fn session_mut(&mut self, session_id: &str) -> Option<&mut ClaudeSessionMeta> {
+    pub fn session_mut(&mut self, session_id: &str) -> Option<&mut AgentSessionMeta> {
         self.session.as_mut().filter(|m| m.id == session_id)
     }
 
@@ -539,7 +555,8 @@ mod tests {
                 })
                 .collect(),
             session: None,
-            claude_binary: None,
+            agent: Default::default(),
+            agent_binary: None,
             origin: Origin::Ui,
             deleted_at: None,
             folder: None,
@@ -550,11 +567,11 @@ mod tests {
         }
     }
 
-    fn session(id: &str, cwd: &str) -> ClaudeSessionMeta {
-        ClaudeSessionMeta {
+    fn session(id: &str, cwd: &str) -> AgentSessionMeta {
+        AgentSessionMeta {
             id: id.into(),
             cwd: PathBuf::from(cwd),
-            claude_session_id: None,
+            agent_session_id: None,
             transcript_path: None,
             runtime_state: None,
             notification_type: None,
@@ -661,7 +678,7 @@ mod tests {
         // `Store::load`, not by serde.
         assert!(ws.repo_links[0].prs.is_empty());
         assert!(ws.repo_links[0].dismissed.is_empty());
-        assert!(ws.claude_binary.is_none());
+        assert!(ws.agent_binary.is_none());
         assert!(ws.deleted_at.is_none());
         assert!(ws.folder.is_none());
         assert!(parsed.system_errors.is_empty());
@@ -669,7 +686,7 @@ mod tests {
 
     #[test]
     fn pre_turn_state_session_round_trips() {
-        // ClaudeSessionMeta from before runtime_state/notification_type were
+        // AgentSessionMeta from before runtime_state/notification_type were
         // added must still deserialize. The old `sessions` list is folded
         // into `session` by `Store::load`, not by serde, so this is the
         // post-migration shape.
@@ -697,8 +714,12 @@ mod tests {
         assert!(!session.turn_acknowledged);
     }
 
+    /// `claude_binary` was the field's name before a second agent existed, and
+    /// `claude_session_id` the session's. Both are still what's in every
+    /// `state.json` on disk, so the aliases have to hold — and a workspace
+    /// written before the `agent` field has to load as the agent it was.
     #[test]
-    fn claude_binary_round_trips() {
+    fn pre_agent_state_loads_as_claude() {
         let raw = r#"{
             "workspaces": [
                 {
@@ -706,14 +727,23 @@ mod tests {
                     "branch": "feat/foo",
                     "created_at": "2026-04-01T12:00:00Z",
                     "repo_links": [],
-                    "claude_binary": "claude-hipaa"
+                    "claude_binary": "claude-hipaa",
+                    "session": {
+                        "id": "sess-1",
+                        "cwd": "/tmp/wt/abc-123",
+                        "claude_session_id": "csid-1",
+                        "transcript_path": null
+                    }
                 }
             ]
         }"#;
         let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
+        let ws = &parsed.workspaces[0];
+        assert_eq!(ws.agent, Agent::Claude);
+        assert_eq!(ws.agent_binary.as_deref(), Some("claude-hipaa"));
         assert_eq!(
-            parsed.workspaces[0].claude_binary.as_deref(),
-            Some("claude-hipaa")
+            ws.session.as_ref().unwrap().agent_session_id.as_deref(),
+            Some("csid-1")
         );
     }
 
@@ -760,6 +790,7 @@ mod tests {
                     let mut ws = Workspace::draft(
                         (*id).into(),
                         format!("branch/{id}"),
+                        Agent::Claude,
                         None,
                         Origin::Ui,
                         None,
@@ -959,6 +990,7 @@ mod tests {
                     Workspace::draft(
                         (*id).into(),
                         format!("branch/{id}"),
+                        Agent::Claude,
                         None,
                         Origin::Ui,
                         folder.map(str::to_string),
