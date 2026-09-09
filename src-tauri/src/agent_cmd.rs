@@ -157,19 +157,37 @@ fn codex(spawn: Spawn<'_>) -> AppResult<Vec<String>> {
 /// The token is an argument rather than an environment variable because Tethys
 /// writes this command line itself, and codex's `shell_environment_policy` can
 /// filter what a subprocess inherits. An argument can't be filtered away.
+///
+/// A handler's `command` is a *shell string*, not an argv array — codex
+/// rejects the array form outright ("invalid type: sequence, expected a
+/// string"), and rejects it while loading config, so the whole session dies
+/// before the TUI starts. Each word is therefore single-quoted on its way in:
+/// the hook binary's path runs through the app bundle's name and is the one
+/// part a stray space would silently break.
 fn codex_hook_args(hook_bin: &Path, spawn_token: &str) -> Vec<String> {
-    let bin = toml_string(&hook_bin.to_string_lossy());
-    let token = toml_string(spawn_token);
+    let bin = shell_word(&hook_bin.to_string_lossy());
+    let token = shell_word(spawn_token);
     CODEX_HOOK_EVENTS
         .iter()
         .flat_map(|(event, subcommand)| {
-            let command = format!("[{bin}, {}, \"--spawn-token\", {token}]", toml_string(subcommand));
+            let command = format!("{bin} {} --spawn-token {token}", shell_word(subcommand));
             [
                 "-c".to_string(),
-                format!("hooks.{event}=[{{hooks=[{{type=\"command\",command={command}}}]}}]"),
+                format!(
+                    "hooks.{event}=[{{hooks=[{{type=\"command\",command={}}}]}}]",
+                    toml_string(&command)
+                ),
             ]
         })
         .collect()
+}
+
+/// Single-quote a word for the shell codex runs a hook `command` through.
+///
+/// POSIX single quotes take everything literally and have exactly one escape:
+/// end the quoting, emit an escaped quote, start again.
+fn shell_word(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 /// Render a TOML basic string, for the `-c` overrides codex configures
@@ -282,9 +300,9 @@ mod tests {
                 .iter()
                 .find(|a| a.starts_with(&format!("hooks.{event}=")))
                 .unwrap_or_else(|| panic!("no override for {event}"));
-            assert!(rendered.contains(&format!("{subcommand:?}")), "{rendered}");
-            assert!(rendered.contains(r#""--spawn-token", "tok-1""#), "{rendered}");
-            assert!(rendered.contains("/Applications/Tethys.app/tethys-hook"));
+            assert!(rendered.contains(&format!("'{subcommand}'")), "{rendered}");
+            assert!(rendered.contains("--spawn-token 'tok-1'"), "{rendered}");
+            assert!(rendered.contains("'/Applications/Tethys.app/tethys-hook'"));
         }
     }
 
@@ -317,6 +335,48 @@ mod tests {
         assert!(cmd
             .iter()
             .any(|a| a == r#"project_doc_fallback_filenames=["CLAUDE.md"]"#));
+    }
+
+    /// A handler's `command` is a shell string, and codex refuses an argv
+    /// array *while loading config* — so getting this wrong doesn't degrade
+    /// hooks, it kills the session before the TUI starts. That failure had no
+    /// visible error in Tethys: the pane just exited 0.
+    #[test]
+    fn a_codex_hook_command_is_a_shell_string_not_an_array() {
+        let mut s = spawn(Agent::Codex, None, None);
+        let hook_bin = PathBuf::from("/Applications/Tethys.app/tethys-hook");
+        s.hook_bin = Some(&hook_bin);
+        let cmd = build(s).unwrap();
+        let rendered = cmd
+            .iter()
+            .find(|a| a.starts_with("hooks.Stop="))
+            .expect("Stop override");
+        assert!(rendered.contains(r#"command=""#), "{rendered}");
+        assert!(!rendered.contains("command=["), "{rendered}");
+    }
+
+    /// The shell runs the hook command, so a path with a space in it — an app
+    /// bundle is one rename away from having one — must survive as one word.
+    #[test]
+    fn a_hook_path_with_a_space_stays_one_word() {
+        let mut s = spawn(Agent::Codex, None, None);
+        let hook_bin = PathBuf::from("/Applications/My Tethys.app/tethys-hook");
+        s.hook_bin = Some(&hook_bin);
+        let cmd = build(s).unwrap();
+        let rendered = cmd
+            .iter()
+            .find(|a| a.starts_with("hooks.Stop="))
+            .expect("Stop override");
+        assert!(
+            rendered.contains(r"'/Applications/My Tethys.app/tethys-hook'"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn shell_words_survive_a_quote() {
+        assert_eq!(shell_word("plain"), "'plain'");
+        assert_eq!(shell_word("it's"), r"'it'\''s'");
     }
 
     /// Paths run through the app bundle's name and a workspace id is a uuid,
