@@ -206,9 +206,15 @@ pub struct ToolCall<'a> {
 /// `/show-me` skill ends every page — `open path/to/show-me-*.html` — and it
 /// catches the file however it was written, which the file tools alone don't:
 /// the very first page a session made for this was a heredoc.
+///
+/// Tool names are each agent's own. `apply_patch` is codex's single edit tool,
+/// where Claude has three; both call a shell `Bash`. The `open` route is the
+/// one that matters most for codex, since it works whatever an edit is called.
 pub fn page_written(call: &ToolCall<'_>) -> Option<PathBuf> {
     match call.tool_name? {
-        "Write" | "Edit" | "MultiEdit" => html_path(PathBuf::from(call.file_path?)),
+        "Write" | "Edit" | "MultiEdit" | "apply_patch" => {
+            html_path(PathBuf::from(call.file_path?))
+        }
         "Bash" => {
             let opened = opened_paths(call.command?).into_iter().find_map(html_path)?;
             Some(match call.cwd {

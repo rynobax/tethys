@@ -26,9 +26,14 @@ pub const TOOL_CREATE_WORKSPACE: &str = "create_workspace";
 /// asks for the effect, and doesn't need the word "attach" the UI uses.
 pub const TOOL_LINK_PR: &str = "link_pr";
 
-/// Every tool, fully qualified the way Claude's permission system spells them.
-/// Each one has to be listed for `--allowed-tools`, or a call to it stalls on a
-/// permission dialog nobody is watching.
+/// Every tool, bare. Codex names a server's tools this way when granting them
+/// (`mcp_servers.<server>.tools.<tool>`), because the server is already named
+/// by the path.
+pub const TOOL_NAMES: &[&str] = &[TOOL_CREATE_WORKSPACE, TOOL_LINK_PR];
+
+/// The same tools, fully qualified the way Claude's permission system spells
+/// them. Each one has to be listed for `--allowed-tools`, or a call to it
+/// stalls on a permission dialog nobody is watching.
 pub const ALLOWED_TOOLS: &[&str] = &["mcp__tethys__create_workspace", "mcp__tethys__link_pr"];
 
 /// Env keys Tethys bakes into the generated `--mcp-config` at spawn time.

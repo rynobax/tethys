@@ -13,6 +13,13 @@
 //! `statusUpdatedAt` is written on state *transitions only*, not as a
 //! heartbeat, so it can't be used to infer a stuck session — an hour-old
 //! `idle` stamp just means the session went idle an hour ago.
+//!
+//! Claude-only, and deliberately so. Codex writes no comparable status file,
+//! and it doesn't need one: the backstop exists to heal Claude's session id
+//! after it rotates on compaction, and codex's is a stable UUIDv7. Codex
+//! sessions are filtered out before reconciliation rather than merely failing
+//! to match, so a dead Claude probe can't be healed onto the codex session
+//! that later took over the same cwd.
 
 use std::path::PathBuf;
 use std::sync::Arc;

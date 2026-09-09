@@ -258,6 +258,7 @@ impl Handoff {
             workspace_id: &workspace_id,
             agent_bins: &self.agent_bins,
             tmux_bin: &self.tmux_bin,
+            paths: &self.paths,
             mcp: self.mcp.as_ref(),
             brief: Some(&brief),
         })

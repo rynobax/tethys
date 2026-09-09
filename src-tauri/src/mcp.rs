@@ -1,8 +1,9 @@
 //! Both halves of the seam in front of the Tethys MCP server.
 //!
-//! [`McpLaunch`] is the spawn side: it renders the `--mcp-config` a Claude
-//! session is launched with. [`listen`] is the receiving side: the socket that
-//! config points at.
+//! [`McpLaunch`] is the spawn side: it renders the flags a session is launched
+//! with — inline JSON for Claude, `-c` config overrides for codex, the same
+//! server described twice. [`listen`] is the receiving side: the socket those
+//! flags point at.
 //!
 //! The two are here together because they are one contract read from opposite
 //! ends — the config names a binary, a socket and an identity, and the listener
@@ -15,6 +16,7 @@ use serde_json::json;
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
 
+use crate::agent_cmd::toml_string;
 use crate::error::AppResult;
 use crate::github;
 use crate::handoff::Handoff;
@@ -24,9 +26,9 @@ use crate::store::Store;
 
 pub use tethys_mcp::{CreateWorkspace, LinkPr, Request, Response};
 
-/// Everything needed to render a session's `--mcp-config`, resolved once at
-/// boot: the companion binary, the socket it should dial, and the registry repo
-/// keys that become the tool's `repos` enum.
+/// Everything needed to render a session's MCP config, resolved once at boot:
+/// the companion binary, the socket it should dial, and the registry repo keys
+/// that become the tool's `repos` enum.
 #[derive(Debug, Clone)]
 pub struct McpLaunch {
     server_bin: PathBuf,
@@ -86,6 +88,49 @@ impl McpLaunch {
             format!("--mcp-config={}", self.config_json(workspace_id, session_id)),
             format!("--allowed-tools={}", tethys_mcp::ALLOWED_TOOLS.join(",")),
         ]
+    }
+
+    /// The `codex` flags that put the same tools in a session's hands.
+    ///
+    /// Codex has no `--mcp-config`; it takes config overrides with `-c`, whose
+    /// values parse as TOML and whose dotted paths create nested tables. The
+    /// identity still rides in the server's `env` block, for the same reason
+    /// it does for Claude: an agent must not get to say who it is.
+    ///
+    /// `approval_mode = "approve"` is codex's `--allowed-tools`. It means
+    /// auto-approve, so a Tethys-initiated call can't stall on a dialog nobody
+    /// is watching. It is scoped to this server's own tools and says nothing
+    /// about what the session may do elsewhere.
+    pub fn codex_args(&self, workspace_id: &str, session_id: &str) -> Vec<String> {
+        let server = tethys_mcp::SERVER_NAME;
+        let mut args = vec![
+            "-c".into(),
+            format!(
+                "mcp_servers.{server}.command={}",
+                toml_string(&self.server_bin.to_string_lossy())
+            ),
+            "-c".into(),
+            format!(
+                "mcp_servers.{server}.env={{{}}}",
+                [
+                    (tethys_mcp::ENV_SOCKET, self.socket.to_string_lossy().into_owned()),
+                    (tethys_mcp::ENV_WORKSPACE_ID, workspace_id.to_string()),
+                    (tethys_mcp::ENV_SESSION_ID, session_id.to_string()),
+                    (tethys_mcp::ENV_REPO_KEYS, self.repo_keys.join(",")),
+                ]
+                .iter()
+                .map(|(k, v)| format!("{k}={}", toml_string(v)))
+                .collect::<Vec<_>>()
+                .join(",")
+            ),
+        ];
+        for tool in tethys_mcp::TOOL_NAMES {
+            args.push("-c".into());
+            args.push(format!(
+                "mcp_servers.{server}.tools.{tool}.approval_mode=\"approve\""
+            ));
+        }
+        args
     }
 
     fn config_json(&self, workspace_id: &str, session_id: &str) -> String {

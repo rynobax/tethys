@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::artifacts::{self, ArtifactStore};
 use crate::error::{AppError, AppResult};
 use crate::agent::Agent;
+use crate::paths::Paths;
 use crate::agent_bin::AgentBins;
 use crate::agent_cmd;
 use crate::hook_listener::HookMessage;
@@ -33,6 +34,8 @@ pub struct SpawnAgent<'a> {
     /// The already-resolved binary — the workspace's override, or the agent's
     /// default from `AgentBins`.
     pub agent_bin: &'a Path,
+    /// Directories outside the cwd the session must be able to write.
+    pub extra_writable: &'a [PathBuf],
     /// The agent's own id for a conversation to pick up where it left off.
     pub resume_session_id: Option<&'a str>,
     pub mcp: Option<&'a McpLaunch>,
@@ -227,6 +230,13 @@ impl SessionSupervisor {
                 let tracked: Vec<TrackedSession> = s
                     .workspaces
                     .iter()
+                    // Probes are Claude's own status files, so only Claude
+                    // sessions may be reconciled against them. A codex session
+                    // left out here can't be matched by cwd and have a Claude
+                    // session id healed onto it — which a workspace switched
+                    // from Claude to codex would otherwise invite, since the
+                    // cwd is the same and the dead Claude probe outlives it.
+                    .filter(|ws| ws.agent == Agent::Claude)
                     .flat_map(|ws| {
                         ws.session.iter().map(move |se| TrackedSession {
                             workspace_id: ws.id.as_str(),
@@ -375,11 +385,17 @@ impl SessionSupervisor {
         let token = Uuid::new_v4().to_string();
         let id = new_session_id();
 
+        let hook_bin = crate::paths::tethys_hook_bin()
+            .ok()
+            .filter(|p| p.exists());
         let command = agent_cmd::build(agent_cmd::Spawn {
             agent: req.agent,
             agent_bin: req.agent_bin,
             workspace_id: &req.workspace_id,
             session_id: &id,
+            spawn_token: &token,
+            hook_bin: hook_bin.as_deref(),
+            extra_writable: req.extra_writable,
             resume_session_id: req.resume_session_id,
             mcp: req.mcp,
             brief: req.brief,
@@ -464,7 +480,9 @@ impl SessionSupervisor {
                 self.record_page_if_written(&msg).await;
                 self.handle_resume_working(msg).await
             }
-            "stop" | "stop-failure" => self.handle_stop(msg).await,
+            // `interrupt` is codex-only: the user pressed escape, which ends
+            // the turn as surely as a Stop does.
+            "stop" | "stop-failure" | "interrupt" => self.handle_stop(msg).await,
             "notify" => self.handle_notify(msg).await,
             "permission-request" => self.handle_permission_request(msg).await,
             "elicitation" => self.handle_elicitation(msg).await,
@@ -472,9 +490,9 @@ impl SessionSupervisor {
         }
     }
 
-    /// UserPromptSubmit / PreToolUse / PostToolUse → Claude is (re)starting
+    /// UserPromptSubmit / PreToolUse / PostToolUse → the agent is (re)starting
     /// work. PostToolUse is what clears WaitingInput after a permission
-    /// prompt is accepted: Claude Code emits no hook at the moment of
+    /// prompt is accepted: neither CLI emits a hook at the moment of
     /// acceptance, so we wait for the gated tool to finish and treat that
     /// as the "prompt was answered" signal. Yellow lingers for the tool's
     /// runtime — there's no way to do better without an optimistic clear
@@ -1035,6 +1053,9 @@ pub struct OpenSession<'a> {
     /// workspace's agent.
     pub agent_bins: &'a AgentBins,
     pub tmux_bin: &'a Path,
+    /// Where Tethys keeps its data, for the per-repo git dirs a sandboxed
+    /// session has to be granted.
+    pub paths: &'a Paths,
     /// Handoff tool config. Attached to every session Tethys spawns — whether
     /// an agent can hand off shouldn't depend on which workspace it landed in.
     pub mcp: Option<&'a McpLaunch>,
@@ -1063,7 +1084,7 @@ pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
         ));
     }
 
-    let (existing, cwd, agent, ws_binary) = req
+    let (existing, cwd, agent, ws_binary, repo_keys) = req
         .store
         .read(|s| {
             let w = s.find_workspace(req.workspace_id)?;
@@ -1072,6 +1093,10 @@ pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
                 w.session_cwd(),
                 w.agent,
                 w.agent_binary.clone(),
+                w.repo_links
+                    .iter()
+                    .map(|l| l.repo_key.clone())
+                    .collect::<Vec<_>>(),
             ))
         })
         .await
@@ -1114,12 +1139,21 @@ pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
         None => req.agent_bins.get(agent).to_path_buf(),
     };
 
+    // A worktree's real git dir lives under Tethys's data dir, outside the
+    // workspace root — so a sandboxed session can read the checkout but
+    // couldn't run a single git command without being granted these.
+    let extra_writable: Vec<PathBuf> = repo_keys
+        .iter()
+        .map(|key| req.paths.repo_git_dir(key))
+        .collect();
+
     let (info, _token) = req.supervisor.spawn_agent(SpawnAgent {
         agent,
         workspace_id: req.workspace_id.to_string(),
         cwd: &cwd,
         tmux_bin: req.tmux_bin,
         agent_bin: &resolved_bin,
+        extra_writable: &extra_writable,
         resume_session_id: resume_sid,
         mcp: req.mcp,
         brief: req.brief,

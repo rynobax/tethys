@@ -1073,6 +1073,7 @@ pub async fn start_agent_session(
     store: State<'_, Arc<Store>>,
     agent_bins: State<'_, AgentBins>,
     tmux_bin: State<'_, TmuxBin>,
+    paths: State<'_, Paths>,
     mcp: State<'_, Option<McpLaunch>>,
     workspace_id: WorkspaceId,
 ) -> AppResult<SessionInfo> {
@@ -1082,6 +1083,7 @@ pub async fn start_agent_session(
         workspace_id: &workspace_id,
         agent_bins: &agent_bins,
         tmux_bin: &tmux_bin.0,
+        paths: &paths,
         mcp: mcp.inner().as_ref(),
         brief: None,
     })
@@ -1114,6 +1116,7 @@ pub async fn switch_agent(
     store: State<'_, Arc<Store>>,
     agent_bins: State<'_, AgentBins>,
     tmux_bin: State<'_, TmuxBin>,
+    paths: State<'_, Paths>,
     mcp: State<'_, Option<McpLaunch>>,
     args: SwitchAgentArgs,
 ) -> AppResult<SessionInfo> {
@@ -1153,6 +1156,7 @@ pub async fn switch_agent(
         workspace_id: &args.workspace_id,
         agent_bins: &agent_bins,
         tmux_bin: &tmux_bin.0,
+        paths: &paths,
         mcp: mcp.inner().as_ref(),
         brief: None,
     })
