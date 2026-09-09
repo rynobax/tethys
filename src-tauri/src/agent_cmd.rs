@@ -63,25 +63,6 @@ pub struct Spawn<'a> {
     pub brief: Option<&'a str>,
 }
 
-/// Environment an agent's session needs, on top of what it inherits.
-///
-/// Set on the tmux session, so it reaches the agent and everything it spawns —
-/// including its hooks.
-pub fn env(agent: Agent) -> Vec<(&'static str, String)> {
-    match agent {
-        Agent::Claude => Vec::new(),
-        // Codex negotiates the kitty keyboard protocol with the terminal at
-        // startup. Inside tmux that negotiation outlives the client: on every
-        // re-attach — which is what switching workspaces does — the queries
-        // are replayed to xterm.js, and its replies arrive at a codex that is
-        // no longer waiting for them. They land in the composer as literal
-        // text (`0;276;0c`, the tail of a secondary-device-attributes reply).
-        // This is codex's own escape hatch, and it costs only the enhanced key
-        // encodings tmux is set up to pass through anyway.
-        Agent::Codex => vec![("CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT", "1".into())],
-    }
-}
-
 pub fn build(spawn: Spawn<'_>) -> AppResult<Vec<String>> {
     match spawn.agent {
         Agent::Claude => Ok(claude(spawn)),
@@ -354,17 +335,6 @@ mod tests {
         assert!(cmd
             .iter()
             .any(|a| a == r#"project_doc_fallback_filenames=["CLAUDE.md"]"#));
-    }
-
-    /// Claude negotiates nothing Tethys has to suppress, so an empty env is
-    /// the honest answer rather than a placeholder.
-    #[test]
-    fn only_codex_needs_extra_env() {
-        assert!(env(Agent::Claude).is_empty());
-        assert_eq!(
-            env(Agent::Codex),
-            vec![("CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT", "1".to_string())]
-        );
     }
 
     /// A handler's `command` is a shell string, and codex refuses an argv

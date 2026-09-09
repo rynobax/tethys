@@ -401,9 +401,11 @@ impl SessionSupervisor {
             brief: req.brief,
         })?;
 
-        let mut session_env = vec![("TETHYS_SPAWN_TOKEN", token.clone())];
-        session_env.extend(agent_cmd::env(req.agent));
-        let args = tmux::new_session_args(&id, &session_env, &command);
+        let args = tmux::new_session_args(
+            &id,
+            &[("TETHYS_SPAWN_TOKEN", token.clone())],
+            &command,
+        );
 
         let workspace_id = req.workspace_id;
         let tmux_bin = req.tmux_bin;

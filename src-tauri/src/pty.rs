@@ -135,8 +135,17 @@ impl PtyProcess {
     /// Register a new output subscriber and return the current scrollback.
     /// The frontend writes the scrollback into xterm first, then drains the
     /// channel for live bytes — zero gap.
+    /// Subscribe to live bytes, and return the scrollback to paint first.
+    ///
+    /// The scrollback has terminal queries stripped out of it
+    /// (`scrollback::strip_queries`). A fresh xterm.js answers every question
+    /// it reads, and the recorded output contains the ones the program asked
+    /// at startup — so replaying it verbatim sends stale replies up the PTY
+    /// into whatever the program is showing now. Live bytes are untouched: a
+    /// query asked now is one something is waiting on.
     pub fn attach(&self, channel: Channel<InvokeResponseBody>) -> Vec<u8> {
-        let scrollback: Vec<u8> = self.ring.lock().unwrap().iter().copied().collect();
+        let raw: Vec<u8> = self.ring.lock().unwrap().iter().copied().collect();
+        let scrollback = crate::scrollback::strip_queries(&raw);
         self.subscribers.lock().unwrap().push(channel);
         scrollback
     }

@@ -28,6 +28,7 @@ mod pty;
 mod purge;
 mod reconcile;
 mod registry;
+mod scrollback;
 mod sessions;
 mod setup;
 mod shell;
