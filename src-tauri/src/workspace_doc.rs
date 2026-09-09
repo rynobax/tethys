@@ -1,9 +1,10 @@
 //! Tethys-generated `<workspace_root>/CLAUDE.md`.
 //!
-//! Claude Code loads `CLAUDE.md` from the cwd *and every parent directory*, so
-//! a single file at the workspace root reaches the workspace's session whether
-//! it runs at the root or inside one repo's worktree — without putting an
-//! untracked file inside any worktree.
+//! The session runs at the workspace root, so this file sits in its cwd and is
+//! read directly — without putting an untracked file inside any worktree. A
+//! session that predates that rule still runs inside a worktree; Claude Code
+//! loads `CLAUDE.md` from the cwd *and every parent directory*, so the same one
+//! file reaches it too.
 //!
 //! Its job is to tell Claude what this directory is (N worktrees of N repos, all
 //! on one branch) and, crucially, what *isn't* here: when a repo the task needs

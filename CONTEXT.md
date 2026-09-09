@@ -17,7 +17,7 @@ _Avoid_: Project, sandbox
 A repo's membership in a workspace — the worktree path plus per-repo state like whether Tethys created the branch.
 
 **Session**:
-The one Claude Code CLI process a workspace runs, inside its sole repo's worktree or, with several repos, at the workspace root. A workspace has at most one; starting, resuming and reconnecting it are the same act.
+The one Claude Code CLI process a workspace runs, at the workspace root. A workspace has at most one; starting, resuming and reconnecting it are the same act.
 
 **Notes**:
 Freeform per-workspace text the user writes in the UI.

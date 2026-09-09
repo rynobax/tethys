@@ -345,14 +345,20 @@ impl Workspace {
         self.session.as_mut().filter(|m| m.id == session_id)
     }
 
-    /// Where this workspace's Claude session runs.
+    /// Where this workspace's session runs.
     ///
     /// Wherever the existing session already runs, so a restart keeps its
-    /// project directory. Otherwise the sole repo's worktree when there is
-    /// exactly one repo — Claude then sees that repo's own `CLAUDE.md` and
-    /// settings as its project — else the workspace root, the one directory
-    /// that contains every worktree. Adding a second repo later does not move
-    /// a session out of the worktree it started in.
+    /// project directory. Otherwise the workspace root, whatever the repo
+    /// count — the one directory that contains every worktree, and the one
+    /// the generated workspace doc sits in.
+    ///
+    /// A one-repo workspace used to start in that repo's worktree instead, so
+    /// the repo's own `CLAUDE.md` and settings were the session's project.
+    /// That made adding a second repo an awkward half-move: the session stayed
+    /// below the root while its new sibling was above it, reachable only by a
+    /// path out of the tree the agent was told about. The root is the honest
+    /// answer to "where does this workspace's work happen", and a repo's own
+    /// doc is still picked up on the way into its subtree.
     ///
     /// `None` when there is nothing on disk to run in: a draft, or a
     /// workspace whose provisioning failed.
@@ -360,10 +366,7 @@ impl Workspace {
         if let Some(session) = &self.session {
             return Some(session.cwd.clone());
         }
-        match self.repo_links.as_slice() {
-            [only] => Some(only.worktree_path.clone()),
-            _ => self.root_buf(),
-        }
+        self.root_buf()
     }
 }
 
@@ -605,21 +608,20 @@ mod tests {
         assert!(ws.session_mut("sess-2").is_none());
     }
 
-    /// One repo: Claude runs in that worktree, so the repo's own CLAUDE.md
-    /// and settings are its project. More than one: the root, the only
-    /// directory that holds them all.
+    /// The root whatever the repo count, so adding a repo later doesn't leave
+    /// the session sitting below its own workspace.
     #[test]
-    fn a_fresh_session_runs_in_the_sole_worktree_else_the_root() {
+    fn a_fresh_session_runs_in_the_workspace_root() {
         let one = workspace_with_links(&["/wt/ws-1/frontend"]);
-        assert_eq!(one.session_cwd(), Some(PathBuf::from("/wt/ws-1/frontend")));
+        assert_eq!(one.session_cwd(), Some(PathBuf::from("/wt/ws-1")));
         let two = workspace_with_links(&["/wt/ws-1/frontend", "/wt/ws-1/backend"]);
         assert_eq!(two.session_cwd(), Some(PathBuf::from("/wt/ws-1")));
         assert_eq!(workspace_with_links(&[]).session_cwd(), None);
     }
 
-    /// Adding a repo to a workspace whose session started inside the sole
-    /// worktree doesn't move it: a restart must resume in the directory the
-    /// conversation belongs to.
+    /// A session started under the old rule — inside the sole worktree — must
+    /// stay there: a restart resumes the conversation in the directory it
+    /// belongs to, and its transcript is filed under that path.
     #[test]
     fn an_existing_session_keeps_its_cwd() {
         let mut ws = workspace_with_links(&["/wt/ws-1/frontend", "/wt/ws-1/backend"]);

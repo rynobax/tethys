@@ -99,8 +99,8 @@ export interface RepoLink {
  *  tmux pane again or `claude --resume` the conversation. */
 export interface ClaudeSessionMeta {
   id: SessionId;
-  /** Where Claude runs. Fixed when the session first starts: the sole repo's
-   *  worktree for a one-repo workspace, else the workspace root. */
+  /** Where the agent runs. Fixed when the session first starts: the workspace
+   *  root. Sessions started before that rule may sit inside a worktree. */
   cwd: string;
   claude_session_id: string | null;
   transcript_path: string | null;
