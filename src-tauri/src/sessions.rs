@@ -401,11 +401,9 @@ impl SessionSupervisor {
             brief: req.brief,
         })?;
 
-        let args = tmux::new_session_args(
-            &id,
-            &[("TETHYS_SPAWN_TOKEN", token.clone())],
-            &command,
-        );
+        let mut session_env = vec![("TETHYS_SPAWN_TOKEN", token.clone())];
+        session_env.extend(agent_cmd::env(req.agent));
+        let args = tmux::new_session_args(&id, &session_env, &command);
 
         let workspace_id = req.workspace_id;
         let tmux_bin = req.tmux_bin;
@@ -1138,6 +1136,14 @@ pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
         Some(bin) => crate::agent_bin::resolve_named(bin)?,
         None => req.agent_bins.get(agent).to_path_buf(),
     };
+
+    // Codex asks "do you trust this directory?" on the first run in any new
+    // one, and every workspace is a new one. It's the single thing about a
+    // codex session that can't be said on the command line, so it goes in the
+    // user's config — see `codex_trust`.
+    if agent == Agent::Codex {
+        crate::codex_trust::trust_or_warn(req.paths, &cwd);
+    }
 
     // A worktree's real git dir lives under Tethys's data dir, outside the
     // workspace root — so a sandboxed session can read the checkout but

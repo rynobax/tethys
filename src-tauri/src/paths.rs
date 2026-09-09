@@ -82,6 +82,10 @@ impl Paths {
         self.data_dir.join("claude-settings.lock")
     }
 
+    pub fn codex_config_lock(&self) -> PathBuf {
+        self.data_dir.join("codex-config.lock")
+    }
+
     pub fn theme_file(&self) -> PathBuf {
         self.data_dir.join("theme.json")
     }
@@ -98,6 +102,16 @@ impl Paths {
 pub fn claude_settings_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".claude").join("settings.json"))
+}
+
+/// `~/.codex/config.toml` — user-level codex settings. `$CODEX_HOME` wins,
+/// which is what codex itself honours.
+pub fn codex_config_path() -> Option<PathBuf> {
+    let dir = match std::env::var_os("CODEX_HOME") {
+        Some(home) => PathBuf::from(home),
+        None => PathBuf::from(std::env::var_os("HOME")?).join(".codex"),
+    };
+    Some(dir.join("config.toml"))
 }
 
 /// Resolve a companion binary sitting next to the current executable. In dev,

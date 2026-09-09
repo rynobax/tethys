@@ -5,6 +5,7 @@ mod agent_bin;
 mod agent_cmd;
 mod claude_local;
 mod claude_settings;
+mod codex_trust;
 mod commands;
 mod error;
 mod git;

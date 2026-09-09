@@ -7,6 +7,7 @@ use tokio::sync::Notify;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::agent::Agent;
 use crate::error::{AppError, AppResult};
 use crate::git;
 use crate::job::JobTx;
@@ -92,6 +93,16 @@ pub async fn purge_workspace(
                     warn!(path = %parent.display(), error = %e, "failed to remove workspace dir during purge");
                 }
             }
+        }
+    }
+
+    // A codex workspace was marked trusted in the user's codex config so the
+    // session wouldn't stop to ask. The directory is gone now, so the stanza
+    // is only ever going to be noise — this is what keeps that file from
+    // accumulating one per workspace ever created.
+    if workspace.agent == Agent::Codex {
+        if let Some(root) = workspace.session_cwd().or_else(|| workspace.root_buf()) {
+            crate::codex_trust::untrust_or_warn(paths, &root);
         }
     }
 
