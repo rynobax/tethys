@@ -127,6 +127,9 @@ pub fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
             position
           }
           reviewDecision
+          reviewRequests(first: 1) {
+            totalCount
+          }
           latestOpinionatedReviews(first: 20) {
             nodes {
               state
@@ -309,6 +312,16 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
         ReviewDecision::None
     };
 
+    // Pending requests only: GitHub removes a reviewer from `reviewRequests`
+    // as soon as they submit a review of any kind, so a count above zero means
+    // someone has been asked and hasn't answered.
+    let review_requested = state == PrState::Open
+        && pr
+            .get("reviewRequests")
+            .and_then(|r| r.get("totalCount"))
+            .and_then(|n| n.as_u64())
+            .is_some_and(|n| n > 0);
+
     // Walk threads once, splitting unresolved counts between human reviewers
     // and bugbot. The human count drives the review (eye) square; the bugbot
     // count drives the bugbot square — resolving a bugbot finding clears it.
@@ -406,6 +419,7 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
         bugbot,
         has_merge_conflicts,
         review_decision,
+        review_requested,
         unresolved_threads,
         head_branch: pr
             .get("headRefName")
@@ -656,6 +670,7 @@ fn is_meaningful_change(old: Option<&GithubPrStatus>, new: Option<&GithubPrStatu
                 || a.bugbot != b.bugbot
                 || a.has_merge_conflicts != b.has_merge_conflicts
                 || a.review_decision != b.review_decision
+                || a.review_requested != b.review_requested
                 || a.unresolved_threads != b.unresolved_threads
                 || a.head_branch != b.head_branch
                 || a.stack != b.stack
@@ -1035,6 +1050,7 @@ mod tests {
             bugbot: ChecksRollup::None,
             has_merge_conflicts: false,
             review_decision: ReviewDecision::None,
+            review_requested: false,
             unresolved_threads: 0,
             head_branch: Some("feat/foo".into()),
             stack: None,
@@ -1054,6 +1070,10 @@ mod tests {
         let mut approved = base.clone();
         approved.review_decision = ReviewDecision::Approved;
         assert!(is_meaningful_change(Some(&base), Some(&approved)));
+
+        let mut requested = base.clone();
+        requested.review_requested = true;
+        assert!(is_meaningful_change(Some(&base), Some(&requested)));
     }
 
     #[test]
@@ -1290,6 +1310,51 @@ mod tests {
         });
         let s = parse_one(&data).unwrap();
         assert_eq!(s.review_decision, ReviewDecision::Approved);
+    }
+
+    /// An open PR with `count` pending review requests and no reviews.
+    fn requested_pr(count: u64) -> Value {
+        json!({
+            "q0": {
+                "ref": {
+                    "associatedPullRequests": {
+                        "nodes": [{
+                            "number": 1,
+                            "url": "u",
+                            "state": "OPEN",
+                            "isDraft": false,
+                            "reviewDecision": "REVIEW_REQUIRED",
+                            "reviewRequests": {"totalCount": count},
+                            "latestOpinionatedReviews": {"nodes": []},
+                            "reviewThreads": {"nodes": []},
+                            "commits": {
+                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
+                            }
+                        }]
+                    }
+                }
+            }
+        })
+    }
+
+    /// `REVIEW_REQUIRED` is the same whether or not anyone has been asked, so
+    /// the pending request count is what tells "waiting on a reviewer" from
+    /// "nobody has been asked yet".
+    #[test]
+    fn parse_review_requested_from_pending_requests() {
+        let s = parse_one(&requested_pr(1)).unwrap();
+        assert!(s.review_requested);
+        assert_eq!(s.review_decision, ReviewDecision::ReviewRequired);
+
+        let s = parse_one(&requested_pr(0)).unwrap();
+        assert!(!s.review_requested);
+        assert_eq!(s.review_decision, ReviewDecision::ReviewRequired);
+    }
+
+    #[test]
+    fn parse_review_requested_missing_field_is_false() {
+        let s = parse_one(&reviewed_pr(Value::Null, json!([]))).unwrap();
+        assert!(!s.review_requested);
     }
 
     #[test]
@@ -1654,6 +1719,7 @@ mod tests {
             bugbot: ChecksRollup::None,
             has_merge_conflicts: false,
             review_decision: ReviewDecision::None,
+            review_requested: false,
             unresolved_threads: 0,
             head_branch: None,
             stack: None,

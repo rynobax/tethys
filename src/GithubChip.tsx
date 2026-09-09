@@ -199,6 +199,7 @@ function ciTone(checks: ChecksRollup, hasMergeConflicts: boolean): SquareTone {
 
 function reviewTone(
   decision: GithubPrStatus["review_decision"],
+  requested: boolean,
   unresolved: number,
 ): SquareTone {
   switch (decision) {
@@ -208,9 +209,11 @@ function reviewTone(
     case "changes_requested":
       return "red";
     case "review_required":
-      return "gray";
     case "none":
-      return unresolved > 0 ? "yellow" : "gray";
+      // No verdict yet. Yellow once the ball is in someone's court — a
+      // reviewer who's been asked, or threads left for you — and gray only
+      // when nobody has been asked at all, so gray means "go request one".
+      return unresolved > 0 || requested ? "yellow" : "gray";
   }
 }
 
@@ -246,6 +249,7 @@ function ciTitle(checks: ChecksRollup, hasMergeConflicts: boolean): string {
 
 function reviewTitle(
   decision: GithubPrStatus["review_decision"],
+  requested: boolean,
   unresolved: number,
 ): string {
   const base = (() => {
@@ -255,9 +259,10 @@ function reviewTitle(
       case "changes_requested":
         return "Review: changes requested";
       case "review_required":
-        return "Review: waiting on review";
       case "none":
-        return "Review: no reviewers";
+        return requested
+          ? "Review: requested, waiting on reviewer"
+          : "Review: not requested";
     }
   })();
   return unresolved > 0 ? `${base} · ${unresolved} unresolved` : base;
@@ -346,8 +351,16 @@ export function GithubChip({
           ) : (
             <Square
               kind="review"
-              tone={reviewTone(status.review_decision, status.unresolved_threads)}
-              title={reviewTitle(status.review_decision, status.unresolved_threads)}
+              tone={reviewTone(
+                status.review_decision,
+                status.review_requested,
+                status.unresolved_threads,
+              )}
+              title={reviewTitle(
+                status.review_decision,
+                status.review_requested,
+                status.unresolved_threads,
+              )}
             />
           )}
           <Square

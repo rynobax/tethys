@@ -43,6 +43,10 @@ export interface GithubPrStatus {
   /** GitHub reports the PR conflicts with its base branch. Surfaced through the CI indicator. */
   has_merge_conflicts: boolean;
   review_decision: ReviewDecision;
+  /** Someone has been asked to review and hasn't answered yet. With no
+   *  verdict, `false` means nobody has been asked — a distinction
+   *  `review_decision` can't make on its own. */
+  review_requested: boolean;
   unresolved_threads: number;
   /** The PR's head branch. Tells manually-attached PRs on the same repo apart.
    *  `null` for statuses persisted before this field existed. */

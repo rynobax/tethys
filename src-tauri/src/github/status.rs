@@ -70,6 +70,15 @@ pub struct GithubPrStatus {
     pub has_merge_conflicts: bool,
     #[serde(default)]
     pub review_decision: ReviewDecision,
+    /// Someone has been asked to review and hasn't yet. GitHub drops a request
+    /// the moment that reviewer submits anything, so this is "waiting on
+    /// them" rather than "reviewers exist" — and its absence, with no verdict,
+    /// is "nobody has been asked". `review_decision` alone can't tell those
+    /// apart: `REVIEW_REQUIRED` says only that the base branch wants an
+    /// approval it doesn't have. `false` for statuses persisted before this
+    /// field existed.
+    #[serde(default)]
+    pub review_requested: bool,
     pub unresolved_threads: u32,
     /// The PR's head branch. What tells two PRs on the same repo link apart,
     /// and what `attach` reads to report whether a linked PR is the one for the

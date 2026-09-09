@@ -156,6 +156,7 @@ mod tests {
             bugbot: ChecksRollup::None,
             has_merge_conflicts: false,
             review_decision: ReviewDecision::None,
+            review_requested: false,
             unresolved_threads: 0,
             head_branch: Some(head_branch.into()),
             stack: None,

@@ -928,6 +928,7 @@ mod tests {
             bugbot: crate::github::status::ChecksRollup::None,
             has_merge_conflicts: false,
             review_decision: crate::github::status::ReviewDecision::None,
+            review_requested: false,
             unresolved_threads: 0,
             head_branch: None,
             head_sha: String::new(),
