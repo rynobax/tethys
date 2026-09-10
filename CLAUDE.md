@@ -93,6 +93,8 @@ A job that has to wait says so twice: a status line on its job channel, and `Wor
 
 Waiting also made "deleted while creating" an ordinary thing to do rather than a race, so `provision_workspace` re-checks `deleted_at` the moment it gets the slot and abandons the job before the first clone. The row is left `Queued`, not `CreationFailed`: it never failed, it was called off.
 
+A job that can sit in the queue for minutes is a job nobody should have to watch, so **no provisioning log is a modal**. Adding a repo used to put one up, which froze the whole app — including every other workspace's session — behind a job that was often just waiting its turn. The invoke now lives in `App` (`addRepoRuns`, keyed by workspace id) with the channel writing straight into that map, so nothing has to stay mounted for the log to keep accumulating; the workspace's detail pane only *displays* the run it's handed, floated over the top-right of its session pane. It's the same shape `CreationRunner` has always had for `create_workspace`. Only the repo *picker* is still a modal, and only for as long as the choice takes; the popup's dismiss stays disabled until the job settles, since dismissing wouldn't stop it.
+
 Deliberately absent: no persisted queue (quit with four waiting and they're gone, exactly like a workspace caught mid-provision), no priority, no way to reorder or cancel a queued job except by deleting the workspace, and no cap on how many can wait.
 
 ## Folders

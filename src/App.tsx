@@ -13,6 +13,7 @@ import type {
   Discrepancies,
   Folder,
   FolderId,
+  JobEvent,
   RegistryStatus,
   Repo,
   RepoLink,
@@ -29,7 +30,11 @@ import { SidePanel } from "./SidePanel";
 import { Sidebar } from "./Sidebar";
 import { SystemStatus } from "./SystemStatus";
 import { applyTheme, ThemeContext } from "./theme";
-import { useBackendJob, type JobDescriptor } from "./useBackendJob";
+import {
+  useBackendJob,
+  type JobDescriptor,
+  type JobState,
+} from "./useBackendJob";
 import { useHorizontalScroll } from "./useHorizontalScroll";
 import { useAppEvent } from "./ipc/events";
 import {
@@ -70,6 +75,19 @@ const PASTE_END = "\x1b[201~";
  *  redraw. */
 const DRAFT_PROMPT_SETTLE_MS = 500;
 
+/**
+ * One in-flight (or just-settled) add-repo job, as the detail pane needs to
+ * draw it. Lives in `App` so the work outlives the pane that started it.
+ */
+interface AddRepoRun {
+  /** Identifies this invocation, so a dismissed job's late events are
+   *  dropped instead of landing on whatever replaced it. */
+  key: string;
+  repoKey: string;
+  events: JobEvent[];
+  state: JobState;
+}
+
 function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -90,6 +108,23 @@ function App() {
   const [creationRuns, setCreationRuns] = useState<
     Map<WorkspaceId, CreateWorkspaceArgs>
   >(new Map());
+  /**
+   * In-flight `add_repo_to_workspace` invocations, keyed by workspace id.
+   *
+   * The job is driven from here rather than from inside the workspace's
+   * detail pane, because a pane unmounts the moment you select another
+   * workspace — which is why adding a repo used to be a modal you had to sit
+   * and watch. The channel writes straight into this map, so nothing has to
+   * stay mounted for the log to keep accumulating; the detail pane only
+   * *displays* the run it is handed, as a popup over its own header.
+   *
+   * `key` is minted per invocation and captured by the channel closure, so
+   * events from a job the user has already dismissed can't land on the run
+   * that replaced it.
+   */
+  const [addRepoRuns, setAddRepoRuns] = useState<Map<WorkspaceId, AddRepoRun>>(
+    new Map(),
+  );
   /**
    * Per-workspace attention state, tracked by listening to
    * `session:turn_changed` globally so the sidebar dot doesn't need a
@@ -408,6 +443,86 @@ function App() {
     [],
   );
 
+  /**
+   * Kick off `add_repo_to_workspace` for a workspace and stream its events
+   * into `addRepoRuns`. Nothing about this is tied to the detail pane, so
+   * the user is free to work in another workspace while it provisions —
+   * and to come back to a finished (or failed) log when they return.
+   */
+  const startAddRepo = useCallback(
+    (workspaceId: WorkspaceId, repoKey: string) => {
+      const runKey = crypto.randomUUID();
+      const patch = (update: (run: AddRepoRun) => AddRepoRun) =>
+        setAddRepoRuns((prev) => {
+          const cur = prev.get(workspaceId);
+          // A run the user dismissed, or one replaced by a later attempt.
+          if (!cur || cur.key !== runKey) return prev;
+          const next = new Map(prev);
+          next.set(workspaceId, update(cur));
+          return next;
+        });
+
+      setAddRepoRuns((prev) => {
+        const next = new Map(prev);
+        next.set(workspaceId, {
+          key: runKey,
+          repoKey,
+          events: [],
+          state: "running",
+        });
+        return next;
+      });
+
+      const channel = new api.Channel<JobEvent>();
+      channel.onmessage = (event) => {
+        patch((run) => ({
+          ...run,
+          events: [...run.events, event],
+          state:
+            event.kind === "success"
+              ? "success"
+              : event.kind === "failed"
+                ? "failed"
+                : run.state,
+        }));
+      };
+
+      const { command, args } = api.jobs.addRepoToWorkspace({
+        workspace_id: workspaceId,
+        repo_key: repoKey,
+      });
+      api
+        .runJob(command, args, channel)
+        .then(() => {
+          patch((run) => ({
+            ...run,
+            state: run.state === "running" ? "success" : run.state,
+          }));
+          void refresh();
+        })
+        .catch((e) => {
+          patch((run) => ({
+            ...run,
+            events:
+              run.events[run.events.length - 1]?.kind === "failed"
+                ? run.events
+                : [...run.events, { kind: "failed", error: String(e) }],
+            state: run.state === "running" ? "failed" : run.state,
+          }));
+        });
+    },
+    [refresh],
+  );
+
+  const dismissAddRepo = useCallback((workspaceId: WorkspaceId) => {
+    setAddRepoRuns((prev) => {
+      if (!prev.has(workspaceId)) return prev;
+      const next = new Map(prev);
+      next.delete(workspaceId);
+      return next;
+    });
+  }, []);
+
   const handleDelete = useCallback(async (workspace: Workspace) => {
     setSelectedId((cur) => (cur === workspace.id ? null : cur));
     // CreationFailed entries have no worktrees on disk, so skip the
@@ -647,7 +762,9 @@ function App() {
                 })
               }
               onRequestDelete={() => handleDelete(selected)}
-              onRepoAdded={refresh}
+              addRepoRun={addRepoRuns.get(selected.id) ?? null}
+              onStartAddRepo={(repoKey) => startAddRepo(selected.id, repoKey)}
+              onDismissAddRepo={() => dismissAddRepo(selected.id)}
             />
           )}
           {!selectedRun && !selected && registryOk && (
@@ -799,7 +916,9 @@ function WorkspaceDetail({
   notes,
   onNotesChange,
   onRequestDelete,
-  onRepoAdded,
+  addRepoRun,
+  onStartAddRepo,
+  onDismissAddRepo,
 }: {
   workspace: Workspace;
   /** The live half of the workspace's session; `null` while dormant. */
@@ -810,13 +929,20 @@ function WorkspaceDetail({
   notes: string;
   onNotesChange: (notes: string) => void;
   onRequestDelete: () => void;
-  onRepoAdded: () => void;
+  /** This workspace's add-repo job, if one is running or waiting to be
+   *  dismissed. Owned by `App`, so it survives leaving the workspace. */
+  addRepoRun: AddRepoRun | null;
+  onStartAddRepo: (repoKey: string) => void;
+  onDismissAddRepo: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
   const [addingRepo, setAddingRepo] = useState(false);
   const [attachingPr, setAttachingPr] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // One add-repo job per workspace at a time — the popup shows one log, and
+  // the setup queue would run them one after the other regardless.
+  const addRepoBusy = addRepoRun?.state === "running";
   // Sessions already auto-opened this app-run — guards against a retry loop
   // if the spawn fails, while a manual Resume click can still try again.
   const autoOpenedRef = useRef<Set<string>>(new Set());
@@ -907,11 +1033,13 @@ function WorkspaceDetail({
             <button
               type="button"
               onClick={() => setAddingRepo(true)}
-              disabled={availableRepos.length === 0}
+              disabled={availableRepos.length === 0 || addRepoBusy}
               title={
-                availableRepos.length === 0
-                  ? "Every repo in your registry is already in this workspace"
-                  : "Add another repo's worktree to this workspace"
+                addRepoBusy
+                  ? "Already adding a repo to this workspace"
+                  : availableRepos.length === 0
+                    ? "Every repo in your registry is already in this workspace"
+                    : "Add another repo's worktree to this workspace"
               }
             >
               Add repo
@@ -974,7 +1102,10 @@ function WorkspaceDetail({
             workspace={workspace}
             availableRepos={availableRepos}
             onClose={() => setAddingRepo(false)}
-            onSuccess={onRepoAdded}
+            onPick={(repoKey) => {
+              setAddingRepo(false);
+              onStartAddRepo(repoKey);
+            }}
           />
         )}
         {attachingPr && (
@@ -985,6 +1116,15 @@ function WorkspaceDetail({
         )}
 
         <div className="session-pane">
+          {/* Floated over the session rather than shown above it, so an
+              add-repo job can't resize the terminal on its way in and out. */}
+          {addRepoRun && (
+            <AddRepoPopup
+              branch={workspace.branch}
+              run={addRepoRun}
+              onDismiss={onDismissAddRepo}
+            />
+          )}
           {error && <div className="error-banner">{error}</div>}
           {session ? (
             <>
@@ -1362,103 +1502,107 @@ function AttachPrDialog({
   );
 }
 
+/**
+ * Picks the repo to add, and nothing else. The job it kicks off is owned by
+ * `App` and drawn by `AddRepoPopup`, so this dialog is only ever up for as
+ * long as the choice takes.
+ */
 function AddRepoDialog({
   workspace,
   availableRepos,
   onClose,
-  onSuccess,
+  onPick,
 }: {
   workspace: Workspace;
   availableRepos: Repo[];
   onClose: () => void;
-  onSuccess: () => void;
+  onPick: (repoKey: string) => void;
 }) {
   const [picked, setPicked] = useState<string | null>(null);
-  // Setting `tempId` flips the dialog from picker → job-log mode and triggers
-  // useBackendJob (which only fires when `descriptor` is non-null).
-  const [tempId, setTempId] = useState<string | null>(null);
-
-  const descriptor = useMemo<JobDescriptor | null>(() => {
-    if (!tempId || !picked) return null;
-    return {
-      key: tempId,
-      ...api.jobs.addRepoToWorkspace({
-        args: { workspace_id: workspace.id, repo_key: picked },
-      }),
-    };
-  }, [tempId, picked, workspace.id]);
-
-  const { events, state } = useBackendJob(descriptor, {
-    onSuccess: () => onSuccess(),
-  });
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!picked) return;
-    setTempId(crypto.randomUUID());
+    onPick(picked);
   };
 
-  const isRunning = tempId !== null && state === "running";
-
   return (
-    <div className="modal-backdrop" onClick={isRunning ? undefined : onClose}>
+    <div className="modal-backdrop" onClick={onClose}>
       <div
-        className={`modal${tempId ? " add-repo-modal-running" : ""}`}
+        className="modal"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
       >
-        {!tempId ? (
-          <form onSubmit={submit}>
-            <h3>
-              Add repo to <code>{workspace.branch}</code>
-            </h3>
-            {availableRepos.length === 0 ? (
-              <p className="muted">
-                Every repo in your registry is already in this workspace.
-              </p>
-            ) : (
-              <div className="repo-select">
-                <div className="repo-select-label">Repo</div>
-                <ul>
-                  {availableRepos.map((r) => (
-                    <li key={r.key}>
-                      <label className="repo-row">
-                        <input
-                          type="radio"
-                          name="add-repo-pick"
-                          checked={picked === r.key}
-                          onChange={() => setPicked(r.key)}
-                        />
-                        <span className="repo-display">{r.key}</span>
-                      </label>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            <div className="modal-actions">
-              <button type="button" onClick={onClose}>
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="primary"
-                disabled={!picked || availableRepos.length === 0}
-              >
-                Add
-              </button>
+        <form onSubmit={submit}>
+          <h3>
+            Add repo to <code>{workspace.branch}</code>
+          </h3>
+          {availableRepos.length === 0 ? (
+            <p className="muted">
+              Every repo in your registry is already in this workspace.
+            </p>
+          ) : (
+            <div className="repo-select">
+              <div className="repo-select-label">Repo</div>
+              <ul>
+                {availableRepos.map((r) => (
+                  <li key={r.key}>
+                    <label className="repo-row">
+                      <input
+                        type="radio"
+                        name="add-repo-pick"
+                        checked={picked === r.key}
+                        onChange={() => setPicked(r.key)}
+                      />
+                      <span className="repo-display">{r.key}</span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
             </div>
-          </form>
-        ) : (
-          <JobLogPane
-            title={`Adding ${picked} to ${workspace.branch}`}
-            events={events}
-            state={state}
-            onDismiss={onClose}
-          />
-        )}
+          )}
+          <div className="modal-actions">
+            <button type="button" onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="primary"
+              disabled={!picked || availableRepos.length === 0}
+            >
+              Add
+            </button>
+          </div>
+        </form>
       </div>
+    </div>
+  );
+}
+
+/**
+ * An add-repo job's log, floated over the top-right of the workspace it
+ * belongs to. Deliberately not a modal: provisioning can sit in the setup
+ * queue for minutes, and the session underneath it is still worth reading
+ * and typing into — as are every other workspace's.
+ */
+function AddRepoPopup({
+  branch,
+  run,
+  onDismiss,
+}: {
+  branch: string;
+  run: AddRepoRun;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="add-repo-popup" role="status" aria-live="polite">
+      <JobLogPane
+        title={`Adding ${run.repoKey} to ${branch}`}
+        events={run.events}
+        state={run.state}
+        onDismiss={onDismiss}
+      />
     </div>
   );
 }
