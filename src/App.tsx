@@ -488,8 +488,7 @@ function App() {
       };
 
       const { command, args } = api.jobs.addRepoToWorkspace({
-        workspace_id: workspaceId,
-        repo_key: repoKey,
+        args: { workspace_id: workspaceId, repo_key: repoKey },
       });
       api
         .runJob(command, args, channel)

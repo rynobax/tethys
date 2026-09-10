@@ -11,6 +11,7 @@ export { Channel, convertFileSrc };
 import type {
   Agent,
   Artifact,
+  CreateWorkspaceArgs,
   Discrepancies,
   Folder,
   FolderId,
@@ -264,13 +265,19 @@ export const readClipboardFilePaths = () =>
  * Commands that stream `JobEvent`s over a channel while they run. Driven by
  * `useBackendJob`, which needs the name and args as data rather than as a
  * call — hence the descriptor shape rather than a plain function.
+ *
+ * Both Rust commands take a single `args` struct, so the invoke payload is
+ * `{ args: {…}, onEvent }` — the nesting is typed here so a call site can't
+ * flatten it and find out from a runtime "missing required key args".
  */
 export const jobs = {
-  createWorkspace: (args: Record<string, unknown>) => ({
+  createWorkspace: (args: { args: CreateWorkspaceArgs }) => ({
     command: "create_workspace" as const,
     args,
   }),
-  addRepoToWorkspace: (args: Record<string, unknown>) => ({
+  addRepoToWorkspace: (args: {
+    args: { workspace_id: string; repo_key: string };
+  }) => ({
     command: "add_repo_to_workspace" as const,
     args,
   }),
