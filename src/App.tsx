@@ -148,9 +148,9 @@ function App() {
   >(new Map());
   /**
    * Draft "initial prompt" text the user types while a workspace is still
-   * provisioning, keyed by workspace_id. Once that workspace's first agent
-   * session reports a `agent_session_id` (its SessionStart hook fired, so the
-   * TUI is up), the draft is pasted into the session — bracketed paste, no
+   * provisioning, keyed by workspace_id. Once that workspace's live session
+   * reports `tui_ready` (the agent turned bracketed paste on, so its composer
+   * is on screen), the draft is pasted into the session — bracketed paste, no
    * submit — and the entry is dropped.
    */
   const [draftPrompts, setDraftPrompts] = useState<Map<WorkspaceId, string>>(
@@ -170,7 +170,7 @@ function App() {
   );
   /**
    * Workspaces whose draft prompt has already been pasted (or is mid-paste),
-   * so the flush effect doesn't double-send on repeated `workspace:changed`.
+   * so the flush effect doesn't double-send on repeated `session:changed`.
    */
   const flushedDraftsRef = useRef<Set<WorkspaceId>>(new Set());
   const [theme, setTheme] = useState<Theme | null>(null);
@@ -336,17 +336,17 @@ function App() {
   });
 
   // Paste any draft initial-prompt into a workspace's agent session once
-  // it's up. `workspace:changed` fires (and refreshes `workspaces`) when the
-  // SessionStart hook populates `agent_session_id`, which is our signal
-  // that the TUI is ready to receive a paste.
+  // it's up. The PTY reader emits `session:changed` (which refreshes
+  // `sessionByWorkspace`) the moment the agent turns bracketed paste on,
+  // and `tui_ready` is that fact. The SessionStart hook used to be the
+  // signal, but codex fires it at the first turn rather than at startup, so
+  // the draft arrived after the user's first message.
   useEffect(() => {
     for (const [workspaceId, prompt] of draftPrompts) {
       if (flushedDraftsRef.current.has(workspaceId)) continue;
       if (prompt.trim().length === 0) continue;
-      const ws = workspaces.find((w) => w.id === workspaceId);
-      if (!ws || ws.status.kind !== "ready") continue;
-      const session = ws.session;
-      if (!session || session.agent_session_id === null) continue;
+      const session = sessionByWorkspace.get(workspaceId);
+      if (!session || !session.running || !session.tui_ready) continue;
 
       flushedDraftsRef.current.add(workspaceId);
       const sessionId = session.id;
@@ -361,7 +361,7 @@ function App() {
           await api.sendInput(sessionId, bytes);
         } catch (e) {
           console.error("flush draft prompt failed:", e);
-          // Let a later `workspace:changed` retry the paste.
+          // Let a later `session:changed` retry the paste.
           flushedDraftsRef.current.delete(workspaceId);
           return;
         }
@@ -374,7 +374,7 @@ function App() {
       };
       void flush();
     }
-  }, [workspaces, draftPrompts]);
+  }, [sessionByWorkspace, draftPrompts]);
 
   const visibleWorkspaces = useMemo(
     () => workspaces.filter((w) => !w.deleted_at),

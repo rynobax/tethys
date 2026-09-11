@@ -86,6 +86,11 @@ pub struct SessionInfo {
     /// Whether Claude is actively working in this session. Derived alongside
     /// `needs_turn` for the same reason.
     pub working: bool,
+    /// Whether the agent's TUI is up and will take a paste — the program has
+    /// turned bracketed paste on (`PtyProcess::tui_ready`). This is what the
+    /// frontend waits for before pasting a draft prompt. Not the SessionStart
+    /// hook: codex fires that at its first turn, not at startup.
+    pub tui_ready: bool,
 }
 
 struct SessionHandle {
@@ -332,6 +337,7 @@ impl SessionSupervisor {
             turn_acknowledged: false,
             needs_turn: false,
             working: false,
+            tui_ready: false,
         };
 
         let pty = PtyProcess::spawn(
@@ -344,6 +350,7 @@ impl SessionSupervisor {
                 tmux_session_name: id.clone(),
                 tmux_bin,
             },
+            session_ready_hook(self.app.clone(), workspace_id.clone()),
             session_exit_hook(
                 self.app.clone(),
                 self.store.clone(),
@@ -761,6 +768,7 @@ impl SessionSupervisor {
         info.runtime_state = turn.state;
         info.notification_type = turn.notification_type;
         info.turn_acknowledged = turn.acknowledged;
+        info.tui_ready = h.pty.tui_ready();
         Some(info)
     }
 
@@ -847,6 +855,19 @@ async fn persist_turn(store: &Arc<Store>, changed: &TurnChanged) -> AppResult<()
             Ok(())
         })
         .await
+}
+
+/// Build the ready hook handed to [`PtyProcess::spawn`]: the frontend learns
+/// the TUI is up the same way it learns everything else about a session —
+/// a `session:changed` and a `get_session` round-trip, which now reports
+/// `tui_ready`.
+fn session_ready_hook(app: AppHandle, workspace_id: String) -> crate::pty::OnReady {
+    Box::new(move || {
+        let _ = app.emit(
+            "session:changed",
+            serde_json::json!({ "workspace_id": workspace_id }),
+        );
+    })
 }
 
 /// Build the exit hook handed to [`PtyProcess::spawn`]. It runs only on a

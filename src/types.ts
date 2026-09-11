@@ -252,6 +252,13 @@ export interface SessionInfo {
   needs_turn: boolean;
   /** Whether Claude is actively working. Derived alongside `needs_turn`. */
   working: boolean;
+  /**
+   * The agent's TUI is up and will take a paste: the program turned
+   * bracketed paste on. What the draft initial prompt waits for. Not the
+   * SessionStart hook, which codex fires at its first turn rather than at
+   * startup.
+   */
+  tui_ready: boolean;
 }
 
 export interface TurnChangedEvent {

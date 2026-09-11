@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
@@ -22,6 +23,13 @@ pub type Ring = Arc<Mutex<VecDeque<u8>>>;
 /// client stealing with `-D`) does **not** fire it. The ring is handed in so
 /// adapters can scrub trailing tmux chatter before surfacing the exit.
 pub type OnExit = Box<dyn FnOnce(Option<i32>, &Ring) + Send>;
+
+/// Called on the reader thread, once, the first time the program turns
+/// bracketed paste on — see [`ReadyWatch`].
+pub type OnReady = Box<dyn FnOnce() + Send>;
+
+/// What a program writes to turn bracketed paste on (DECSET 2004).
+const BRACKETED_PASTE_ON: &[u8] = b"\x1b[?2004h";
 
 /// Inputs to [`PtyProcess::spawn`].
 pub struct PtySpawn<'a> {
@@ -53,13 +61,16 @@ pub struct PtyProcess {
     subscribers: Arc<Mutex<Vec<Channel<InvokeResponseBody>>>>,
     /// Flipped to `false` when the child process exits.
     running: Arc<Mutex<bool>>,
+    /// Flipped to `true` once the program has turned bracketed paste on.
+    tui_ready: Arc<AtomicBool>,
 }
 
 impl PtyProcess {
     /// Open a PTY, exec `program args` in `cwd` with a child-repo-sanitised
     /// environment, and wire up the reader thread, subscriber fan-out, and
-    /// child watcher. `on_exit` runs only on a true child exit.
-    pub fn spawn(req: PtySpawn<'_>, on_exit: OnExit) -> AppResult<Self> {
+    /// child watcher. `on_ready` runs once the program's TUI is up (see
+    /// [`ReadyWatch`]); `on_exit` runs only on a true child exit.
+    pub fn spawn(req: PtySpawn<'_>, on_ready: OnReady, on_exit: OnExit) -> AppResult<Self> {
         let PtySpawn {
             program,
             args,
@@ -112,8 +123,16 @@ impl PtyProcess {
         let subscribers: Arc<Mutex<Vec<Channel<InvokeResponseBody>>>> =
             Arc::new(Mutex::new(Vec::new()));
         let running = Arc::new(Mutex::new(true));
+        let tui_ready = Arc::new(AtomicBool::new(false));
 
-        spawn_reader_thread(reader, ring.clone(), subscribers.clone(), ring_capacity);
+        spawn_reader_thread(ReaderThread {
+            reader,
+            ring: ring.clone(),
+            subscribers: subscribers.clone(),
+            ring_capacity,
+            tui_ready: tui_ready.clone(),
+            on_ready,
+        });
         spawn_child_watcher(
             child,
             tmux_session_name,
@@ -129,6 +148,7 @@ impl PtyProcess {
             ring,
             subscribers,
             running,
+            tui_ready,
         })
     }
 
@@ -184,6 +204,60 @@ impl PtyProcess {
     pub fn is_running(&self) -> bool {
         *self.running.lock().unwrap()
     }
+
+    /// Whether the program has drawn a TUI that will accept a paste. Never
+    /// goes back to `false`: a program that turns bracketed paste off again
+    /// mid-session is still one that is up.
+    pub fn tui_ready(&self) -> bool {
+        self.tui_ready.load(Ordering::Acquire)
+    }
+}
+
+/// Watches the live byte stream for the moment the program is ready for
+/// input typed at it — a TUI turning bracketed paste on.
+///
+/// This is the signal for pasting a draft prompt into a fresh session. It
+/// used to be the agent's `SessionStart` hook, which for Claude fires while
+/// the TUI is coming up but for codex fires at the *first turn* — so a draft
+/// pasted on that signal landed after the user's first message. Both
+/// agents' TUIs enable bracketed paste as part of drawing their first frame
+/// (codex in its very first bytes), and tmux forwards the mode change to the
+/// outer terminal for the active pane, so the outer PTY sees it either way.
+///
+/// The sequence can straddle two reads, so the tail of each chunk is carried
+/// into the next.
+struct ReadyWatch {
+    carry: Vec<u8>,
+    seen: bool,
+}
+
+impl ReadyWatch {
+    fn new() -> Self {
+        Self {
+            carry: Vec::new(),
+            seen: false,
+        }
+    }
+
+    /// Feed the next chunk of output. Returns `true` exactly once: on the
+    /// chunk in which the enable sequence completes.
+    fn observe(&mut self, chunk: &[u8]) -> bool {
+        if self.seen {
+            return false;
+        }
+        let mut window = std::mem::take(&mut self.carry);
+        window.extend_from_slice(chunk);
+        if window
+            .windows(BRACKETED_PASTE_ON.len())
+            .any(|w| w == BRACKETED_PASTE_ON)
+        {
+            self.seen = true;
+            return true;
+        }
+        let keep = window.len().min(BRACKETED_PASTE_ON.len() - 1);
+        self.carry = window[window.len() - keep..].to_vec();
+        false
+    }
 }
 
 /// Append `data` to the ring, evicting from the front to stay within
@@ -207,14 +281,28 @@ fn remove_subscriber(subs: &mut Vec<Channel<InvokeResponseBody>>, channel_id: u3
     subs.retain(|sub| sub.id() != channel_id);
 }
 
-fn spawn_reader_thread(
-    mut reader: Box<dyn Read + Send>,
+struct ReaderThread {
+    reader: Box<dyn Read + Send>,
     ring: Ring,
     subscribers: Arc<Mutex<Vec<Channel<InvokeResponseBody>>>>,
     ring_capacity: usize,
-) {
+    tui_ready: Arc<AtomicBool>,
+    on_ready: OnReady,
+}
+
+fn spawn_reader_thread(thread: ReaderThread) {
+    let ReaderThread {
+        mut reader,
+        ring,
+        subscribers,
+        ring_capacity,
+        tui_ready,
+        on_ready,
+    } = thread;
     std::thread::spawn(move || {
         let mut buf = [0u8; READ_BUF];
+        let mut watch = ReadyWatch::new();
+        let mut on_ready = Some(on_ready);
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
@@ -224,6 +312,13 @@ fn spawn_reader_thread(
                 Ok(n) => {
                     let chunk = &buf[..n];
                     append_to_ring(&ring, chunk, ring_capacity);
+                    if watch.observe(chunk) {
+                        debug!("pty reader: program enabled bracketed paste — TUI is up");
+                        tui_ready.store(true, Ordering::Release);
+                        if let Some(f) = on_ready.take() {
+                            f();
+                        }
+                    }
                     // Fan out, dropping subscribers whose channel errored.
                     let mut subs = subscribers.lock().unwrap();
                     subs.retain(|sub| {
@@ -271,7 +366,7 @@ fn spawn_child_watcher(
 
 #[cfg(test)]
 mod tests {
-    use super::{append_to_ring, remove_subscriber, Ring};
+    use super::{append_to_ring, remove_subscriber, ReadyWatch, Ring};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
     use tauri::ipc::{Channel, InvokeResponseBody};
@@ -326,5 +421,30 @@ mod tests {
         append_to_ring(&ring, b"seed", 4);
         append_to_ring(&ring, b"0123456789", 4);
         assert_eq!(ring_bytes(&ring), b"6789");
+    }
+
+    #[test]
+    fn ready_fires_once_when_bracketed_paste_is_enabled() {
+        let mut w = ReadyWatch::new();
+        assert!(!w.observe(b"\x1b[?1049h\x1b[H"));
+        assert!(w.observe(b"\x1b[?2004h\x1b[?25l"));
+        // Turning it off and on again is not a second readiness.
+        assert!(!w.observe(b"\x1b[?2004l\x1b[?2004h"));
+    }
+
+    /// A PTY read can end anywhere, including in the middle of the sequence.
+    #[test]
+    fn ready_survives_a_sequence_split_across_reads() {
+        let mut w = ReadyWatch::new();
+        assert!(!w.observe(b"hello \x1b[?20"));
+        assert!(w.observe(b"04h more"));
+    }
+
+    /// Only the enable sequence counts: the query-shaped near-misses a TUI
+    /// emits around it must not trip the watch.
+    #[test]
+    fn ready_ignores_other_private_modes() {
+        let mut w = ReadyWatch::new();
+        assert!(!w.observe(b"\x1b[?2004l\x1b[?2026h\x1b[?1004h"));
     }
 }
