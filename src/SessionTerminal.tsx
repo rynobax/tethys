@@ -1,4 +1,4 @@
-import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { listen, TauriEvent } from "@tauri-apps/api/event";
 import type { Terminal } from "@xterm/xterm";
 
 import * as api from "./ipc/commands";
@@ -30,6 +30,48 @@ const EDIT_BINDS: EditBind[] = [
   { key: "Backspace", mod: "alt", bytes: [0x17] }, // Ctrl-W: backward-kill-word
   { key: "Delete", mod: "alt", bytes: [0x1b, 0x64] }, // Esc-d: kill-word forward
 ];
+
+/**
+ * Drag files from Finder onto the window → paste escaped paths into the
+ * active session, like iTerm2. Wrapped in bracketed-paste markers
+ * (`\x1b[200~…\x1b[201~`) so Claude Code recognizes it as a paste and runs
+ * its path-→-image attachment flow, producing `[Image #N]` for images.
+ *
+ * The event is window-wide and only one SessionTerminal is mounted at a time,
+ * so the subscription is made once for the app's lifetime and routed to
+ * whichever pane is current. It used to be per mount, and the unlisten on
+ * teardown raced Tauri's own registration: `listen()` resolves with the id
+ * before the eval'd script that records the listener has run in the page, so
+ * unlistening right after (StrictMode double-mount, a fast workspace switch)
+ * threw `listeners[eventId].handlerId` from inside Tauri — as an unhandled
+ * rejection, since its unlisten is async — and leaked the listener, so a
+ * later drop could paste into the previous workspace's session as well.
+ */
+type DropTarget = { sessionId: string; term: Terminal };
+let dropTarget: DropTarget | null = null;
+let dropSubscribed = false;
+
+function subscribeDrops() {
+  if (dropSubscribed) return;
+  dropSubscribed = true;
+  listen<{ paths: string[] }>(TauriEvent.DRAG_DROP, (event) => {
+    const target = dropTarget;
+    if (!target) return;
+    const { paths } = event.payload;
+    if (paths.length === 0) return;
+    const inner = paths.map(escapeDroppedPath).join(" ") + " ";
+    api
+      .sendInput(
+        target.sessionId,
+        Array.from(new TextEncoder().encode(`\x1b[200~${inner}\x1b[201~`)),
+      )
+      .catch((e) => console.error("send_input (drag-drop) failed:", e));
+    target.term.focus();
+  }).catch((e) => {
+    dropSubscribed = false;
+    console.error("drag-drop subscribe failed:", e);
+  });
+}
 
 interface Props {
   sessionId: string;
@@ -134,45 +176,12 @@ function wireClaudeExtras(
     return true;
   });
 
-  // Drag files from Finder onto the window → paste escaped paths into the
-  // active session, like iTerm2. Wrapped in bracketed-paste markers
-  // (`\x1b[200~…\x1b[201~`) so Claude Code recognizes it as a paste and runs
-  // its path-→-image attachment flow, producing `[Image #N]` for images. The
-  // event is window-wide; only one SessionTerminal mounts at a time, so no
-  // per-pane gating is needed.
-  let dragUnlisten: (() => void) | null = null;
-  let dragDisposed = false;
-  getCurrentWebview()
-    .onDragDropEvent((event) => {
-      if (event.payload.type !== "drop") return;
-      if (event.payload.paths.length === 0) return;
-      const inner = event.payload.paths.map(escapeDroppedPath).join(" ") + " ";
-      sendRaw(
-        Array.from(new TextEncoder().encode(`\x1b[200~${inner}\x1b[201~`)),
-        "drag-drop",
-      );
-      term.focus();
-    })
-    .then((fn) => {
-      if (dragDisposed) {
-        try {
-          fn();
-        } catch {
-          // Already torn down; nothing to release.
-        }
-      } else {
-        dragUnlisten = fn;
-      }
-    })
-    .catch((e) => console.error("onDragDropEvent subscribe failed:", e));
+  subscribeDrops();
+  const target: DropTarget = { sessionId, term };
+  dropTarget = target;
 
   return () => {
-    dragDisposed = true;
-    try {
-      dragUnlisten?.();
-    } catch {
-      // Best-effort: the webview may already be gone.
-    }
+    if (dropTarget === target) dropTarget = null;
     helperTextarea?.removeEventListener("paste", onPaste, true);
   };
 }
