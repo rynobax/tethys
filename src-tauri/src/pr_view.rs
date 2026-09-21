@@ -124,28 +124,52 @@ fn label_for(url: &Url) -> String {
     format!("{LABEL_PREFIX}{:016x}", hasher.finish())
 }
 
-/// Where the main webview's top-left sits inside the window's content view,
-/// in logical pixels. The frontend measures in its own viewport, but a child
-/// webview is placed in the content view, and the two origins aren't the same:
-/// Tauri's default title bar style gives the window a full-size content view
-/// that runs up under the (opaque) title bar, and the main webview sits below
-/// it. Placing a child at raw DOM coordinates put it a title bar too high —
-/// over the tab's toolbar, with an empty strip left at the bottom. Read from
-/// the live webview rather than hard-coded, so a title bar style change or a
-/// Tauri fix leaves this correct.
-fn main_origin(app: &AppHandle) -> AppResult<(f64, f64)> {
+/// Where the frontend's viewport origin sits inside the view the PR webviews
+/// are placed in, in logical pixels. The frontend measures in its own
+/// viewport, but a child webview is placed in the window's content view, and
+/// the two origins aren't the same: the main webview's top sits under the
+/// title bar, and WebKit insets the page below it, so DOM `y = 0` is a title
+/// bar lower than the webview's frame. Placing a child at raw DOM coordinates
+/// put it a title bar too high — over the tab's toolbar, with an empty strip
+/// left at the bottom.
+///
+/// The inset is WebKit's, so no frame reports it; the main webview's own
+/// position is (0, 0). What does show it is height: the frame is the full
+/// height, and `window.innerHeight` — passed up as `viewport_height` — is
+/// what's left below the inset. Add the webview's own offset in its parent
+/// for good measure, so a title bar style change that moves the frame instead
+/// leaves this correct.
+fn main_origin(app: &AppHandle, viewport_height: f64) -> AppResult<(f64, f64)> {
     let Some(main) = app.get_webview("main") else {
         return Ok((0.0, 0.0));
     };
-    let scale = main.window().scale_factor()?;
-    let position = main.bounds()?.position.to_logical::<f64>(scale);
-    Ok((position.x, position.y))
+    let window = main.window();
+    let scale = window.scale_factor()?;
+    let bounds = main.bounds()?;
+    let position = bounds.position.to_logical::<f64>(scale);
+    let size = bounds.size.to_logical::<f64>(scale);
+    let inner = window.inner_size()?.to_logical::<f64>(scale);
+    let outer = window.outer_size()?.to_logical::<f64>(scale);
+    let inset = (size.height - viewport_height).max(0.0);
+    tracing::debug!(
+        main_x = position.x,
+        main_y = position.y,
+        main_w = size.width,
+        main_h = size.height,
+        inner_h = inner.height,
+        outer_h = outer.height,
+        viewport_height,
+        inset,
+        "main webview geometry"
+    );
+    Ok((position.x, position.y + inset))
 }
 
 /// Position and show the webview for `url` over the given rectangle, hiding
-/// every other PR webview. Coordinates are logical pixels in the main window's
-/// content area — the same space `getBoundingClientRect` reports in, since the
-/// main webview fills that area from its origin.
+/// every other PR webview. Coordinates are logical pixels in the frontend's
+/// viewport — the space `getBoundingClientRect` reports in — and
+/// `viewport_height` is that viewport's `window.innerHeight`, which is what
+/// lets [`main_origin`] translate them into the content view.
 ///
 /// Creates the webview on first sight of the URL and reuses it after, so a
 /// resize, a re-show of the tab you were on, or a return to a tab you left all
@@ -157,11 +181,12 @@ pub fn show(
     y: f64,
     width: f64,
     height: f64,
+    viewport_height: f64,
 ) -> AppResult<()> {
     let target =
         Url::parse(&url).map_err(|e| AppError::Other(format!("bad PR url {url:?}: {e}")))?;
     let label = label_for(&target);
-    let (dx, dy) = main_origin(app)?;
+    let (dx, dy) = main_origin(app, viewport_height)?;
     tracing::debug!(dx, dy, x, y, width, height, "placing PR webview");
     let position = LogicalPosition::new(x + dx, y + dy);
     let size = LogicalSize::new(width, height);

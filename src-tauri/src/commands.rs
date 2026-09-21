@@ -278,8 +278,9 @@ pub fn show_pr_view(
     y: f64,
     width: f64,
     height: f64,
+    viewport_height: f64,
 ) -> AppResult<()> {
-    crate::pr_view::show(&app, url, x, y, width, height)
+    crate::pr_view::show(&app, url, x, y, width, height, viewport_height)
 }
 
 /// Hide the embedded PR webview when a non-PR tab takes the panel.

@@ -635,12 +635,16 @@ function PrView({
         return;
       }
       api
-        .showPrView(url, {
-          x: r.left + inset,
-          y: r.top,
-          width: r.width - inset,
-          height: r.height,
-        })
+        .showPrView(
+          url,
+          {
+            x: r.left + inset,
+            y: r.top,
+            width: r.width - inset,
+            height: r.height,
+          },
+          window.innerHeight,
+        )
         .catch((e) => console.error("show_pr_view failed:", e));
     };
     sync();

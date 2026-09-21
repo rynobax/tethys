@@ -86,10 +86,13 @@ export const openArtifact = (workspaceId: WorkspaceId, artifactId: string) =>
  * window), navigating it to `url`. The child webview floats above the DOM, so
  * the caller re-sends its rectangle on every layout change. See `pr_view.rs`.
  */
+/** `rect` is in viewport coordinates; `viewportHeight` is `window.innerHeight`,
+ *  which Rust needs to translate them into the window's content view. */
 export const showPrView = (
   url: string,
   rect: { x: number; y: number; width: number; height: number },
-) => invoke<void>("show_pr_view", { url, ...rect });
+  viewportHeight: number,
+) => invoke<void>("show_pr_view", { url, ...rect, viewportHeight });
 
 /** Hide the embedded PR webview (a non-PR tab is showing, or the panel closed). */
 export const hidePrView = () => invoke<void>("hide_pr_view");
