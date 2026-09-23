@@ -76,10 +76,12 @@ interface Props {
  * again. Collapsed state and width are both per workspace — one that's mostly
  * a PR page wants half the screen open, one that's just a terminal wants the
  * rail — and both live in `localStorage` as id-keyed maps. A workspace you've
- * never touched starts collapsed at an even split. The one thing that
- * overrides your choice is a fresh artifact for the workspace you're looking
- * at: that expands the panel and selects the new tab, because a `/show-me`
- * turn is one where you want the screen taken.
+ * never touched starts collapsed at an even split. Two things override your
+ * choice: a fresh artifact for the workspace you're looking at, because a
+ * `/show-me` turn is one where you want the screen taken; and the first tab
+ * other than Notes appearing at all, such as a PR being linked. Either
+ * expands the panel and selects the new tab. With no remembered pick, empty
+ * Notes give way to the other tabs.
  */
 export function SidePanel({ workspace, notes, onNotesChange }: Props) {
   // True for the length of a resize drag; the PR webview keeps a guard strip
@@ -89,13 +91,16 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
     loadMap(COLLAPSED_KEY, isBoolean),
   );
   const collapsed = collapsedMap[workspace.id] ?? true;
-  const persistCollapsed = (value: boolean) => {
-    setCollapsedMap((prev) => {
-      const next = { ...prev, [workspace.id]: value };
-      localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
-      return next;
-    });
-  };
+  const persistCollapsed = useCallback(
+    (value: boolean) => {
+      setCollapsedMap((prev) => {
+        const next = { ...prev, [workspace.id]: value };
+        localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
+        return next;
+      });
+    },
+    [workspace.id],
+  );
   const [widths, setWidths] = useState(() =>
     loadMap(WIDTHS_KEY, isPanelWidth),
   );
@@ -108,7 +113,17 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
       return next;
     });
   };
-  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  // Tagged with the workspace it was fetched for, so a list still in flight
+  // from the previous workspace reads as "not loaded" rather than as empty.
+  const [artifactState, setArtifactState] = useState<{
+    workspaceId: string;
+    list: Artifact[];
+  } | null>(null);
+  const artifactsLoaded = artifactState?.workspaceId === workspace.id;
+  const artifacts = useMemo(
+    () => (artifactsLoaded ? artifactState.list : []),
+    [artifactsLoaded, artifactState],
+  );
   // Remembered per workspace so switching back paints the tab you left.
   const [selectedByWorkspace, setSelectedByWorkspace] = useState<
     Map<string, TabId>
@@ -126,14 +141,14 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
   );
 
   const refresh = useCallback(() => {
+    const workspaceId = workspace.id;
     api
-      .listArtifacts(workspace.id)
-      .then(setArtifacts)
+      .listArtifacts(workspaceId)
+      .then((list) => setArtifactState({ workspaceId, list }))
       .catch((e) => console.error("list_artifacts failed:", e));
   }, [workspace.id]);
 
   useEffect(() => {
-    setArtifacts([]);
     refresh();
   }, [refresh]);
 
@@ -168,9 +183,13 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
     return tabs;
   }, [workspace.repo_links]);
 
-  // Effective tab: the remembered pick when it still exists, else the newest
-  // artifact (last in the list), else Notes. A PR tab is only ever reached by
-  // an explicit click, never auto-selected.
+  // The tab to show when nothing better is known: the newest artifact (last
+  // in the list), else the first PR, else Notes.
+  const newestTab: TabId =
+    artifacts[artifacts.length - 1]?.id ?? prTabs[0]?.id ?? "notes";
+
+  // Effective tab: the remembered pick when it still exists; else Notes if
+  // there's anything written in them; else whatever else the panel has.
   const remembered = selectedByWorkspace.get(workspace.id);
   const selected: TabId =
     remembered !== undefined &&
@@ -178,7 +197,28 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
       artifacts.some((a) => a.id === remembered) ||
       prTabs.some((t) => t.id === remembered))
       ? remembered
-      : (artifacts[artifacts.length - 1]?.id ?? "notes");
+      : notes.trim()
+        ? "notes"
+        : newestTab;
+
+  // A panel that had nothing but Notes and just gained a tab — a PR linked
+  // and fetched, an artifact — opens onto it, whatever you last left it at:
+  // the panel was empty when you collapsed it, so that choice wasn't about
+  // this. Counts are remembered per workspace for the life of the app, and
+  // only compared once the artifact list is loaded, so switching workspaces
+  // or booting never reads as a tab appearing. A workspace first seen with
+  // tabs already there keeps its collapsed state.
+  const tabCount = artifactsLoaded ? artifacts.length + prTabs.length : null;
+  const seenTabCounts = useRef(new Map<string, number>());
+  useEffect(() => {
+    if (tabCount === null) return;
+    const prev = seenTabCounts.current.get(workspace.id);
+    seenTabCounts.current.set(workspace.id, tabCount);
+    if (prev === 0 && tabCount > 0) {
+      select(newestTab);
+      persistCollapsed(false);
+    }
+  }, [workspace.id, tabCount, newestTab, select, persistCollapsed]);
   const selectedArtifact = artifacts.find((a) => a.id === selected) ?? null;
   const selectedPr = prTabs.find((t) => t.id === selected) ?? null;
 
@@ -207,7 +247,9 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
       const next = artifacts[i + 1] ?? artifacts[i - 1];
       select(next ? next.id : "notes");
     }
-    setArtifacts((prev) => prev.filter((a) => a.id !== id));
+    setArtifactState((prev) =>
+      prev && { ...prev, list: prev.list.filter((a) => a.id !== id) },
+    );
     api
       .dismissArtifact(workspace.id, id)
       .catch((e) => console.error("dismiss_artifact failed:", e));
