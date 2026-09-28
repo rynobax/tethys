@@ -11,6 +11,7 @@ use tauri::ipc::InvokeResponseBody;
 
 use crate::agent::Agent;
 use crate::artifacts::{Artifact, ArtifactKind, ArtifactStore};
+use crate::branch_name;
 use crate::agent_bin::{self, AgentBins};
 use crate::claude_local;
 use crate::error::{AppError, AppResult};
@@ -328,8 +329,8 @@ pub async fn create_workspace(
     if id.is_empty() {
         return Err(AppError::Other("workspace_id is required".into()));
     }
-    let branch = args.branch.trim().to_string();
-    if branch.is_empty() {
+    let requested = args.branch.trim();
+    if requested.is_empty() {
         return Err(AppError::Other("branch is required".into()));
     }
     if args.repo_selections.is_empty() {
@@ -358,18 +359,12 @@ pub async fn create_workspace(
         })
         .collect::<AppResult<Vec<_>>>()?;
 
-    let workspace_dir = registry::sanitize_branch_for_dir(&branch);
-    // Block collisions before we start cloning/fetching. Two workspaces with
-    // the same branch on different repo sets would otherwise share a parent
-    // dir, and deleting one would clobber the other on the `rm -rf` step.
-    let workspace_root = reg.worktree_root.join(&workspace_dir);
-    if workspace_root.exists() {
-        return Err(AppError::Other(format!(
-            "a worktree directory already exists at {}. Pick a different \
-             branch name, or remove the existing directory first.",
-            workspace_root.display()
-        )));
-    }
+    // Rename rather than refuse on a collision: the draft goes into state
+    // under the name actually used, so the sidebar row shows it from the start.
+    let branch_name::Reserved {
+        branch,
+        workspace_dir,
+    } = branch_name::reserve(&reg.worktree_root, &in_progress, requested)?;
 
     let draft = Workspace::draft(
         id.clone(),
@@ -402,6 +397,9 @@ pub async fn create_workspace(
     store.notify_changed(&id);
 
     let tx = spawn_event_forwarder(on_event);
+    if branch != requested {
+        tx.status(format!("`{requested}` is taken; using `{branch}`"), None);
+    }
     provision_workspace(WorkspaceProvision {
         workspace_id: &id,
         branch: &branch,

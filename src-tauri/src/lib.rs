@@ -1,5 +1,6 @@
 mod agent;
 mod artifacts;
+mod branch_name;
 mod child_env;
 mod agent_bin;
 mod agent_cmd;

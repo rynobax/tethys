@@ -113,8 +113,9 @@ impl TethysServer {
                 "branch": {
                     "type": "string",
                     "description": "Branch to create in every listed repo. If the \
-                        name is already in use a numeric suffix is added, and the \
-                        branch actually used is reported back.",
+                        name is already in use today's date is appended (then a \
+                        number, if that's taken too), and the branch actually \
+                        used is reported back.",
                 },
                 "brief": {
                     "type": "string",

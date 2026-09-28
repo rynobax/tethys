@@ -11,8 +11,6 @@
 //! - It starts the workspace's session as soon as provisioning lands, with the
 //!   Brief as its first message. A handoff with nobody picking the work up is
 //!   just an expensive empty workspace.
-//! - The branch is auto-suffixed rather than refused when taken. "Pick another
-//!   name" is advice a non-interactive caller can't take.
 //! - It inherits the calling workspace's `agent_binary`, and the agent can't
 //!   ask for a different one. Handing work from a `claude-hipaa` workspace to a
 //!   plain `claude` one would move it across that boundary by accident.
@@ -23,6 +21,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::agent_bin::AgentBins;
+use crate::branch_name;
 use crate::error::{AppError, AppResult};
 use crate::inprogress::InProgressWorkspaces;
 use crate::job::JobTx;
@@ -30,13 +29,10 @@ use crate::mcp::{CreateWorkspace, McpLaunch};
 use crate::paths::Paths;
 use crate::provision::{provision_workspace, WorkspaceProvision};
 use crate::provision_queue::ProvisionQueue;
-use crate::registry::{self, RegistryLoad, Repo};
+use crate::registry::{RegistryLoad, Repo};
 use crate::sessions::{self, OpenSession, SessionSupervisor};
 use crate::state::{Origin, Workspace, WorkspaceId};
 use crate::store::Store;
-
-/// How many `-2`, `-3`… suffixes to try before giving up on a branch name.
-const MAX_BRANCH_SUFFIX: u32 = 50;
 
 /// What the calling agent is told: a workspace exists, under this branch.
 pub struct Accepted {
@@ -141,7 +137,10 @@ impl Handoff {
                 ))
             })?;
 
-        let (branch, workspace_dir) = self.reserve_branch(reg, &requested)?;
+        let branch_name::Reserved {
+            branch,
+            workspace_dir,
+        } = branch_name::reserve(&reg.worktree_root, &self.in_progress, &requested)?;
 
         let id = uuid::Uuid::new_v4().to_string();
         let draft = Workspace::draft(
@@ -275,37 +274,6 @@ impl Handoff {
                 "handoff workspace is ready but its session failed to start"
             ),
         }
-    }
-
-    /// Find a branch name whose workspace directory is free, suffixing `-2`,
-    /// `-3`… as needed. The directory is the thing that has to be unique: two
-    /// workspaces sharing one would mean deleting either clobbers the other.
-    ///
-    /// A directory being provisioned right now doesn't exist on disk yet, so
-    /// the in-progress set is checked too — otherwise two handoffs landing at
-    /// once would both pick the same name. That still leaves the instant
-    /// between accepting a handoff and its task registering, which is why the
-    /// on-disk collision check inside provisioning stays where it is.
-    fn reserve_branch(
-        &self,
-        reg: &crate::registry::RepoRegistry,
-        requested: &str,
-    ) -> AppResult<(String, String)> {
-        let provisioning = self.in_progress.snapshot();
-        for attempt in 1..=MAX_BRANCH_SUFFIX {
-            let branch = if attempt == 1 {
-                requested.to_string()
-            } else {
-                format!("{requested}-{attempt}")
-            };
-            let dir = registry::sanitize_branch_for_dir(&branch);
-            if !provisioning.contains(&dir) && !reg.worktree_root.join(&dir).exists() {
-                return Ok((branch, dir));
-            }
-        }
-        Err(AppError::Other(format!(
-            "no free workspace directory for `{requested}` after {MAX_BRANCH_SUFFIX} attempts"
-        )))
     }
 }
 
