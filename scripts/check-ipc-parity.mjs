@@ -1,15 +1,7 @@
 #!/usr/bin/env node
 /**
- * Assert the frontend's IPC tables match what Rust actually exposes.
- *
- * The two sides are hand-mirrored — there is no ts-rs or specta here, and for
- * a one-person tool that is the right call. What it costs is drift, and drift
- * in this direction is silent: `invoke` takes a string, so a renamed command
- * fails at runtime, in a `.catch` that may only `console.error`.
- *
- * This is far cheaper than code generation and catches the class of bug that
- * actually happened: `workspace:reordered` was emitted, listened to by nobody,
- * and documented in a comment as driving a refresh it did not drive.
+ * The frontend's IPC tables are hand-mirrored from Rust, and `invoke` takes a
+ * string, so drift only shows up at runtime. This catches it at build time.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -81,8 +73,7 @@ for (const name of emitted) {
   }
 }
 
-// Unused commands are reported separately: not an error (a command may be
-// deliberately backend-only), but worth seeing.
+// Not an error: a command may be deliberately backend-only.
 const unusedCommands = [...registered].filter((c) => !referenced.has(c)).sort();
 
 if (problems.length > 0) {

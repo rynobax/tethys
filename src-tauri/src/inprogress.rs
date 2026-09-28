@@ -1,10 +1,5 @@
-//! Tracks workspace IDs currently being created.
-//!
-//! `create_workspace` only persists to state.json on full success, so while
-//! it's running there are directories under `worktree_root` that have no
-//! matching workspace in state — which is exactly what the reconciler flags
-//! as "orphaned". We register the id here for the duration of the create so
-//! `reconcile::scan` can skip it.
+//! Workspaces mid-create have directories but no state entry yet, so
+//! `reconcile::scan` skips these ids instead of flagging them as orphans.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -19,8 +14,6 @@ impl InProgressWorkspaces {
         Self::default()
     }
 
-    /// Register `id` as in-progress and return a guard. Dropping the guard
-    /// (normal return, `?`, panic, or task cancellation) removes it.
     pub fn insert(&self, id: String) -> InProgressGuard {
         self.inner.lock().unwrap().insert(id.clone());
         InProgressGuard {

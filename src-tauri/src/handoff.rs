@@ -1,19 +1,7 @@
-//! Creating a workspace on an agent's behalf.
-//!
-//! A **handoff** is the same workspace the user would have made in the UI,
-//! asked for from inside a running session instead. The differences are all at
-//! the edges:
-//!
-//! - It returns the moment the draft is in state, long before the worktrees
-//!   exist. The calling agent is told the handoff was *accepted*, never how it
-//!   went — provisioning takes minutes, and an agent that waited that long for
-//!   an answer it can't act on is worse than one that moved on.
-//! - It starts the workspace's session as soon as provisioning lands, with the
-//!   Brief as its first message. A handoff with nobody picking the work up is
-//!   just an expensive empty workspace.
-//! - It inherits the calling workspace's `agent_binary`, and the agent can't
-//!   ask for a different one. Handing work from a `claude-hipaa` workspace to a
-//!   plain `claude` one would move it across that boundary by accident.
+//! A workspace created from inside a running session. The caller hears only
+//! that it was accepted, never how provisioning went. The new workspace
+//! inherits the caller's binary so work can't leave a `claude-hipaa` workspace
+//! by accident.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -34,29 +22,21 @@ use crate::sessions::{self, OpenSession, SessionSupervisor};
 use crate::state::{Origin, Workspace, WorkspaceId};
 use crate::store::Store;
 
-/// What the calling agent is told: a workspace exists, under this branch.
 pub struct Accepted {
     pub workspace_id: WorkspaceId,
     pub branch: String,
 }
 
-/// Everything a handoff needs to reach the same machinery the UI uses.
 pub struct Handoff {
     store: Arc<Store>,
     registry: Arc<RegistryLoad>,
     paths: Paths,
     in_progress: InProgressWorkspaces,
-    /// Shared with the UI path, so a handoff queues behind a workspace the
-    /// user asked for by hand — and vice versa.
     queue: ProvisionQueue,
     supervisor: Arc<SessionSupervisor>,
-    /// Empty when tmux didn't resolve at boot, in which case the workspace
-    /// still gets provisioned and only its session is skipped.
+    /// Empty when tmux didn't resolve at boot.
     tmux_bin: PathBuf,
     agent_bins: AgentBins,
-    /// The config handed to the new workspace's session, so it can hand off in
-    /// turn. Uniform on purpose: whether an agent can hand off shouldn't depend
-    /// on how its workspace came to exist.
     mcp: Option<McpLaunch>,
 }
 
@@ -86,12 +66,8 @@ impl Handoff {
         }
     }
 
-    /// Validate, reserve a branch, insert the draft, and return.
-    ///
-    /// Provisioning and the session spawn continue in a detached task, so
-    /// everything that can be refused has to be refused *here* — once this
-    /// returns `Ok`, the only remaining channel for a failure is the
-    /// `CreationFailed` row in Tethys.
+    /// Everything refusable is refused here: after `Ok`, the only failure
+    /// channel left is a `CreationFailed` row.
     pub async fn accept(self: &Arc<Self>, req: CreateWorkspace) -> AppResult<Accepted> {
         let reg = self.registry.require()?;
 
@@ -123,9 +99,6 @@ impl Handoff {
 
         let requested = validate_branch(&req.branch)?;
 
-        // The caller's workspace is the origin *and* the source of the binary
-        // the new one runs under. A caller that isn't in state is a stale
-        // session from a workspace that's since been forgotten.
         let caller = self
             .store
             .read(|s| s.find_workspace(&req.from_workspace).cloned())
@@ -152,16 +125,10 @@ impl Handoff {
                 from_workspace: caller.id.clone(),
                 from_session: req.from_session.clone(),
             },
-            // Lands beside the session that asked for it. Agents get no say in
-            // the folder for the same reason they get no say in the binary:
-            // work shouldn't drift out of where the user put it.
             caller.folder.clone(),
         );
-        // Setting the link in the same mutation as the insert is what makes a
-        // `Creating` draft a legal blocker: the caller points at the new
-        // workspace minutes before it finishes provisioning. Overwrites any
-        // blocker already there — fan-in is capped at one, and the most recent
-        // declaration is the one to honour.
+        // Same mutation as the insert, so the caller never points at a missing
+        // row. Overwrites any existing blocker.
         let blocks_caller = req.blocks_caller;
         let caller_id = caller.id.clone();
         self.store
@@ -202,9 +169,6 @@ impl Handoff {
         })
     }
 
-    /// The detached half: provision the worktrees, then start the one session
-    /// that picks the work up. Nothing here can be reported to the caller, so
-    /// everything lands in the log and in the workspace's own status.
     async fn provision_and_start(
         &self,
         workspace_id: String,
@@ -217,8 +181,6 @@ impl Handoff {
             return;
         };
 
-        // No UI channel to stream into — the log and the workspace's own status
-        // are the whole story for a handoff.
         let tx = JobTx::silent();
         let provisioned = provision_workspace(WorkspaceProvision {
             workspace_id: &workspace_id,
@@ -277,9 +239,8 @@ impl Handoff {
     }
 }
 
-/// Reject branch names that would confuse git or the filesystem before they
-/// reach an argv. The UI path doesn't need this — the user typing a branch is
-/// trusted, and finds out immediately. An agent is neither.
+/// Only handoffs validate: a branch the user types is trusted, an agent's
+/// isn't.
 fn validate_branch(branch: &str) -> AppResult<String> {
     let branch = branch.trim();
     if branch.is_empty() {
@@ -316,7 +277,6 @@ mod tests {
 
     #[test]
     fn a_leading_dash_is_refused() {
-        // Would arrive at `git worktree add <path> --force` as a flag.
         assert!(validate_branch("--force").is_err());
         assert!(validate_branch("-x").is_err());
     }

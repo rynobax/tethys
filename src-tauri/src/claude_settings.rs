@@ -1,17 +1,4 @@
-//! The `settings.local.json` document format, in one place.
-//!
-//! Claude Code's settings file is read at five sites and written at three
-//! across `claude_local` and `pending_permissions`. Each site used to
-//! re-implement the same three primitives — walk to `permissions.<field>`,
-//! get-or-create the array, dedupe-push — and they had already drifted:
-//! two logged a malformed file and one swallowed it, and the *same path* was
-//! written atomically by one module and with a bare `fs::write` by the other,
-//! despite being symlinked live into every worktree of a repo.
-//!
-//! The permission-entry grammar had drifted the same way: `rewrite_relative_path`
-//! and `attribute` are declared inverses of each other but lived in different
-//! modules, each with its own idea of what an entry looks like and no test
-//! holding them together.
+//! Claude Code's `settings.local.json` document format.
 
 use std::path::Path;
 
@@ -21,7 +8,6 @@ use tracing::warn;
 
 use crate::error::{AppError, AppResult};
 
-/// Which permission list an entry belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionCategory {
@@ -39,7 +25,7 @@ impl PermissionCategory {
         }
     }
 
-    /// Every category, in the order the workspace-root merge emits them.
+    /// In the order the workspace-root merge emits them.
     pub const ALL: [PermissionCategory; 3] = [
         PermissionCategory::Allow,
         PermissionCategory::Deny,
@@ -47,25 +33,16 @@ impl PermissionCategory {
     ];
 }
 
-/// One permission entry, e.g. `Read(./src/**)`, `Bash(rm:*)`, `Skill(foo)`,
-/// `mcp__server__tool`.
-///
-/// Parsed once here so scoping an entry to a repo and un-scoping it back are
-/// provably inverse operations rather than two hand-rolled string walks in
-/// different modules.
+/// e.g. `Read(./src/**)`, `Bash(rm:*)`, `mcp__server__tool`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionEntry {
-    /// Everything before the `(` — or the whole entry when it has no argument.
     tool: String,
-    /// The text between the parens, if the entry has an argument at all.
     arg: Option<String>,
-    /// Anything trailing the closing paren. Preserved rather than dropped.
     suffix: String,
 }
 
 impl PermissionEntry {
-    /// Always succeeds: an entry we don't recognise is one with no argument,
-    /// which is exactly how it should be treated.
+    /// An unrecognised entry is one with no argument.
     pub fn parse(entry: &str) -> Self {
         let no_arg = || Self {
             tool: entry.to_string(),
@@ -75,7 +52,6 @@ impl PermissionEntry {
         let (Some(open), Some(close)) = (entry.find('('), entry.rfind(')')) else {
             return no_arg();
         };
-        // `Read()` carries no argument to rewrite.
         if close <= open + 1 {
             return no_arg();
         }
@@ -86,11 +62,7 @@ impl PermissionEntry {
         }
     }
 
-    /// Rewrite a worktree-relative path to be relative to the workspace root
-    /// instead: `Read(./src/**)` → `Read(./api/src/**)`.
-    ///
-    /// Only `./`-prefixed arguments move. `Bash(...)`, `WebFetch(domain:...)`,
-    /// absolute paths, `~/...` and argument-less entries are left alone.
+    /// `Read(./src/**)` → `Read(./api/src/**)`. Only `./` arguments move.
     pub fn scoped_to_repo(&self, repo_key: &str) -> Self {
         let Some(rest) = self.arg.as_deref().and_then(|a| a.strip_prefix("./")) else {
             return self.clone();
@@ -101,9 +73,7 @@ impl PermissionEntry {
         }
     }
 
-    /// Inverse of [`PermissionEntry::scoped_to_repo`]: if the argument starts
-    /// with `./<repo_key>/` for one of `repo_keys`, return that key and the
-    /// entry with the prefix removed.
+    /// Inverse of [`PermissionEntry::scoped_to_repo`].
     pub fn unscope(&self, repo_keys: &[String]) -> Option<(String, Self)> {
         let rest = self.arg.as_deref()?.strip_prefix("./")?;
         for key in repo_keys {
@@ -130,10 +100,7 @@ impl std::fmt::Display for PermissionEntry {
     }
 }
 
-/// A `settings.local.json` document.
-///
-/// Wraps the raw object so unknown keys the user or Claude added survive every
-/// edit — Tethys only ever contributes specific fields.
+/// Keeps the raw object so keys Tethys doesn't own survive every edit.
 #[derive(Debug, Default, Clone)]
 pub struct SettingsDoc(Map<String, Value>);
 
@@ -142,15 +109,8 @@ impl SettingsDoc {
         Self::default()
     }
 
-    /// Read a settings file. A missing file, an unparseable one, or one whose
-    /// root isn't an object all yield an empty document — but unlike the three
-    /// hand-rolled readers this replaces, always with a warning naming the
-    /// path.
-    ///
-    /// That silence mattered: `expected_from_per_repo` used to swallow a
-    /// malformed per-repo file, which made its baseline incomplete and turned
-    /// *every* entry in the combined file into a bogus Pending Permission,
-    /// with no log line saying why.
+    /// Missing or malformed reads as empty. Malformed warns: a silently empty
+    /// baseline turns every combined entry into a bogus Pending Permission.
     pub async fn read(path: &Path) -> AppResult<Self> {
         let raw = match fs::read_to_string(path).await {
             Ok(s) => s,
@@ -173,14 +133,10 @@ impl SettingsDoc {
         }
     }
 
-    /// Like [`SettingsDoc::read`] but an unreadable file is an empty document
-    /// rather than an error. For the callers that iterate many repos and must
-    /// not abort the whole operation because one file is unreadable.
     pub async fn read_lossy(path: &Path) -> Self {
         Self::read(path).await.unwrap_or_default()
     }
 
-    /// The entries in one permission category, in file order.
     pub fn permissions(&self, category: PermissionCategory) -> Vec<PermissionEntry> {
         self.0
             .get("permissions")
@@ -196,8 +152,7 @@ impl SettingsDoc {
             .unwrap_or_default()
     }
 
-    /// Add an entry to a category if it isn't already there. Returns whether
-    /// the document changed.
+    /// Returns whether the document changed.
     pub fn add_permission(&mut self, category: PermissionCategory, entry: &PermissionEntry) -> bool {
         let text = entry.to_string();
         let arr = object_at(&mut self.0, "permissions")
@@ -210,7 +165,6 @@ impl SettingsDoc {
         true
     }
 
-    /// Set a top-level key. Used for Tethys's own `_seededBy` marker.
     pub fn set(&mut self, key: &str, value: Value) {
         self.0.insert(key.to_string(), value);
     }
@@ -224,10 +178,8 @@ impl SettingsDoc {
         self.0.is_empty()
     }
 
-    /// Ensure `sandbox.filesystem.allowWrite` contains `path`, creating the
-    /// nested objects as needed and leaving sibling sandbox config alone —
-    /// Claude Code deep-merges these across scopes, so we contribute only our
-    /// own entry.
+    /// Claude Code deep-merges sandbox config across scopes, so contribute only
+    /// this entry.
     pub fn allow_write(&mut self, path: &Path) {
         let text = path.to_string_lossy().into_owned();
         let Some(arr) = object_at(&mut self.0, "sandbox")
@@ -241,8 +193,6 @@ impl SettingsDoc {
         }
     }
 
-    /// Remove a grant a prior version seeded, leaving the surrounding
-    /// structure untouched.
     pub fn revoke_write(&mut self, path: &Path) {
         let text = path.to_string_lossy();
         let Some(arr) = self
@@ -257,12 +207,8 @@ impl SettingsDoc {
         arr.retain(|v| v.as_str() != Some(text.as_ref()));
     }
 
-    /// Write via temp file + rename.
-    ///
-    /// Always atomic. The per-repo shared file is symlinked live into every
-    /// worktree of that repo, so a torn write blanks permissions everywhere at
-    /// once — yet one of the two writers of this exact path used a bare
-    /// `fs::write`.
+    /// The per-repo file is symlinked into every worktree, so a torn write
+    /// blanks permissions everywhere at once.
     pub async fn write_atomic(&self, path: &Path) -> AppResult<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
@@ -278,7 +224,7 @@ impl SettingsDoc {
     }
 }
 
-/// Get-or-create a nested object at `key`, replacing a non-object value.
+/// Replaces a non-object value.
 fn object_at<'a>(map: &'a mut Map<String, Value>, key: &str) -> Option<&'a mut Map<String, Value>> {
     let entry = map
         .entry(key.to_string())
@@ -289,7 +235,7 @@ fn object_at<'a>(map: &'a mut Map<String, Value>, key: &str) -> Option<&'a mut M
     entry.as_object_mut()
 }
 
-/// Get-or-create an array at `key`, replacing a non-array value.
+/// Replaces a non-array value.
 fn array_at<'a>(map: &'a mut Map<String, Value>, key: &str) -> Option<&'a mut Vec<Value>> {
     let entry = map
         .entry(key.to_string())
@@ -309,7 +255,6 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    /// Every shape of entry Tethys sees in the wild.
     const CORPUS: &[&str] = &[
         "Read(./src/**)",
         "Bash(yarn test:*)",
@@ -324,8 +269,6 @@ mod tests {
         "NoParens",
     ];
 
-    /// Parsing must be lossless — anything else silently corrupts a user's
-    /// settings file the first time we touch it.
     #[test]
     fn parsing_round_trips_every_entry_shape() {
         for raw in CORPUS {
@@ -333,9 +276,6 @@ mod tests {
         }
     }
 
-    /// The property the two halves of this grammar never had while they lived
-    /// in different modules: scoping to a repo and un-scoping back is the
-    /// identity.
     #[test]
     fn scoping_to_a_repo_and_back_is_the_identity() {
         let repos = keys(&["frontend", "api"]);
@@ -379,14 +319,11 @@ mod tests {
         assert_eq!(key, "api");
         assert_eq!(stripped.to_string(), "Read(./src/foo.ts)");
 
-        // `other` isn't one of this workspace's repos.
         assert!(un("Read(./other/src/foo.ts)").is_none());
         assert!(un("Bash(rg:*)").is_none());
         assert!(un("mcp__linear__get_issue").is_none());
         assert!(un("Read(/abs/path)").is_none());
     }
-
-    // ── SettingsDoc ──────────────────────────────────────────────────────
 
     #[test]
     fn permissions_reads_each_category() {
@@ -451,8 +388,6 @@ mod tests {
         );
     }
 
-    /// Tethys contributes specific fields; anything else in the file belongs
-    /// to the user or to Claude and must survive every edit.
     #[tokio::test]
     async fn unknown_keys_survive_a_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
@@ -483,10 +418,6 @@ mod tests {
         assert!(doc.is_empty());
     }
 
-    /// A malformed file must not take the caller down with it — but unlike the
-    /// reader this replaces in `expected_from_per_repo`, it warns rather than
-    /// swallowing. That silence is what turned one broken per-repo file into a
-    /// pile of bogus Pending Permissions.
     #[tokio::test]
     async fn a_malformed_file_reads_as_empty() {
         let tmp = tempfile::tempdir().unwrap();
@@ -498,10 +429,8 @@ mod tests {
         assert!(SettingsDoc::read(&path).await.unwrap().is_empty());
     }
 
-    /// The per-repo file is symlinked live into every worktree of that repo,
-    /// so a torn write blanks permissions everywhere at once.
     #[tokio::test]
-    async fn writes_are_atomic_and_leave_no_temp_file() {
+    async fn write_creates_parent_dirs_and_leaves_no_temp_file() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("nested").join("settings.local.json");
         let mut doc = SettingsDoc::new();

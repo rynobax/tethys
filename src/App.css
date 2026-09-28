@@ -68,8 +68,6 @@ html,
   width: 100%;
 }
 
-/* Outlined rather than filled: it sits directly above the rows, so a solid
-   accent block would out-shout the rows it introduces. */
 .new-workspace {
   display: flex;
   align-items: center;
@@ -102,8 +100,6 @@ html,
   flex: 1;
 }
 
-/* Rows are separated, rounded blocks — the selection reads as a pill instead
-   of a full-bleed stripe across the sidebar. */
 .workspace-list > li {
   position: relative;
   padding: 7px 10px;
@@ -124,8 +120,6 @@ html,
   background: rgba(125, 125, 125, 0.2);
 }
 
-/* Accent bar for the selected row, sitting in the list's left gutter — outside
-   the row's own background, not overlapping it. */
 .workspace-list > li.selected::before {
   content: "";
   position: absolute;
@@ -137,29 +131,13 @@ html,
   background: var(--accent);
 }
 
-/*
- * A blocked row sits under the workspace it is waiting on, indented by its
- * depth in the chain and joined to it by an elbow. `--depth` comes from the
- * row itself, so nesting is one number rather than a class per level.
- *
- * Deliberately uncapped: a deep chain eats into the name, and the name is
- * already ellipsised, so it degrades rather than breaking.
- */
 .workspace-list > li.is-blocked {
   margin-left: calc(var(--depth, 1) * 14px);
 }
 
-/*
- * The elbow: down from the blocker's left edge, then right toward this row.
- * Drawn outside the row's own background, in the space the indent opened up.
- *
- * It descends from -15px and stops at -7px, which is exactly where the
- * selection bar begins — so a nested row can be selected and the two marks sit
- * side by side instead of on top of each other.
- *
- * The arm is pinned 15px from the row's top rather than to its centre, so it
- * meets the branch name whether or not the row also carries a PR line.
- */
+/* Stops at -7px, where the selection bar begins, so the two sit side by side.
+   The arm is pinned to the top, not the centre, to meet the branch name with
+   or without a PR line. */
 .workspace-list > li.is-blocked::after {
   content: "";
   position: absolute;
@@ -193,9 +171,6 @@ html,
   min-width: 0;
 }
 
-/* One line, ellipsised: a wrapping branch name pushed the PR row out of a
-   consistent position and made the list hard to scan. The full name is on the
-   row's tooltip. */
 .workspace-name-text {
   flex: 1 1 auto;
   min-width: 0;
@@ -234,7 +209,6 @@ html,
   font-style: italic;
 }
 
-/* Every PR in the workspace on one wrapping row under the branch name. */
 .workspace-prs {
   display: flex;
   align-items: center;
@@ -374,8 +348,6 @@ html,
   font-weight: 600;
 }
 
-/* Wraps the members of a `gh stack` so the header reads as "these three are one
-   stack" rather than three loose PRs. Drawn base-first, left to right. */
 .gh-stack {
   display: inline-flex;
   align-items: center;
@@ -391,7 +363,6 @@ html,
   color: var(--muted);
 }
 
-/* Only drawn when the stack has PRs this workspace doesn't track. */
 .gh-stack-count {
   font-size: 9px;
   color: var(--muted);
@@ -412,8 +383,6 @@ html,
   font-size: 10px;
 }
 
-/* Keeps a repo's branch PR and its attached PRs together when the header wraps —
-   and lets the group itself wrap once it has more chips than fit on one row. */
 .gh-chip-group {
   display: inline-flex;
   align-items: center;
@@ -461,8 +430,6 @@ html,
   text-align: center;
 }
 
-/* The detail is a row: the header + session pane on the left, the Side Panel
-   (or its collapsed rail) on the right. */
 .workspace-detail {
   flex: 1;
   display: flex;
@@ -479,13 +446,10 @@ html,
   min-width: 0;
 }
 
-/* ── Side panel ─────────────────────────────────────────────────────────── */
-
-/* Collapsed: a thin rail. The whole thing is the button that expands it. */
 .side-rail {
   flex: none;
   width: 28px;
-  /* Span the detail's vertical padding, like the terminal does below. */
+  /* Span the detail's vertical padding. */
   margin: -24px 0;
   display: flex;
   flex-direction: column;
@@ -544,9 +508,8 @@ html,
   background: var(--bg);
 }
 
-/* Sits entirely *outside* the panel, over the terminal's right edge. Inside
-   the panel the native PR webview is above the DOM and would eat half of a
-   straddling handle — which is why grabbing it used to miss so often. */
+/* Outside the panel: the native PR webview sits above the DOM and would eat a
+   straddling handle. */
 .side-resize {
   position: absolute;
   top: 0;
@@ -562,9 +525,6 @@ html,
   background: color-mix(in oklab, var(--accent) 35%, transparent);
 }
 
-/* Notes fixed on the left, artifacts oldest→newest after it, then PR tabs,
-   the collapse chevron pinned right. The strip scrolls sideways once it
-   fills (see `.h-strip`). */
 .side-tabs {
   display: flex;
   align-items: stretch;
@@ -574,12 +534,7 @@ html,
   flex: none;
 }
 
-/* A single row that scrolls sideways instead of wrapping — the side panel's
-   tab strip and the header's PR chips. The scrollbar is a 4px track that
-   only colours in on hover, so a strip that fits looks exactly as it did;
-   `useHorizontalScroll` turns a mouse wheel into sideways travel, since a
-   wheel only ever produces vertical deltas. WebKit-only selectors are fine:
-   this app renders in WKWebView and nowhere else. */
+/* WebKit-only selectors are fine: the app only renders in WKWebView. */
 .side-tabs,
 .header-prs {
   overflow-x: auto;
@@ -672,7 +627,6 @@ html,
   flex: none;
   position: sticky;
   right: 0;
-  /* Opaque so the tabs scrolling underneath don't show through. */
   background: var(--bg);
 }
 
@@ -687,8 +641,7 @@ html,
   flex-direction: column;
 }
 
-/* The native PR webview floats over this host, so it only needs to reserve
-   the space and sit under the overlay until the page paints. */
+/* The native PR webview floats over this host. */
 .pr-view-host {
   flex: 1;
   min-height: 0;
@@ -724,7 +677,6 @@ html,
   padding: 1px 8px;
 }
 
-/* Fit to width, grow as tall as it needs, scroll the panel. */
 .artifact-diagram {
   flex: 1;
   overflow: auto;
@@ -786,7 +738,6 @@ html,
   line-height: 1.5;
 }
 
-/* Two rows: the branch name with the action buttons, then the PR strip. */
 .workspace-detail header {
   display: flex;
   flex-direction: column;
@@ -815,8 +766,6 @@ html,
   white-space: nowrap;
 }
 
-/* The PR row: the strip takes the width and scrolls sideways; "+ PR" stays
-   put at its end however many PRs there are. */
 .header-prs-row {
   display: flex;
   align-items: center;
@@ -834,7 +783,7 @@ html,
   gap: 10px;
   flex: 1 1 auto;
   min-width: 0;
-  /* Room for the hover scrollbar without it sitting on the chips. */
+  /* Room for the hover scrollbar. */
   padding-bottom: 2px;
 }
 
@@ -1002,8 +951,6 @@ button.danger {
   max-width: 440px;
 }
 
-/* An add-repo job's log: a panel floated over the session, not a modal —
-   the rest of the app stays live while a repo provisions. */
 .add-repo-popup {
   position: absolute;
   top: 0;
@@ -1308,11 +1255,6 @@ button.danger.primary:hover:not(:disabled) {
   font-weight: 500;
 }
 
-/*
- * Per-workspace status tint: the whole row takes on a color while the session
- * is working (green) or it's your turn (yellow — more saturated so it reads as
- * the attention state). Idle/cleared rows keep their default background.
- */
 .workspace-list > li.status-working {
   background: color-mix(in oklab, #2fb84d 16%, transparent);
 }
@@ -1332,8 +1274,6 @@ button.danger.primary:hover:not(:disabled) {
   gap: 8px;
   flex: 1;
   min-height: 300px;
-  /* Anchors the add-repo popup to the session area's top-right, below the
-     header's buttons rather than over them. */
   position: relative;
 }
 
@@ -1345,8 +1285,6 @@ button.danger.primary:hover:not(:disabled) {
   background: var(--bg);
 }
 
-/* Fixed-size inline indicators — never shrink in flex rows.
-   Add new spinner/dot/badge classes to this list. */
 .spinner {
   flex-shrink: 0;
 }
@@ -1381,8 +1319,6 @@ button.danger.primary:hover:not(:disabled) {
   gap: 12px;
 }
 
-/* "Run with" switcher in the workspace header: the current binary, and a
-   dropdown of the others. */
 .binary-menu-wrap {
   position: relative;
   display: inline-flex;
@@ -1659,9 +1595,8 @@ button.danger.primary:hover:not(:disabled) {
   color: var(--muted);
 }
 
-/* `.is-dragging` is matched without the `.workspace-list >` prefix so the
-   styles still apply when dnd-kit's DragOverlay wraps the row in its own
-   positioning div, breaking the direct-child relationship. */
+/* No `.workspace-list >` prefix: dnd-kit's DragOverlay wraps the row in its own
+   div. */
 .workspace-list > li.is-dragging,
 li.is-dragging {
   cursor: grabbing;
@@ -1691,13 +1626,10 @@ li.is-dragging {
   color: var(--fg);
 }
 
-/* Default is a label, not a thing you drag or fold away. */
 .folder-header.is-default {
   cursor: default;
 }
 
-/* Drop target under the pointer. Also the only feedback a collapsed folder
-   can give, since its rows aren't on screen to shift out of the way. */
 .folder-header.is-over {
   background: color-mix(in oklab, var(--accent, #58a6ff) 18%, transparent);
   color: var(--fg);
@@ -1743,9 +1675,6 @@ li.is-dragging {
   text-transform: none;
 }
 
-/* Sits below the scrolling list, above the footer. Quieter than
-   New workspace above it — creating a folder is housekeeping, not the thing
-   the sidebar is for. */
 .sidebar-newfolder {
   padding: 4px 8px 8px;
   border-top: 1px solid var(--border);
@@ -1783,8 +1712,7 @@ li.is-dragging {
   position: fixed;
   z-index: 200;
   min-width: 160px;
-  /* The blocker picker expands inline, so the menu can outgrow its estimated
-     height. Clamping here means it scrolls instead of running off screen. */
+  /* The blocker picker expands inline, past the estimated height. */
   max-height: calc(100vh - 16px);
   overflow-y: auto;
   background: var(--bg);
@@ -1814,8 +1742,6 @@ li.is-dragging {
 .context-menu button.danger {
   color: var(--danger);
 }
-/* Candidate blockers. Indented under the disclosure that opened them, and
-   scrollable on its own so a long list doesn't push Delete off the menu. */
 .context-menu-picker {
   display: flex;
   flex-direction: column;
@@ -2006,9 +1932,6 @@ li.is-dragging {
   align-self: flex-start;
 }
 
-/* The label is the open affordance — it sheds the button chrome so the row
-   reads as it did before, and the path beside it stays plain selectable text
-   rather than becoming part of a click target. */
 .system-status-modal .status-list .path-label {
   align-self: auto;
   padding: 0;
@@ -2036,10 +1959,8 @@ li.is-dragging {
   margin-bottom: 12px;
 }
 
-/* Pin the tab bar while the modal body scrolls. top:0 pins it flush against
-   the scrollport, covering the modal's top padding; the opaque background plus
-   padding-bottom (instead of margin) keep scrolled content from peeking
-   through the gap below the tabs. */
+/* top:0 covers the modal's top padding; padding rather than margin keeps
+   scrolled content from peeking through below the tabs. */
 .system-status-modal .modal-tabs {
   position: sticky;
   top: 0;

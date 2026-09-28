@@ -8,15 +8,10 @@ use tokio::process::Command;
 use crate::error::{AppError, AppResult};
 use crate::job::{JobTx, LogStream};
 
-/// How many trailing stderr lines `run_streamed` keeps so a failure can say
-/// *why* it failed, not just which exit code it produced.
 const STDERR_TAIL_LINES: usize = 10;
 
-/// Outcome of a streamed child process: the exit status plus the tail of its
-/// stderr. The tail is what turns "exited with Some(128)" into an error the
-/// user can act on — the lines went to the log pane either way, but a job that
-/// fails outside a visible log pane (the background purger, a rollback) has
-/// nowhere else to surface them.
+/// Carries the stderr tail because jobs without a visible log pane (the
+/// purger, a rollback) have nowhere else to surface why they failed.
 pub struct RunOutcome {
     pub status: std::process::ExitStatus,
     stderr_tail: Vec<String>,
@@ -27,8 +22,6 @@ impl RunOutcome {
         self.status.success()
     }
 
-    /// `Ok(())` on a zero exit, otherwise an error naming the operation, the
-    /// exit code, and the captured stderr tail.
     pub fn check(&self, op: impl std::fmt::Display) -> AppResult<()> {
         if self.status.success() {
             return Ok(());
@@ -36,8 +29,6 @@ impl RunOutcome {
         Err(AppError::Other(self.failure_message(op)))
     }
 
-    /// The same message `check` produces, for best-effort callers that report
-    /// a failure without bubbling it.
     pub fn failure_message(&self, op: impl std::fmt::Display) -> String {
         let mut msg = format!("{op} exited with {:?}", self.status.code());
         if !self.stderr_tail.is_empty() {
@@ -48,14 +39,6 @@ impl RunOutcome {
     }
 }
 
-/// Run a child process, streaming each line of stdout/stderr as `JobEvent::Log`
-/// via the provided `JobTx`. Blocks until the child exits. Returns the exit
-/// status and stderr tail so the caller decides what to do on non-zero.
-///
-/// Pass `JobTx::silent()` for a background job with no UI channel — the events
-/// are discarded but the stderr tail still comes back on the outcome.
-///
-/// `repo` is attached to each emitted event so the UI can group output by repo.
 pub async fn run_streamed<I, S>(
     program: &str,
     args: I,
@@ -73,7 +56,7 @@ where
         cmd.current_dir(dir);
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    cmd.env("GIT_TERMINAL_PROMPT", "0"); // fail fast instead of hanging on auth prompt
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
 
     let mut child = cmd.spawn().map_err(|e| {
         AppError::Other(format!("failed to spawn `{program}`: {e}"))
@@ -104,9 +87,7 @@ where
     })
 }
 
-/// Probe whether `clone_path` looks like a complete git clone by asking
-/// `git rev-parse HEAD`. A half-finished clone (process killed after `.git/`
-/// was created but before HEAD was written) fails this check.
+/// A clone interrupted before HEAD was written fails this.
 async fn is_valid_clone(clone_path: &Path) -> bool {
     let result = Command::new("git")
         .arg("-C")
@@ -121,14 +102,7 @@ async fn is_valid_clone(clone_path: &Path) -> bool {
     matches!(result, Ok(s) if s.success())
 }
 
-/// Read from `reader`, split on both `\n` and `\r` (git/yarn/pnpm progress
-/// overwrites the current line with `\r` alone), and emit each segment as
-/// a `JobEvent::Log`. Without splitting on `\r`, progress lines never
-/// surface — the user just sees "Cloning into..." and then nothing for
-/// minutes while the clone runs.
-/// Returns the last [`STDERR_TAIL_LINES`] non-empty segments so the caller can
-/// attach them to a failure. Bounded, so a multi-minute clone's progress output
-/// doesn't accumulate.
+/// Splits on `\r` too: progress output overwrites its line with a bare `\r`.
 async fn drain_lines<R: AsyncRead + Unpin>(
     mut reader: R,
     tx: &JobTx,
@@ -147,7 +121,7 @@ async fn drain_lines<R: AsyncRead + Unpin>(
     let mut line: Vec<u8> = Vec::with_capacity(256);
     loop {
         match reader.read(&mut buf).await {
-            Ok(0) => break, // EOF
+            Ok(0) => break,
             Ok(n) => {
                 for &byte in &buf[..n] {
                     if byte == b'\n' || byte == b'\r' {
@@ -173,11 +147,6 @@ async fn drain_lines<R: AsyncRead + Unpin>(
     tail.into()
 }
 
-/// Clone `remote_url` into `clone_path` if it's not already a valid clone.
-/// Partial/broken clones (e.g. from a previous run that was interrupted
-/// mid-fetch) are detected via a `git rev-parse HEAD` probe and wiped so
-/// the re-clone can succeed — otherwise `git clone` refuses to write into
-/// a non-empty directory.
 pub async fn ensure_clone(
     clone_path: &Path,
     remote_url: &str,
@@ -217,9 +186,7 @@ pub async fn ensure_clone(
         "git",
         [
             "clone".as_ref(),
-            // Force progress output even when stderr is a pipe (default is
-            // to suppress). Without this users see only "Cloning into..."
-            // and then nothing for the duration of a multi-minute clone.
+            // Suppressed by default when stderr is a pipe.
             "--progress".as_ref(),
             remote_url.as_ref(),
             clone_path.as_os_str(),
@@ -233,11 +200,8 @@ pub async fn ensure_clone(
     Ok(())
 }
 
-/// `git -C <clone_path> pull --ff-only`. Tethys never modifies the clone's
-/// working tree or checked-out branch, so a fast-forward pull should always
-/// succeed when online. A failure means the clone is in a bad state (dirty
-/// working tree, diverged history) and branching off it would silently use
-/// stale code — bubble the error so workspace creation aborts loudly.
+/// Tethys never touches the clone's checkout, so a failure means it's in a bad
+/// state and branching off it would silently use stale code.
 pub async fn pull_clone(clone_path: &Path, tx: &JobTx, repo: &str) -> AppResult<()> {
     tx.status("updating clone from origin".to_string(), Some(repo));
     let args: [&OsStr; 4] = [
@@ -252,45 +216,22 @@ pub async fn pull_clone(clone_path: &Path, tx: &JobTx, repo: &str) -> AppResult<
     Ok(())
 }
 
-/// Creates a new branch `<branch>` and a worktree checking it out.
-///
-/// With `track_from = None`: `git worktree add <worktree_path> -b <branch>` —
-/// new branch starts at the clone's current HEAD with no upstream.
-///
-/// With `track_from = Some("origin/<branch>")`:
-/// `git worktree add --track -b <branch> <worktree_path> origin/<branch>` —
-/// new branch starts at the remote ref and is set to track it. Used when the
-/// caller has already verified the remote branch exists, so the worktree
-/// lands on the remote's commit with upstream wired up in one step.
-/// How `worktree_add` should resolve the branch it checks out.
 pub enum WorktreeBranch<'a> {
-    /// Create a fresh branch off the clone's current HEAD (`-b <branch>`).
     NewFromHead,
-    /// Create a fresh local branch tracking the given start point, e.g.
-    /// `origin/<branch>` (`--track -b <branch> <path> <start>`).
+    /// e.g. `origin/<branch>`.
     TrackRemote(&'a str),
-    /// Check out a branch that already exists locally (`<path> <branch>`).
-    /// Git refuses if that branch is already checked out in another worktree,
-    /// which is the guard against two workspaces sharing a branch.
+    /// Git refuses a branch checked out in another worktree, which is the
+    /// guard against two workspaces sharing a branch.
     ExistingLocal,
 }
 
-/// How a worktree's branch should be resolved, and whether Tethys owns it.
-///
-/// Owning a branch is the whole of the teardown contract: Purge deletes only
-/// branches Tethys created, so a pre-existing branch checked out for local
-/// edits (a PR branch, say) survives. That rule used to be four lines inline
-/// between two awaits in a 2000-line command module, where it could only be
-/// exercised by provisioning a real workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchPlan {
     pub source: OwnedWorktreeBranch,
-    /// Tethys may delete this branch on teardown only if it created it.
+    /// Purge deletes only branches Tethys created.
     pub created_branch: bool,
 }
 
-/// Owned twin of [`WorktreeBranch`], so the decision can be made (and tested)
-/// separately from the borrow that runs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnedWorktreeBranch {
     NewFromHead,
@@ -308,12 +249,6 @@ impl OwnedWorktreeBranch {
     }
 }
 
-/// Decide how to resolve `branch` given what already exists.
-///
-/// A local branch is checked out as-is; git refuses if another worktree
-/// already has it, which is the guard against two workspaces sharing a branch.
-/// A branch that only exists on the remote gets a fresh local tracking branch.
-/// Otherwise we branch off the clone's HEAD.
 pub fn plan_branch(branch: &str, local_exists: bool, remote_exists: bool) -> BranchPlan {
     match (local_exists, remote_exists) {
         (true, _) => BranchPlan {
@@ -379,26 +314,8 @@ pub async fn worktree_add(
     Ok(())
 }
 
-/// Ensure the clone is checked out on its default branch before we pull and
-/// branch new worktrees off its HEAD.
-///
-/// `override_branch` is the repo's `default_branch` from `repos.toml` when the
-/// user pinned one; otherwise we fall back to origin's default branch as
-/// recorded in `refs/remotes/origin/HEAD`.
-///
-/// Tethys treats the clone as a stable base that always sits on the default
-/// branch: `pull_clone` fast-forwards whatever is checked out, and
-/// `worktree_add` with `track_from = None` branches off the clone's current
-/// HEAD. If a stray manual checkout (or an interrupted git operation) left the
-/// clone on some other branch, both of those silently use the wrong base, so
-/// we detect that here and switch back.
-///
-/// Fallback detection is best-effort: with no override and a missing
-/// `refs/remotes/origin/HEAD` we can't know the default branch and leave the
-/// clone alone rather than guess. But once we know which branch we want, a
-/// failed `checkout` (e.g. a dirty working tree, or a pinned branch that
-/// doesn't exist) is bubbled so provisioning aborts loudly instead of branching
-/// off stale code.
+/// `pull_clone` and `worktree_add` both build on whatever the clone has checked
+/// out. With no override and no `origin/HEAD`, leave it alone rather than guess.
 pub async fn ensure_clone_on_default_branch(
     clone_path: &Path,
     override_branch: Option<&str>,
@@ -436,9 +353,6 @@ pub async fn ensure_clone_on_default_branch(
     Ok(())
 }
 
-/// Origin's default branch as recorded in the clone's `refs/remotes/origin/HEAD`
-/// (written by `git clone`), e.g. `"main"`. `None` if the ref is missing or
-/// unreadable.
 async fn origin_default_branch(clone_path: &Path) -> Option<String> {
     let output = tokio::process::Command::new("git")
         .arg("-C")
@@ -453,12 +367,10 @@ async fn origin_default_branch(clone_path: &Path) -> Option<String> {
         return None;
     }
     let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    // `--short` still yields "origin/main"; strip the remote prefix.
     name.strip_prefix("origin/").map(str::to_string)
 }
 
-/// The branch currently checked out in the clone, e.g. `"main"`. `None` if
-/// unreadable or HEAD is detached.
+/// `None` when HEAD is detached.
 async fn current_branch(clone_path: &Path) -> Option<String> {
     let output = tokio::process::Command::new("git")
         .arg("-C")
@@ -475,17 +387,11 @@ async fn current_branch(clone_path: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// `git -C <clone_path> show-ref --verify --quiet refs/heads/<branch>`.
-/// Returns true if the branch exists locally in the clone. Non-zero exit
-/// means the branch doesn't exist — not an error.
 pub async fn branch_exists(clone_path: &Path, branch: &str) -> AppResult<bool> {
     show_ref_exists(clone_path, &format!("refs/heads/{branch}")).await
 }
 
-/// `git -C <clone_path> show-ref --verify --quiet refs/remotes/<remote>/<branch>`.
-/// Returns true if the remote-tracking branch exists in the clone. The clone
-/// is expected to be freshly pulled before this is called, so a `true` here
-/// means the branch is genuinely present on the remote.
+/// Only as fresh as the clone's last pull.
 pub async fn remote_branch_exists(
     clone_path: &Path,
     remote: &str,
@@ -508,10 +414,7 @@ async fn show_ref_exists(clone_path: &Path, refspec: &str) -> AppResult<bool> {
     Ok(output.status.success())
 }
 
-/// `git -C <clone_path> worktree prune`. Best-effort: clears stale worktree
-/// registrations for directories that no longer exist. Errors are logged
-/// but not bubbled. Run before `branch -D` so git won't refuse with "branch
-/// in use by prunable worktree".
+/// Run before `branch -D`, which refuses a branch held by a prunable worktree.
 pub async fn worktree_prune_best_effort(clone_path: &Path, tx: &JobTx, repo: &str) {
     let args: [&OsStr; 4] = [
         "-C".as_ref(),
@@ -526,10 +429,6 @@ pub async fn worktree_prune_best_effort(clone_path: &Path, tx: &JobTx, repo: &st
     }
 }
 
-/// `git -C <clone_path> branch -D <branch>`. Best-effort: a non-zero exit
-/// (e.g. the branch doesn't exist) is logged but not bubbled. Used as
-/// cleanup when a workspace is deleted, so the same branch name can be
-/// reused for a new workspace.
 pub async fn branch_delete_best_effort(
     clone_path: &Path,
     branch: &str,
@@ -557,8 +456,7 @@ pub async fn branch_delete_best_effort(
     }
 }
 
-/// `git -C <clone_path> worktree remove <worktree_path>`. Returns an error if
-/// the worktree is dirty (caller can retry with `force`).
+/// Errors on a dirty worktree unless `force`.
 pub async fn worktree_remove(
     clone_path: &Path,
     worktree_path: &Path,
@@ -607,7 +505,6 @@ mod tests {
         );
     }
 
-    /// Initialize `dir` as a git repo on `main` with a single commit.
     fn init_repo_with_commit(dir: &Path) {
         let out = StdCommand::new("git")
             .arg("init")
@@ -642,19 +539,22 @@ mod tests {
         );
     }
 
-    fn noop_tx() -> JobTx {
-        JobTx::silent()
+    fn origin_and_clone() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        init_repo_with_commit(&origin);
+        let clone_path = tmp.path().join("clone");
+        clone(&origin, &clone_path);
+        (tmp, clone_path)
     }
 
-    /// The full input space of the branch decision — four lines that decide
-    /// whether Purge is allowed to delete one of the user's own branches.
     #[test]
     fn branch_planning_over_every_combination() {
         let local = plan_branch("feat/x", true, false);
         assert_eq!(local.source, OwnedWorktreeBranch::ExistingLocal);
         assert!(!local.created_branch, "never delete a branch we found");
 
-        // A local branch wins even when the remote also has one.
         let both = plan_branch("feat/x", true, true);
         assert_eq!(both.source, OwnedWorktreeBranch::ExistingLocal);
         assert!(!both.created_branch);
@@ -671,8 +571,6 @@ mod tests {
         assert!(fresh.created_branch);
     }
 
-    /// A `JobTx` whose receiver stays alive so tests can assert on the
-    /// emitted log lines.
     fn recording_tx() -> (JobTx, tokio::sync::mpsc::UnboundedReceiver<crate::job::JobEvent>) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         (JobTx(tx), rx)
@@ -690,9 +588,6 @@ mod tests {
         out
     }
 
-    /// Progress output that overwrites its line with a bare `\r` must still
-    /// reach the log pane. Without `\r` splitting a multi-minute clone shows
-    /// "Cloning into..." and then nothing at all.
     #[tokio::test]
     async fn splits_progress_output_on_carriage_returns() {
         let (tx, mut rx) = recording_tx();
@@ -710,8 +605,6 @@ mod tests {
         assert_eq!(logged_lines(&mut rx), vec!["a", "b", "c"]);
     }
 
-    /// A failure must name the reason, not just the exit code — the purger and
-    /// the create-rollback path have no log pane to fall back on.
     #[tokio::test]
     async fn failure_carries_the_stderr_tail() {
         let (tx, _rx) = recording_tx();
@@ -731,7 +624,6 @@ mod tests {
         assert!(err.contains("fatal: not a git repository"), "{err}");
     }
 
-    /// Only the tail is kept, so a chatty child can't accumulate unboundedly.
     #[tokio::test]
     async fn stderr_tail_is_bounded() {
         let (tx, _rx) = recording_tx();
@@ -750,7 +642,6 @@ mod tests {
         assert!(!msg.contains("line40"), "drops older lines: {msg}");
     }
 
-    /// `JobTx::silent()` has no receiver; sends must not panic or block.
     #[tokio::test]
     async fn silent_sink_discards_output() {
         let outcome = run_streamed(
@@ -769,19 +660,11 @@ mod tests {
 
     #[tokio::test]
     async fn switches_clone_back_to_default_branch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let origin = tmp.path().join("origin");
-        std::fs::create_dir_all(&origin).unwrap();
-        init_repo_with_commit(&origin);
-
-        let clone_path = tmp.path().join("clone");
-        clone(&origin, &clone_path);
-
-        // Simulate something accidentally checking out the wrong branch.
+        let (_tmp, clone_path) = origin_and_clone();
         git_ok(&clone_path, &["checkout", "-b", "stray"]);
         assert_eq!(current_branch(&clone_path).await.as_deref(), Some("stray"));
 
-        ensure_clone_on_default_branch(&clone_path, None, &noop_tx(), "repo")
+        ensure_clone_on_default_branch(&clone_path, None, &JobTx::silent(), "repo")
             .await
             .unwrap();
 
@@ -794,7 +677,6 @@ mod tests {
         let origin = tmp.path().join("origin");
         std::fs::create_dir_all(&origin).unwrap();
         init_repo_with_commit(&origin);
-        // A second branch on the origin the user wants to base worktrees off.
         git_ok(&origin, &["checkout", "-b", "develop"]);
         git_ok(&origin, &["checkout", "main"]);
 
@@ -802,7 +684,7 @@ mod tests {
         clone(&origin, &clone_path);
         assert_eq!(current_branch(&clone_path).await.as_deref(), Some("main"));
 
-        ensure_clone_on_default_branch(&clone_path, Some("develop"), &noop_tx(), "repo")
+        ensure_clone_on_default_branch(&clone_path, Some("develop"), &JobTx::silent(), "repo")
             .await
             .unwrap();
 
@@ -814,20 +696,14 @@ mod tests {
 
     #[tokio::test]
     async fn leaves_clone_on_default_branch_untouched() {
-        let tmp = tempfile::tempdir().unwrap();
-        let origin = tmp.path().join("origin");
-        std::fs::create_dir_all(&origin).unwrap();
-        init_repo_with_commit(&origin);
-
-        let clone_path = tmp.path().join("clone");
-        clone(&origin, &clone_path);
+        let (_tmp, clone_path) = origin_and_clone();
         assert_eq!(
             origin_default_branch(&clone_path).await.as_deref(),
             Some("main")
         );
         assert_eq!(current_branch(&clone_path).await.as_deref(), Some("main"));
 
-        ensure_clone_on_default_branch(&clone_path, None, &noop_tx(), "repo")
+        ensure_clone_on_default_branch(&clone_path, None, &JobTx::silent(), "repo")
             .await
             .unwrap();
 
@@ -836,15 +712,7 @@ mod tests {
 
     #[tokio::test]
     async fn worktree_add_checks_out_existing_local_branch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let origin = tmp.path().join("origin");
-        std::fs::create_dir_all(&origin).unwrap();
-        init_repo_with_commit(&origin);
-
-        let clone_path = tmp.path().join("clone");
-        clone(&origin, &clone_path);
-        // A branch that already exists locally — e.g. a PR branch the user
-        // fetched and now wants to edit in a worktree.
+        let (tmp, clone_path) = origin_and_clone();
         git_ok(&clone_path, &["branch", "feature"]);
         assert!(branch_exists(&clone_path, "feature").await.unwrap());
 
@@ -854,7 +722,7 @@ mod tests {
             &worktree_path,
             "feature",
             WorktreeBranch::ExistingLocal,
-            &noop_tx(),
+            &JobTx::silent(),
             "repo",
         )
         .await
@@ -868,13 +736,7 @@ mod tests {
 
     #[tokio::test]
     async fn worktree_add_existing_local_rejects_branch_in_use() {
-        let tmp = tempfile::tempdir().unwrap();
-        let origin = tmp.path().join("origin");
-        std::fs::create_dir_all(&origin).unwrap();
-        init_repo_with_commit(&origin);
-
-        let clone_path = tmp.path().join("clone");
-        clone(&origin, &clone_path);
+        let (tmp, clone_path) = origin_and_clone();
         git_ok(&clone_path, &["branch", "feature"]);
 
         let first = tmp.path().join("wt1");
@@ -883,21 +745,19 @@ mod tests {
             &first,
             "feature",
             WorktreeBranch::ExistingLocal,
-            &noop_tx(),
+            &JobTx::silent(),
             "repo",
         )
         .await
         .unwrap();
 
-        // A second worktree on the same branch is the "another workspace already
-        // uses this branch" case — git must refuse it.
         let second = tmp.path().join("wt2");
         let result = worktree_add(
             &clone_path,
             &second,
             "feature",
             WorktreeBranch::ExistingLocal,
-            &noop_tx(),
+            &JobTx::silent(),
             "repo",
         )
         .await;

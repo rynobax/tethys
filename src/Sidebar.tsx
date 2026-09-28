@@ -33,17 +33,11 @@ import {
 } from "./workspaceDerived";
 
 type Props = {
-  /** Workspaces that should appear in the sidebar (soft-deleted already filtered out). */
   workspaces: Workspace[];
-  /** User-created folders, in the order they're drawn. The Default folder is
-   *  not one of these — it's the absence of a folder. */
   folders: Folder[];
   selectedId: WorkspaceId | null;
   onSelect: (id: WorkspaceId) => void;
-  /** The whole visual order, flattened — see `reorder_workspaces`. */
   onReorder: (ids: WorkspaceId[]) => void;
-  /** A drag that crossed a folder boundary: the stack that moved, where it
-   *  landed, and the resulting visual order, all from one drop. */
   onMoveToFolder: (
     ids: WorkspaceId[],
     folder: FolderId | null,
@@ -52,23 +46,15 @@ type Props = {
   onReorderFolders: (ids: FolderId[]) => void;
   onCreateFolder: (name: string) => void;
   onRenameFolder: (id: FolderId, name: string) => void;
-  /** Contents fall back to Default. */
   onDeleteFolder: (id: FolderId) => void;
   onSetFolderCollapsed: (id: FolderId, collapsed: boolean) => void;
   onDelete: (ws: Workspace) => void;
   onClearTurn: (ws: Workspace) => void;
-  /** `blockerId: null` clears the link. */
   onSetBlocker: (ws: Workspace, blockerId: WorkspaceId | null) => void;
   workspaceNeedsTurn: (ws: Workspace) => boolean;
-  /** True when the workspace's session is actively processing (Claude working). */
   workspaceWorking: (ws: Workspace) => boolean;
 };
 
-/**
- * Droppable id for a folder header, prefixed so it can't be mistaken for a
- * workspace id — `onDragEnd` reads the id to know whether a row was dropped
- * into a folder or next to another row.
- */
 const HEADER_PREFIX = "folder:";
 const DEFAULT_HEADER = `${HEADER_PREFIX}default`;
 const headerId = (folder: FolderId | null) =>
@@ -77,15 +63,10 @@ const isHeaderId = (id: string) => id.startsWith(HEADER_PREFIX);
 const folderFromHeaderId = (id: string): FolderId | null =>
   id === DEFAULT_HEADER ? null : id.slice(HEADER_PREFIX.length);
 
-/**
- * A blocker stack — the root row plus everything nested under it, in draw
- * order. This is the unit a drag moves: grabbing a blocked row takes its
- * blocker and siblings along, which is what keeps a pair from being split
- * across folders where the nesting could no longer be drawn.
- */
+// A blocker stack moves as one, so a drag can't split it across folders where
+// the nesting could no longer be drawn.
 type Block = { rows: TreeRow[]; ids: WorkspaceId[] };
 
-/** A folder's blocks, `folder: null` being Default. */
 type Section = { folder: Folder | null; blocks: Block[] };
 
 function cutIntoBlocks(rows: TreeRow[]): Block[] {
@@ -102,19 +83,10 @@ function cutIntoBlocks(rows: TreeRow[]): Block[] {
   return out;
 }
 
-/** One block with the folder it currently sits in — the flat list drops are
- *  resolved against. */
 type PlacedBlock = { block: Block; folder: FolderId | null };
 
-/**
- * Pointer-first, falling back to nearest-centre in the gaps.
- *
- * Plain `closestCenter` would let a row dragged towards the top of its folder
- * resolve to the header above it — and a header means "append", so dragging up
- * would fling the row to the bottom. Requiring the pointer to actually be over
- * the header makes filing deliberate; the fallback keeps the drag from going
- * dead between rows.
- */
+// A header drop means "append", so the pointer must really be over one; else a
+// row dragged up would resolve to its header and land at the bottom.
 const collisionDetection: CollisionDetection = (args) => {
   const under = pointerWithin(args);
   return under.length > 0 ? under : closestCenter(args);
@@ -151,8 +123,6 @@ export function Sidebar({
     [workspaces, folders],
   );
 
-  // Every row's stack root, so a drag on a nested row can resolve to the
-  // block it belongs to.
   const rootOf = useMemo(() => {
     const map = new Map<WorkspaceId, WorkspaceId>();
     for (const section of sections) {
@@ -171,8 +141,6 @@ export function Sidebar({
     [sections],
   );
 
-  // With no folders the sidebar is exactly what it was before them: a flat
-  // list, no headers, nothing to explain.
   const showHeaders = folders.length > 0;
 
   const [menu, setMenu] = useState<{
@@ -189,15 +157,10 @@ export function Sidebar({
   const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null);
 
   const sensors = useSensors(
-    // 5px activation distance prevents a single click from being interpreted
-    // as a drag start, which would swallow row selection.
-    // Pointer-only: no KeyboardSensor, so focusing a row and pressing Enter
-    // doesn't trap the user in keyboard drag mode.
+    // No KeyboardSensor: Enter on a focused row would trap you in drag mode.
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
   );
 
-  // Defensive: clear stuck drag state if what's being dragged falls out of the
-  // list (deleted mid-drag), or if the window loses focus.
   useEffect(() => {
     if (!activeDrag) return;
     const stillThere =
@@ -223,8 +186,6 @@ export function Sidebar({
     }
   };
 
-  /** Which folder a drop target belongs to: a header names one directly, a row
-   *  names the section it's drawn in. */
   const folderAtTarget = (overId: string): FolderId | null | undefined => {
     if (isHeaderId(overId)) return folderFromHeaderId(overId);
     const hit = placed.find((p) => p.block.ids.includes(overId));
@@ -233,8 +194,7 @@ export function Sidebar({
 
   const dropFolder = (draggedFolder: FolderId, overId: string) => {
     const target = folderAtTarget(overId);
-    // `null` is Default, which is always first and isn't a folder — there's no
-    // position above it to drop into.
+    // Default (`null`) is always first.
     if (target === undefined || target === null || target === draggedFolder) {
       return;
     }
@@ -253,21 +213,15 @@ export function Sidebar({
     const destination = folderAtTarget(overId);
     if (destination === undefined) return;
 
-    // Positions are worked out against the list *before* the block is lifted
-    // out — the rule `arrayMove` follows, and what makes a downward drop land
-    // where the drag preview showed it rather than one row short.
+    // Indexed against the list before the block is lifted out, as `arrayMove`
+    // does, so a downward drop lands where the preview showed it.
     let to: number;
     if (isHeaderId(overId)) {
-      // Dropped on the header itself: the only target a collapsed or empty
-      // folder offers. Land after everything already filed there.
       to =
         placed.reduce((acc, p, i) => (p.folder === destination ? i : acc), -1) +
         1;
     } else {
       to = placed.findIndex((p) => p.block.ids.includes(overId));
-      // Dropped on a row of the very block being dragged — a child onto its
-      // own blocker. Nothing to do, and treating it as a move would fling the
-      // stack to the bottom of the list.
       if (to < 0 || to === from) return;
     }
 
@@ -424,13 +378,7 @@ export function Sidebar({
   );
 }
 
-/**
- * Default's header: a label and a drop target, nothing to drag or rename.
- *
- * A plain droppable rather than a sortable, because Default is always first —
- * it has to *accept* a row moving back out of a folder, but it has no position
- * of its own to trade.
- */
+// Droppable, not sortable: Default accepts rows but has no position to trade.
 function DefaultFolderHeader({ count }: { count: number }) {
   const { setNodeRef, isOver } = useDroppable({ id: DEFAULT_HEADER });
   return (
@@ -507,13 +455,6 @@ function SortableFolderHeader({
   );
 }
 
-/**
- * Inline name field for a new or renamed folder.
- *
- * Blur commits, so the whole flow works with the mouse alone; Enter and Escape
- * are there because a text field that ignores them feels broken, not because
- * anything depends on them.
- */
 function FolderNameInput({
   initial,
   onCommit,
@@ -551,13 +492,6 @@ function FolderNameInput({
   );
 }
 
-/**
- * Creates an empty folder at the end of the list.
- *
- * Pinned to the bottom of the sidebar card rather than living in the list,
- * mirroring New workspace at the top: it belongs to the list as a whole, not
- * to any row in it, so it shouldn't scroll away.
- */
 function NewFolderRow({ onCreate }: { onCreate: (name: string) => void }) {
   const [naming, setNaming] = useState(false);
   return (
@@ -626,10 +560,7 @@ function SortableWorkspaceRow({
   );
 }
 
-/**
- * A blocked row. Draggable but not sortable: it has no position of its own to
- * swap into — the drag resolves to its blocker's stack, which moves whole.
- */
+// Not sortable: a blocked row's drag resolves to its blocker's stack.
 function DraggableWorkspaceRow({
   workspace,
   selected,
@@ -696,16 +627,12 @@ function WorkspaceRow({
   needsTurn: boolean;
   working: boolean;
   isDragging?: boolean;
-  /** How deep in the blocker tree. 0 is a normal, unblocked row. */
   depth?: number;
   onSelect: () => void;
   onContextMenu: (x: number, y: number) => void;
   dndProps?: DndProps;
 }) {
   const status = workspace.status.kind;
-  // Status tint for live workspaces: yellow when it's your turn, green while
-  // the session is working. Your-turn wins over working since it's the
-  // actionable state. Idle/cleared rows keep their default background.
   const statusEdge =
     status === "ready"
       ? needsTurn
@@ -725,9 +652,6 @@ function WorkspaceRow({
     .filter(Boolean)
     .join(" ");
 
-  // One flat list of every PR in the workspace, laid out on a single wrapping
-  // row under the name. The repo it came from rides along so a multi-repo
-  // workspace can still say which checkout a chip belongs to, on hover.
   const prs = workspace.repo_links.flatMap((r) =>
     linkPrs(r).map((status) => ({ repoKey: r.repo_key, status })),
   );
@@ -780,7 +704,6 @@ function WorkspaceRow({
   );
 }
 
-/** Closes on any click outside. */
 function useDismissOnOutsideClick(onClose: () => void) {
   const ref = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -793,7 +716,6 @@ function useDismissOnOutsideClick(onClose: () => void) {
   return ref;
 }
 
-/** Keeps a context menu inside the viewport. */
 function menuPosition(x: number, y: number, height: number) {
   const ESTIMATED_W = 180;
   return {
@@ -830,8 +752,6 @@ function FolderContextMenu({
       <button type="button" role="menuitem" onClick={wrap(onRename)}>
         Rename
       </button>
-      {/* Deleting a folder never destroys work — its workspaces fall back to
-          Default — so this doesn't ask twice. */}
       <button
         type="button"
         role="menuitem"
@@ -859,8 +779,6 @@ function ContextMenu({
   y: number;
   workspace: Workspace;
   hasTurn: boolean;
-  /** Legal blockers for this workspace — other folders and cycles already
-   *  filtered out. */
   blockerOptions: Workspace[];
   onClose: () => void;
   onDelete: (ws: Workspace) => void;

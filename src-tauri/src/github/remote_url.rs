@@ -1,15 +1,20 @@
 use serde::Serialize;
 
-/// A parsed `owner/name` identifier for a GitHub repository.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GithubSlug {
     pub owner: String,
     pub name: String,
 }
 
-/// Parse a git remote URL into a GitHub `(owner, name)` slug.
-///
-/// Returns `None` for non-GitHub hosts or malformed input.
+impl GithubSlug {
+    pub fn new(owner: &str, name: &str) -> Self {
+        GithubSlug {
+            owner: owner.to_string(),
+            name: name.to_string(),
+        }
+    }
+}
+
 pub fn parse_github_remote(url: &str) -> Option<GithubSlug> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
@@ -33,10 +38,7 @@ pub fn parse_github_remote(url: &str) -> Option<GithubSlug> {
         return None;
     }
 
-    Some(GithubSlug {
-        owner: owner.to_string(),
-        name: name.to_string(),
-    })
+    Some(GithubSlug::new(owner, name))
 }
 
 fn is_github_host(host: &str) -> bool {
@@ -67,18 +69,11 @@ fn split_host_and_path(url: &str) -> Option<(&str, &str)> {
 mod tests {
     use super::*;
 
-    fn slug(owner: &str, name: &str) -> GithubSlug {
-        GithubSlug {
-            owner: owner.to_string(),
-            name: name.to_string(),
-        }
-    }
-
     #[test]
     fn ssh_scp_form_with_dot_git() {
         assert_eq!(
             parse_github_remote("git@github.com:ryan/tethys.git"),
-            Some(slug("ryan", "tethys"))
+            Some(GithubSlug::new("ryan", "tethys"))
         );
     }
 
@@ -86,7 +81,7 @@ mod tests {
     fn ssh_scp_form_without_dot_git() {
         assert_eq!(
             parse_github_remote("git@github.com:ryan/tethys"),
-            Some(slug("ryan", "tethys"))
+            Some(GithubSlug::new("ryan", "tethys"))
         );
     }
 
@@ -94,7 +89,7 @@ mod tests {
     fn https_form_with_dot_git() {
         assert_eq!(
             parse_github_remote("https://github.com/ryan/tethys.git"),
-            Some(slug("ryan", "tethys"))
+            Some(GithubSlug::new("ryan", "tethys"))
         );
     }
 
@@ -102,7 +97,7 @@ mod tests {
     fn https_form_without_dot_git() {
         assert_eq!(
             parse_github_remote("https://github.com/ryan/tethys"),
-            Some(slug("ryan", "tethys"))
+            Some(GithubSlug::new("ryan", "tethys"))
         );
     }
 
@@ -110,7 +105,7 @@ mod tests {
     fn https_form_with_trailing_slash() {
         assert_eq!(
             parse_github_remote("https://github.com/ryan/tethys/"),
-            Some(slug("ryan", "tethys"))
+            Some(GithubSlug::new("ryan", "tethys"))
         );
     }
 
@@ -118,7 +113,7 @@ mod tests {
     fn https_form_with_userinfo() {
         assert_eq!(
             parse_github_remote("https://token@github.com/ryan/tethys.git"),
-            Some(slug("ryan", "tethys"))
+            Some(GithubSlug::new("ryan", "tethys"))
         );
     }
 
@@ -126,7 +121,7 @@ mod tests {
     fn ssh_url_form() {
         assert_eq!(
             parse_github_remote("ssh://git@github.com/ryan/tethys.git"),
-            Some(slug("ryan", "tethys"))
+            Some(GithubSlug::new("ryan", "tethys"))
         );
     }
 
@@ -134,7 +129,7 @@ mod tests {
     fn git_protocol_form() {
         assert_eq!(
             parse_github_remote("git://github.com/ryan/tethys.git"),
-            Some(slug("ryan", "tethys"))
+            Some(GithubSlug::new("ryan", "tethys"))
         );
     }
 
@@ -142,7 +137,7 @@ mod tests {
     fn host_is_case_insensitive() {
         assert_eq!(
             parse_github_remote("https://GitHub.com/ryan/tethys"),
-            Some(slug("ryan", "tethys"))
+            Some(GithubSlug::new("ryan", "tethys"))
         );
     }
 
@@ -159,8 +154,6 @@ mod tests {
 
     #[test]
     fn github_enterprise_returns_none() {
-        // Enterprise hosts aren't supported — `gh` handles GH_HOST, but we
-        // only tag the primary github.com here. Revisit if we add enterprise support.
         assert_eq!(parse_github_remote("git@github.mycorp.com:ryan/tethys.git"), None);
     }
 
@@ -187,8 +180,6 @@ mod tests {
 
     #[test]
     fn extra_path_segments_rejected() {
-        // owner/name is the entire path; deeper paths (e.g. /tree/main)
-        // are ambiguous and we don't want to silently strip.
         assert_eq!(
             parse_github_remote("https://github.com/ryan/tethys/tree/main"),
             None
@@ -199,7 +190,7 @@ mod tests {
     fn whitespace_trimmed() {
         assert_eq!(
             parse_github_remote("  git@github.com:ryan/tethys.git  "),
-            Some(slug("ryan", "tethys"))
+            Some(GithubSlug::new("ryan", "tethys"))
         );
     }
 }

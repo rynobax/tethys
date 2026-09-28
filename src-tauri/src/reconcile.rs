@@ -6,16 +6,9 @@ use serde::Serialize;
 use crate::registry::RepoRegistry;
 use crate::state::AppState;
 
-/// Result of diffing `state.json` against what's actually on disk under
-/// `worktree_root`. Computed on-demand via `list_discrepancies` and after
-/// any workspace mutation.
 #[derive(Debug, Default, Serialize)]
 pub struct Discrepancies {
-    /// Directories under `worktree_root` with no matching workspace in state.
-    /// Typically the result of a crash or kill mid-create.
     pub orphaned_dirs: Vec<OrphanedDir>,
-    /// Workspaces in state whose worktree paths no longer exist on disk.
-    /// Typically the result of someone manually deleting the dir.
     pub missing_worktrees: Vec<MissingWorktree>,
 }
 
@@ -32,15 +25,6 @@ pub struct MissingWorktree {
     pub worktree_path: PathBuf,
 }
 
-/// Scan the filesystem against AppState. Safe to call any time.
-///
-/// Without a loaded registry we can't know `worktree_root`, so orphan
-/// detection is skipped — we still report missing worktrees based on
-/// `AppState.repo_links`.
-///
-/// `in_progress` is the set of workspace IDs currently being created.
-/// Those directories legitimately exist on disk while state.json hasn't
-/// been updated yet, so we skip them to avoid a false-positive orphan.
 pub async fn scan(
     state: &AppState,
     registry: Option<&RepoRegistry>,
@@ -48,7 +32,6 @@ pub async fn scan(
 ) -> Discrepancies {
     let mut out = Discrepancies::default();
 
-    // Missing worktrees: state says they should exist, disk says they don't.
     for ws in &state.workspaces {
         for link in &ws.repo_links {
             if !link.worktree_path.exists() {
@@ -62,15 +45,11 @@ pub async fn scan(
         }
     }
 
-    // Orphaned dirs: top-level dirs under worktree_root with no matching
-    // workspace. We don't inspect per-repo subdirs — workspace-level
-    // orphaning is the only partial-state case our create flow produces.
     let Some(reg) = registry else {
         return out;
     };
-    // Derive each workspace's directory name from its stored worktree paths.
-    // Older workspaces use the workspace UUID as the dir name, newer ones use
-    // a sanitized branch name — reading from the stored path covers both.
+    // Read off stored paths: older workspace dirs are named by UUID, newer by
+    // branch. Per-repo subdirs aren't checked; create never orphans just one.
     let mut known_dirs: HashSet<String> = HashSet::new();
     for ws in &state.workspaces {
         for link in &ws.repo_links {
@@ -109,9 +88,6 @@ pub async fn scan(
     out
 }
 
-/// Sanity check: ensure `candidate` is a path under `worktree_root`. Used
-/// before `rm -rf`ing anything the frontend asked about, so a buggy or
-/// malicious caller can't hand us `/` and have a bad day.
 pub fn is_under(worktree_root: &Path, candidate: &Path) -> bool {
     let Ok(root) = worktree_root.canonicalize() else {
         return false;

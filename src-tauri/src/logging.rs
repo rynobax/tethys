@@ -5,20 +5,11 @@ use tracing_subscriber::{
     fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer as _,
 };
 
-/// Verbosity of the stderr mirror when `TETHYS_LOG_STDERR` is unset. The file
-/// layer is the real log; stderr is an unbounded pipe into whichever terminal
-/// launched the app (`pnpm tauri dev`), so it only carries what warrants
-/// interrupting you.
+/// Low because stderr is an unbounded pipe into the launching terminal's
+/// scrollback; the file is the real log.
 const DEFAULT_STDERR_FILTER: &str = "warn";
 
-/// Initialize global tracing: stderr mirror plus a rolling daily file in
-/// `logs_dir`. Returned guard must live for the duration of the app — dropping
-/// it flushes.
-///
-/// `RUST_LOG` sets the overall verbosity (and so caps both layers);
-/// `TETHYS_LOG_STDERR` independently filters the stderr mirror — set it to
-/// `off` to silence the terminal, or to `info,tethys_lib=debug` to get the
-/// full firehose back.
+/// Hold the returned guard for the app's lifetime; dropping it flushes the file.
 pub fn init(logs_dir: &Path) -> WorkerGuard {
     let file_appender = tracing_appender::rolling::daily(logs_dir, "tethys.log");
     let (file_writer, guard) = tracing_appender::non_blocking(file_appender);

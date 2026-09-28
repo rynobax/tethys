@@ -12,14 +12,10 @@ import type {
 import { useAppEvent } from "./ipc/events";
 
 type Props = {
-  /** All workspaces, including soft-deleted. The modal lists pending deletions. */
+  /** Including soft-deleted ones. */
   allWorkspaces: Workspace[];
-  /** Result of the last `registry_status` invoke — drives the config-path
-   *  row in the Status tab. */
   registry: RegistryStatus | null;
-  /** State/disk mismatches surfaced in the Status tab. */
   discrepancies: Discrepancies | null;
-  /** Reload app state after a discrepancy is resolved (remove orphan / forget). */
   onDiscrepancyChange: () => void;
 };
 
@@ -69,8 +65,7 @@ export function SystemStatus({
   const hasDiscrepancies =
     (discrepancies?.orphaned_dirs.length ?? 0) > 0 ||
     (discrepancies?.missing_worktrees.length ?? 0) > 0;
-  // Yellow only signals something actionable: pending permission grants or a
-  // state/disk mismatch. Pending deletions are routine and don't warrant it.
+  // Pending deletions are routine, so they don't warn.
   const hasWarnings = hasPending || hasDiscrepancies;
 
   return (
@@ -202,7 +197,6 @@ function StatusTab({
   onDiscrepancyChange: () => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
-  // Fixed for the life of the process, so one fetch when the tab mounts.
   const [cloneDir, setCloneDir] = useState<string | null>(null);
 
   useEffect(() => {
@@ -370,9 +364,7 @@ function StatusTab({
   );
 }
 
-/** A Tethys-owned path, with its label as the only thing that opens it — the
- *  Configuration section carries no separate "open" button, and the path
- *  itself stays plain selectable text so it can be copied. */
+/** The label opens the path; the path stays plain text so it can be copied. */
 function PathRow({
   label,
   path,
@@ -576,8 +568,7 @@ function DiskMismatchSection({
       onChanged();
     });
 
-  // Collapse missing-worktree rows by workspace_id — multiple repos per
-  // workspace would otherwise show redundant Forget buttons.
+  // One Forget button per workspace, not per repo.
   const missingByWorkspace = new Map<
     string,
     { branch: string; repos: string[] }

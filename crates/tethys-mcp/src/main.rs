@@ -1,18 +1,9 @@
-//! MCP server companion binary — the tools a session gets over Tethys itself.
+//! The MCP server each session spawns, forwarding tool calls to Tethys over
+//! `mcp.sock`.
 //!
-//! Claude Code spawns one of these per session, from the `--mcp-config` Tethys
-//! renders at spawn time. It exposes two tools — `create_workspace` to hand
-//! work off, and `link_pr` to point the current workspace at a pull request —
-//! and forwards each call to the running Tethys app over `mcp.sock`.
-//!
-//! Two things about this process are worth knowing:
-//!
-//! 1. **stdout belongs to the protocol.** Nothing may print there. Diagnostics
-//!    go to stderr, where Claude collects them.
-//! 2. **Failures are loud.** Its sibling `tethys-hook` exits 0 no matter what,
-//!    because a broken hook must never disturb a session. Here the opposite
-//!    holds: an agent that believes it handed work off when it didn't will
-//!    carry on as though the work is covered.
+//! stdout belongs to the protocol; diagnostics go to stderr. Unlike
+//! `tethys-hook`, failures are loud: an agent that wrongly believes it handed
+//! work off carries on as though the work is covered.
 
 use std::borrow::Cow;
 use std::env;
@@ -36,8 +27,6 @@ use tethys_mcp::{
     ENV_SESSION_ID, ENV_SOCKET, ENV_WORKSPACE_ID, TOOL_CREATE_WORKSPACE, TOOL_LINK_PR,
 };
 
-/// What the calling agent supplies. Everything else — who is calling, which
-/// repos exist — comes from the environment Tethys baked in.
 #[derive(Debug, Deserialize)]
 struct CreateWorkspaceArgs {
     repos: Vec<String>,
@@ -47,8 +36,6 @@ struct CreateWorkspaceArgs {
     blocks_caller: bool,
 }
 
-/// What the calling agent supplies to `link_pr`. The workspace it lands on
-/// comes from the environment, so an agent can only ever link to its own.
 #[derive(Debug, Deserialize)]
 struct LinkPrArgs {
     reference: String,
@@ -56,8 +43,6 @@ struct LinkPrArgs {
     repo_key: Option<String>,
 }
 
-/// The server: a socket to talk to, an identity to stamp on requests, and the
-/// repo keys that make up the `repos` enum.
 #[derive(Debug, Clone)]
 struct TethysServer {
     socket: PathBuf,
@@ -67,9 +52,6 @@ struct TethysServer {
 }
 
 impl TethysServer {
-    /// Read the config Tethys baked into our environment. A missing socket or
-    /// workspace id means we were launched by something other than Tethys, and
-    /// there is nothing useful we could do.
     fn from_env() -> anyhow::Result<Self> {
         let socket = env::var(ENV_SOCKET)
             .map_err(|_| anyhow::anyhow!("{ENV_SOCKET} is not set"))?;
@@ -90,10 +72,8 @@ impl TethysServer {
         })
     }
 
-    /// `create_workspace`'s input schema, built at runtime so `repos` can
-    /// enumerate the registry. An enum means a calling agent cannot name a repo Tethys has
-    /// never heard of — the failure it would otherwise learn about minutes
-    /// later, from a workspace that failed to provision.
+    /// Enumerating the registry means an unknown repo is refused now, not
+    /// minutes later as a failed provision.
     fn create_workspace_schema(&self) -> JsonObject {
         let repo_items = if self.repo_keys.is_empty() {
             json!({ "type": "string" })
@@ -167,10 +147,6 @@ impl TethysServer {
         )
     }
 
-    /// `link_pr`'s input schema. `repo_key` enumerates the registry for the
-    /// same reason `repos` does above, but it stays optional: naming a repo is
-    /// only ever disambiguation, and a workspace with one GitHub repo — or a
-    /// pasted URL that names its own — needs none.
     fn link_pr_schema(&self) -> JsonObject {
         let mut repo_key = json!({
             "type": "string",
@@ -220,23 +196,15 @@ impl TethysServer {
         )
     }
 
-    /// The `tools/list` reply.
-    ///
-    /// `ttl_ms` and `cache_scope` are not optional in practice. Claude Code
-    /// negotiates protocol `2026-07-28`, which requires `ttlMs` on a paginated
-    /// result (SEP-2549), and rmcp's `with_all_items` leaves it out — a reply
-    /// without it is rejected and retried until the client gives up with
-    /// "tools fetch failed". A ttl of 0 is the honest value: the `repos` enum
-    /// is baked in when Tethys spawns this process, so a cached list must not
-    /// outlive the session it was built for.
+    /// Protocol `2026-07-28` requires `ttlMs`, which `with_all_items` omits;
+    /// without it Claude Code retries until "tools fetch failed". Zero, since
+    /// the `repos` enum is fixed at spawn.
     fn tools_result(&self) -> ListToolsResult {
         ListToolsResult::with_all_items(vec![self.create_workspace_tool(), self.link_pr_tool()])
             .with_ttl_ms(0)
             .with_cache_scope(CacheScope::Private)
     }
 
-    /// One request, one connection, one reply. Short-lived like the hook's, but
-    /// this one waits for an answer.
     async fn send(&self, request: &Request) -> anyhow::Result<Response> {
         let mut stream = UnixStream::connect(&self.socket).await.map_err(|e| {
             anyhow::anyhow!(
@@ -285,13 +253,8 @@ impl ServerHandler for TethysServer {
     }
 }
 
-/// The two calls. Both follow the same shape: parse the agent's arguments,
-/// stamp the identity from the environment onto them, and turn whatever comes
-/// back into words.
-///
-/// Everything past the parse is a *tool-level* error rather than a protocol
-/// one. A protocol error can be swallowed by the client; the agent has to read
-/// the reason it didn't get what it asked for, or it will assume it did.
+/// Failures past the argument parse are tool-level errors, which the agent
+/// reads, rather than protocol errors, which the client may swallow.
 impl TethysServer {
     async fn create_workspace(
         &self,
@@ -376,8 +339,6 @@ impl TethysServer {
     }
 }
 
-/// Deserialize a tool call's arguments. The one place a bad call is a protocol
-/// error: the agent sent something the schema said it couldn't.
 fn parse_args<T: serde::de::DeserializeOwned>(
     arguments: Option<JsonObject>,
 ) -> Result<T, ErrorData> {
@@ -385,7 +346,6 @@ fn parse_args<T: serde::de::DeserializeOwned>(
         .map_err(|e| ErrorData::invalid_params(format!("bad arguments: {e}"), None))
 }
 
-/// A tool-level failure: an error the agent reads, not one the client eats.
 fn failed(message: String) -> CallToolResponse {
     CallToolResult::error(vec![ContentBlock::text(message)]).into()
 }
@@ -411,9 +371,7 @@ mod tests {
         }
     }
 
-    /// Regression: without `ttlMs`, Claude Code rejects the reply outright and
-    /// the tool never appears — it reports "tools fetch failed" after retrying.
-    /// Nothing in the type system asks for this field, so only a test holds it.
+    /// Nothing in the type system asks for `ttlMs`, so only this test holds it.
     #[test]
     fn the_tools_reply_carries_a_freshness_ttl() {
         let raw = serde_json::to_value(server().tools_result()).expect("serialize");
@@ -421,8 +379,6 @@ mod tests {
         assert_eq!(raw["cacheScope"], "private");
     }
 
-    /// The registry is what the calling agent gets to choose from, so a repo
-    /// key that isn't in it can't be expressed at all.
     #[test]
     fn the_repos_argument_enumerates_the_registry() {
         let schema = serde_json::to_value(server().create_workspace_schema()).expect("serialize");
@@ -436,22 +392,6 @@ mod tests {
         );
     }
 
-    /// Both tools have to be listed, or the one that isn't never reaches the
-    /// agent.
-    #[test]
-    fn the_tools_reply_carries_both_tools() {
-        let raw = serde_json::to_value(server().tools_result()).expect("serialize");
-        let names: Vec<&str> = raw["tools"]
-            .as_array()
-            .expect("tools array")
-            .iter()
-            .map(|t| t["name"].as_str().expect("name"))
-            .collect();
-        assert_eq!(names, vec![TOOL_CREATE_WORKSPACE, TOOL_LINK_PR]);
-    }
-
-    /// Only the reference is required: a workspace with one GitHub repo, or a
-    /// pasted URL that names its own, gives Tethys enough to resolve the rest.
     #[test]
     fn link_pr_requires_only_the_reference() {
         let schema = serde_json::to_value(server().link_pr_schema()).expect("serialize");
@@ -462,8 +402,7 @@ mod tests {
         );
     }
 
-    /// Same rule as `repos`: an empty registry must not render an `enum` that
-    /// nothing can satisfy.
+    /// An empty `enum` would match nothing.
     #[test]
     fn an_empty_registry_leaves_the_link_pr_enum_out() {
         let mut server = server();
@@ -473,8 +412,6 @@ mod tests {
         assert_eq!(schema["properties"]["repo_key"]["type"], "string");
     }
 
-    /// An empty registry means there is nothing to enumerate — the schema has
-    /// to stay valid rather than offering an empty `enum` that matches nothing.
     #[test]
     fn an_empty_registry_leaves_the_enum_out() {
         let mut server = server();

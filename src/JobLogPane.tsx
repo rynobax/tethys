@@ -7,15 +7,9 @@ interface Props {
   title: string;
   events: JobEvent[];
   state: JobState;
-  /** User-initiated dismiss — only enabled after the job settles. */
   onDismiss: () => void;
 }
 
-/**
- * Presentational pane for a streaming backend job (create / delete
- * workspace). The job itself is driven by `useBackendJob` so that
- * mount/unmount of this pane cannot start or cancel the underlying work.
- */
 export function JobLogPane({ title, events, state, onDismiss }: Props) {
   const logRef = useRef<HTMLDivElement | null>(null);
 

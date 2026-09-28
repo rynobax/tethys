@@ -1,18 +1,5 @@
-//! Artifacts: things a session produced that Tethys can show rather than
-//! leave as text in the terminal.
-//!
-//! Two kinds. A **Diagram** is the mermaid source out of a fenced block in
-//! the session's reply, read off the `Stop` hook's `last_assistant_message`.
-//! A **Page** is an HTML file the session wrote inside the workspace, caught
-//! from the `PostToolUse` hook for `Write`/`Edit`/`MultiEdit`. Both arrive
-//! through hooks rather than by scraping xterm's buffer: the hook hands over
-//! the exact source, unwrapped and complete, where the screen shows whatever
-//! fraction of it is currently in the viewport.
-//!
-//! Artifacts belong to the workspace and are stored on it, so they ride along
-//! in `state.json` and go when the workspace goes. The per-workspace cap is
-//! what keeps that from becoming a graveyard: the design moves on, and the
-//! twelve most recent things it produced is plenty of history.
+//! Things a session produced that Tethys can show: mermaid **Diagrams** from
+//! the `Stop` hook's reply, and HTML **Pages** from `PostToolUse`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,10 +11,8 @@ use tracing::{debug, warn};
 use crate::state::WorkspaceId;
 use crate::store::Store;
 
-/// Most artifacts one workspace keeps; the oldest is evicted past this.
 pub const CAP_PER_WORKSPACE: usize = 12;
 
-/// Longest label a tab gets. Anything longer is cut with an ellipsis.
 const LABEL_MAX_CHARS: usize = 18;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -43,20 +28,17 @@ pub struct Artifact {
     pub label: String,
     #[serde(flatten)]
     pub kind: ArtifactKind,
-    /// Bumped every time the same artifact is seen again (a page re-edited, a
-    /// diagram re-emitted), so the UI can reload it in place.
+    /// Lets the UI reload a re-seen artifact in place.
     pub revision: u32,
 }
 
-/// Payload of `artifact:changed`. Carries the id of the artifact that just
-/// arrived or was bumped, or `None` when one was dismissed.
+/// `artifact_id` is `None` when one was dismissed.
 #[derive(Debug, Clone, Serialize)]
 pub struct ArtifactChanged {
     pub workspace_id: WorkspaceId,
     pub artifact_id: Option<String>,
 }
 
-/// The artifact operations, over the workspace they belong to.
 pub struct ArtifactStore {
     store: Arc<Store>,
     app: AppHandle,
@@ -74,7 +56,6 @@ impl ArtifactStore {
             .unwrap_or_default()
     }
 
-    /// Record every mermaid fence in a finished reply.
     pub async fn record_diagrams(&self, workspace_id: &str, message: &str) {
         let diagrams = extract_diagrams(message);
         if diagrams.is_empty() {
@@ -87,7 +68,6 @@ impl ArtifactStore {
         }
     }
 
-    /// Record an HTML file a tool just wrote, if it lives inside the workspace.
     pub async fn record_page(&self, workspace_id: &str, workspace_root: &Path, path: &Path) {
         if !crate::reconcile::is_under(workspace_root, path) {
             debug!(
@@ -97,8 +77,7 @@ impl ArtifactStore {
             );
             return;
         }
-        // Canonical, so `./tmp/x.html` from an `open` and the absolute path
-        // from a `Write` are the same page. `is_under` just proved it resolves.
+        // So an `open ./x.html` and a `Write /abs/x.html` are one page.
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let label = path
             .file_name()
@@ -135,9 +114,6 @@ impl ArtifactStore {
         }
     }
 
-    /// `artifact:changed` is the panel's own signal, separate from
-    /// `workspace:changed`, so an arrival doesn't refetch every workspace and
-    /// can carry which artifact to select.
     fn emit(&self, workspace_id: &str, artifact_id: Option<String>) {
         let _ = self.app.emit(
             "artifact:changed",
@@ -149,8 +125,6 @@ impl ArtifactStore {
     }
 }
 
-/// Drop Pages whose file is gone. Runs at boot: a page is a path, and the
-/// file behind it may have been cleaned up while Tethys wasn't looking.
 pub fn prune_missing_pages(artifacts: &mut Vec<Artifact>) -> usize {
     let before = artifacts.len();
     artifacts.retain(|a| match &a.kind {
@@ -160,12 +134,7 @@ pub fn prune_missing_pages(artifacts: &mut Vec<Artifact>) -> usize {
     before - artifacts.len()
 }
 
-/// Insert an artifact, or bump the one already there for the same thing.
-///
-/// "The same thing" is the same page path or the same diagram source: a page
-/// Claude edits five times is one tab that reloads, not five. Either way the
-/// artifact moves to the end — newest position — and the list is trimmed to
-/// the cap from the front. Returns the id of the artifact touched.
+/// Same page path or diagram source bumps the existing artifact to newest.
 fn upsert(list: &mut Vec<Artifact>, label: String, kind: ArtifactKind) -> String {
     let existing = list.iter().position(|a| a.kind == kind);
     let artifact = match existing {
@@ -190,26 +159,15 @@ fn upsert(list: &mut Vec<Artifact>, label: String, kind: ArtifactKind) -> String
     id
 }
 
-/// What a tool call tells us about a Page, if anything.
 pub struct ToolCall<'a> {
     pub tool_name: Option<&'a str>,
-    /// `tool_input.file_path` — set for the file tools.
     pub file_path: Option<&'a str>,
-    /// `tool_input.command` — set for Bash.
     pub command: Option<&'a str>,
-    /// Where a relative path in a Bash command resolves from.
     pub cwd: Option<&'a str>,
 }
 
-/// The Page a tool call produced, if it produced one: a file tool writing an
-/// `.html` path, or a Bash command that `open`s one. The second is how the
-/// `/show-me` skill ends every page — `open path/to/show-me-*.html` — and it
-/// catches the file however it was written, which the file tools alone don't:
-/// the very first page a session made for this was a heredoc.
-///
-/// Tool names are each agent's own. `apply_patch` is codex's single edit tool,
-/// where Claude has three; both call a shell `Bash`. The `open` route is the
-/// one that matters most for codex, since it works whatever an edit is called.
+/// The Bash `open` route catches pages however they were written (e.g. a
+/// heredoc) — `/show-me` ends every page with one. `apply_patch` is codex's.
 pub fn page_written(call: &ToolCall<'_>) -> Option<PathBuf> {
     match call.tool_name? {
         "Write" | "Edit" | "MultiEdit" | "apply_patch" => {
@@ -231,9 +189,7 @@ fn html_path(path: PathBuf) -> Option<PathBuf> {
     (ext == "html" || ext == "htm").then_some(path)
 }
 
-/// Every non-flag argument to an `open` anywhere in a shell command line —
-/// `mkdir -p x && open x/a.html; open -a Safari b.html` yields both files.
-/// Quotes are honoured, nothing else is: no expansion, no substitution.
+/// Quotes are honoured; no expansion or substitution.
 fn opened_paths(command: &str) -> Vec<PathBuf> {
     command
         .split(['\n', ';', '|', '&'])
@@ -250,7 +206,6 @@ fn opened_paths(command: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Whitespace split that keeps quoted spans together and drops the quotes.
 fn shell_words(s: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut cur = String::new();
@@ -274,8 +229,7 @@ fn shell_words(s: &str) -> Vec<String> {
     words
 }
 
-/// Pull every ` ```mermaid ` fence out of a markdown reply, each with the
-/// label its tab should wear.
+/// `(label, source)` for every mermaid fence.
 pub fn extract_diagrams(message: &str) -> Vec<(String, String)> {
     let lines: Vec<&str> = message.lines().collect();
     let mut out = Vec::new();
@@ -301,9 +255,7 @@ pub fn extract_diagrams(message: &str) -> Vec<(String, String)> {
     out
 }
 
-/// A line that opens a mermaid fence: optional indent, three-or-more
-/// backticks or tildes, then `mermaid` as the info string. Returns the fence
-/// characters so the close can be matched against the same ones.
+/// Returns the fence run so the close can match it.
 fn open_fence(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
     let marker = if trimmed.starts_with("```") {
@@ -321,15 +273,12 @@ fn open_fence(line: &str) -> Option<&str> {
         .then_some(&trimmed[..run])
 }
 
-/// A closing fence: at least as many of the same characters, nothing else.
 fn closes_fence(line: &str, fence: &str) -> bool {
     let trimmed = line.trim();
     let marker = fence.chars().next().unwrap_or('`');
     trimmed.len() >= fence.len() && trimmed.chars().all(|c| c == marker)
 }
 
-/// Strip the common leading whitespace — a fence inside a list item has every
-/// body line indented under the bullet.
 fn dedent(lines: &[&str]) -> String {
     let indent = lines
         .iter()
@@ -344,9 +293,6 @@ fn dedent(lines: &[&str]) -> String {
         .join("\n")
 }
 
-/// The tab's label, from the best signal available: a `title` in the diagram
-/// itself, then the heading or bold lead-in of the prose just above the
-/// fence, then the diagram keyword. The fallbacks are never wrong, just dull.
 fn diagram_label(source: &str, preceding: &[&str]) -> String {
     let label = title_directive(source)
         .or_else(|| lead_in(preceding))
@@ -366,8 +312,6 @@ fn title_directive(source: &str) -> Option<String> {
     })
 }
 
-/// The nearest non-blank line above the fence, if it reads as a title: a
-/// markdown heading, a `**bold**` lead-in, or a short line on its own.
 fn lead_in(preceding: &[&str]) -> Option<String> {
     let line = preceding.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty())?;
     if let Some(heading) = line.trim_start_matches('#').strip_prefix(' ') {
@@ -390,8 +334,6 @@ fn strip_punct(s: &str) -> String {
         .to_string()
 }
 
-/// First word of the first line that isn't frontmatter or a comment —
-/// `flowchart`, `sequenceDiagram`, `gantt`.
 fn diagram_keyword(source: &str) -> Option<String> {
     let mut in_frontmatter = false;
     for line in source.lines() {

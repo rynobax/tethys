@@ -20,7 +20,6 @@ pub enum GhError {
     #[error("network error talking to GitHub: {0}")]
     Network(String),
 
-    /// One or more GraphQL-level errors came back. `data` may still be partially populated.
     #[error("GraphQL errors: {0:?}")]
     Graphql(Vec<String>),
 
@@ -38,12 +37,6 @@ impl GhError {
     }
 }
 
-/// Where PR status comes from.
-///
-/// The seam between "talk to `gh`" and "decide what to poll and when". One
-/// method, because that's all the poller needs; two adapters, because tests
-/// need a source that doesn't shell out to a binary the CI box may not have
-/// and doesn't hit the network.
 #[async_trait::async_trait]
 pub trait PrSource: Send + Sync + 'static {
     async fn fetch(
@@ -53,7 +46,6 @@ pub trait PrSource: Send + Sync + 'static {
     ) -> Result<Value, GhError>;
 }
 
-/// Production adapter: the `gh` CLI.
 pub struct GhCli;
 
 #[async_trait::async_trait]
@@ -67,11 +59,7 @@ impl PrSource for GhCli {
     }
 }
 
-/// Run a GraphQL query via `gh api graphql` and return the parsed `data` payload.
-///
-/// `variables` is a map of string-valued GraphQL variables. The query we send
-/// only references string variables (owner, name, branch qualifier), so this
-/// intentionally does not support nested JSON.
+/// Returns the response's `data`. Variables are string-only (`-f`).
 pub async fn run_graphql(
     query: &str,
     variables: &BTreeMap<String, String>,
@@ -115,7 +103,6 @@ pub async fn run_graphql(
         .ok_or_else(|| GhError::Other("gh response missing `data` field".to_string()))
 }
 
-/// Ask `gh` who the authenticated user is. Returns the login handle on success.
 pub async fn gh_login_status() -> Result<String, GhError> {
     let output = Command::new("gh")
         .args(["api", "user", "--jq", ".login"])

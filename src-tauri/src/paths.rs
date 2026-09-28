@@ -47,12 +47,8 @@ impl Paths {
         self.repos_clone_dir().join(repo_key)
     }
 
-    /// The clone's git directory — `.../repos/<repo_key>/.git`. Every worktree
-    /// Tethys branches off this clone keeps its git metadata here (shared
-    /// `config`/`refs`/`logs` plus a per-worktree subdir under
-    /// `.git/worktrees/`), so this is the path the sandbox must let git write.
-    /// Scoped to `.git` specifically so the clone's source tree beside it
-    /// stays read-only.
+    /// Every worktree's git metadata lives here, so it's what a sandbox must
+    /// let git write, while the clone's source tree beside it stays read-only.
     pub fn repo_git_dir(&self, repo_key: &str) -> PathBuf {
         self.repo_clone_path(repo_key).join(".git")
     }
@@ -61,8 +57,6 @@ impl Paths {
         self.data_dir.join("symlinks")
     }
 
-    /// Shared `settings.local.json` for a repo — symlinked into each of that
-    /// repo's worktrees so permissions stay in sync across workspaces.
     pub fn repo_shared_claude_local(&self, repo_key: &str) -> PathBuf {
         self.symlinks_dir().join(repo_key).join("settings.local.json")
     }
@@ -71,9 +65,8 @@ impl Paths {
         self.data_dir.join("hook.sock")
     }
 
-    /// Socket the handoff MCP server talks to. Separate from `hook.sock`
-    /// because the traffic is request/reply and its failures must surface —
-    /// the hook's whole contract is the opposite.
+    /// Separate from `hook.sock`: MCP is request/reply and its failures must
+    /// surface, where hooks are fire-and-forget.
     pub fn mcp_socket(&self) -> PathBuf {
         self.data_dir.join("mcp.sock")
     }
@@ -90,22 +83,17 @@ impl Paths {
         self.data_dir.join("theme.json")
     }
 
-    /// JSON file of permission entries captured on workspace purge, waiting
-    /// for the user to review and either fold into per-repo shared
-    /// `settings.local.json` files or discard.
     pub fn pending_permissions_file(&self) -> PathBuf {
         self.data_dir.join("pending_permissions.json")
     }
 }
 
-/// `~/.claude/settings.json` — user-level Claude Code settings.
 pub fn claude_settings_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".claude").join("settings.json"))
 }
 
-/// `~/.codex/config.toml` — user-level codex settings. `$CODEX_HOME` wins,
-/// which is what codex itself honours.
+/// `$CODEX_HOME` wins, as it does for codex itself.
 pub fn codex_config_path() -> Option<PathBuf> {
     let dir = match std::env::var_os("CODEX_HOME") {
         Some(home) => PathBuf::from(home),
@@ -114,9 +102,6 @@ pub fn codex_config_path() -> Option<PathBuf> {
     Some(dir.join("config.toml"))
 }
 
-/// Resolve a companion binary sitting next to the current executable. In dev,
-/// Cargo places them all at `<workspace>/target/debug/`; in a bundled app
-/// they'd need to sit side by side too.
 fn companion_bin(name: &str) -> std::io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let parent = exe.parent().ok_or_else(|| {

@@ -7,8 +7,6 @@ use tracing::{debug, info, warn};
 use crate::error::{AppError, AppResult};
 use crate::github::{parse_github_remote, GithubSlug};
 
-/// The user-edited repo registry — Tethys's pointer to which repos exist on
-/// disk and where their worktrees should land.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct RepoRegistry {
     /// Absolute directory where Tethys creates per-workspace worktrees. Prefer
@@ -17,9 +15,6 @@ pub struct RepoRegistry {
     pub worktree_root: PathBuf,
 
     /// One entry per repo you want Tethys-managed workspaces to span.
-    ///
-    /// TOML uses `[[repo]]` array-of-tables syntax (singular field name), but
-    /// we serialize back to the frontend as `repos` (plural array).
     #[serde(default, rename(serialize = "repos", deserialize = "repo"))]
     #[schemars(rename = "repo")]
     pub repos: Vec<Repo>,
@@ -31,7 +26,6 @@ pub struct RepoRegistry {
     pub workspace_doc: Option<WorkspaceDocConfig>,
 }
 
-/// `[workspace_doc]` in `repos.toml`.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct WorkspaceDocConfig {
     /// Markdown body of the generated workspace `CLAUDE.md`, replacing Tethys's
@@ -95,17 +89,12 @@ pub struct Repo {
     #[serde(default)]
     pub claude_notes: Option<String>,
 
-    /// Populated at registry load time by parsing `remote_url`. `None` means
-    /// the remote isn't on github.com and GitHub sync should skip this repo.
+    /// `None` for a remote that isn't on github.com.
     #[serde(skip, default)]
     #[schemars(skip)]
     pub github_slug: Option<GithubSlug>,
 }
 
-/// The outcome of loading `repos.toml` at boot.
-///
-/// Held in Tauri-managed state as `Arc<RegistryLoad>`. Commands that need a
-/// valid registry use `require()` to unwrap.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RegistryLoad {
@@ -180,8 +169,6 @@ impl RepoRegistry {
         self.repos.iter().find(|r| r.key == key)
     }
 
-    /// The body template for generated workspace `CLAUDE.md` files: the user's
-    /// if `[workspace_doc].body` is set and non-blank, else the built-in.
     pub fn workspace_doc_body(&self) -> &str {
         self.workspace_doc
             .as_ref()
@@ -190,25 +177,16 @@ impl RepoRegistry {
             .unwrap_or(crate::workspace_doc::DEFAULT_BODY)
     }
 
-    /// `<worktree_root>/<workspace_dir>/<repo_key>`. `workspace_dir` is the
-    /// per-workspace directory name — historically a UUID, now derived from
-    /// the branch via `sanitize_branch_for_dir`.
     pub fn plan_worktree_path(&self, workspace_dir: &str, repo_key: &str) -> PathBuf {
         self.worktree_root.join(workspace_dir).join(repo_key)
     }
 }
 
-/// Convert a branch name into something safe to use as a single path
-/// component. Git refs disallow most path-unsafe characters (`:`, `\`, `*`,
-/// `?`, `[`, `~`, `^`, space, control chars), so the only character we have
-/// to translate in practice is `/`, which git uses as a hierarchy separator
-/// inside refs (`feat/foo`).
+/// Git refs already forbid every other path-unsafe character.
 pub fn sanitize_branch_for_dir(branch: &str) -> String {
     branch.replace('/', "-")
 }
 
-/// Parse each repo's remote URL into an `owner/name` slug, logging a single
-/// info line per non-GitHub repo so the user knows why they won't see PR data.
 fn populate_github_slugs(registry: &mut RepoRegistry) {
     for repo in &mut registry.repos {
         repo.github_slug = parse_github_remote(&repo.remote_url);
@@ -222,7 +200,6 @@ fn populate_github_slugs(registry: &mut RepoRegistry) {
     }
 }
 
-/// Ensure `worktree_root` exists as a writable directory. Creates it if missing.
 fn validate_worktree_root(root: &Path) -> AppResult<()> {
     std::fs::create_dir_all(root).map_err(|e| {
         AppError::Other(format!(
@@ -244,9 +221,7 @@ fn validate_worktree_root(root: &Path) -> AppResult<()> {
     Ok(())
 }
 
-/// Generate the JSON Schema for `repos.toml` and write it alongside the config
-/// file so editors (Taplo / VS Code "Even Better TOML") pick it up via the
-/// `#:schema` directive in the starter template.
+/// Editors find it through the starter template's `#:schema` directive.
 pub fn write_schema(path: &Path) -> AppResult<()> {
     let schema = schema_for!(RepoRegistry);
     let json = serde_json::to_string_pretty(&schema)?;
@@ -258,8 +233,6 @@ pub fn write_schema(path: &Path) -> AppResult<()> {
     Ok(())
 }
 
-/// Starter `repos.toml` content written when the user clicks "Open repos.toml"
-/// and the file doesn't yet exist.
 pub fn starter_template() -> &'static str {
     r##"#:schema ./repos.schema.json
 # Tethys repo registry. Add one [[repo]] block per repo you want to work on.

@@ -1,11 +1,6 @@
 import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 
-/**
- * Re-exported so this module is genuinely the only file importing from
- * `@tauri-apps/api/core` — the rule is easier to keep than "only `invoke`
- * comes from there, `Channel` is fine". `convertFileSrc` turns a path into
- * an `asset://` URL the Page iframe can load.
- */
+/** Re-exported so this stays the only importer of `@tauri-apps/api/core`. */
 export { Channel, convertFileSrc };
 
 import type {
@@ -28,29 +23,10 @@ import type {
 } from "../types";
 
 /**
- * The one place that talks to the Tauri command layer.
- *
- * Two things this buys, neither of which is depth — the wrappers are one line
- * over one line, and that is fine, because what's wanted here is a *seam*:
- *
- * 1. It is the only importer of `@tauri-apps/api/core`. Six files used to
- *    import `invoke` directly, which meant no component in this app could be
- *    rendered in a test at all. Swap this module and they can be.
- *
- * 2. The calling convention is stated once per command instead of being
- *    remembered at every call site. Tauri commands here come in two
- *    incompatible shapes — flat auto-camelCased arguments, and a wrapped
- *    `args:` struct with snake_case fields inside — and nothing marked which
- *    was which. Both appeared ten lines apart in the same function. Get it
- *    wrong and TypeScript says nothing; you get a rejected promise at
- *    runtime.
- *
- * `scripts/check-ipc-parity.mjs` asserts these names match the Rust
- * `#[tauri::command]` set, so a rename on that side fails here instead of at
- * runtime.
+ * The seam over the Tauri command layer. Each wrapper fixes its command's
+ * calling convention — flat camelCased arguments or a wrapped snake_case
+ * `args` struct — which TypeScript can't check at the call site.
  */
-
-// ── workspaces ─────────────────────────────────────────────────────────────
 
 export const listWorkspaces = () => invoke<Workspace[]>("list_workspaces");
 
@@ -77,24 +53,17 @@ export const listArtifacts = (workspaceId: WorkspaceId) =>
 export const dismissArtifact = (workspaceId: WorkspaceId, artifactId: string) =>
   invoke<void>("dismiss_artifact", { workspaceId, artifactId });
 
-/** Open a Page artifact in the default browser. */
 export const openArtifact = (workspaceId: WorkspaceId, artifactId: string) =>
   invoke<void>("open_artifact", { workspaceId, artifactId });
 
-/**
- * Show the embedded GitHub PR webview over `rect` (logical pixels in the main
- * window), navigating it to `url`. The child webview floats above the DOM, so
- * the caller re-sends its rectangle on every layout change. See `pr_view.rs`.
- */
-/** `rect` is in viewport coordinates; `viewportHeight` is `window.innerHeight`,
- *  which Rust needs to translate them into the window's content view. */
+/** `rect` is in viewport coordinates; Rust needs `viewportHeight` to map them
+ *  into the window's content view. */
 export const showPrView = (
   url: string,
   rect: { x: number; y: number; width: number; height: number },
   viewportHeight: number,
 ) => invoke<void>("show_pr_view", { url, ...rect, viewportHeight });
 
-/** Hide the embedded PR webview (a non-PR tab is showing, or the panel closed). */
 export const hidePrView = () => invoke<void>("hide_pr_view");
 
 /** `blockerId: null` clears the link. Rejects on a cycle. */
@@ -108,8 +77,6 @@ export const setWorkspaceBlocker = (
 
 export const openInVscode = (id: WorkspaceId) =>
   invoke<void>("open_in_vscode", { id });
-
-// ── folders ────────────────────────────────────────────────────────────────
 
 export const listFolders = () => invoke<Folder[]>("list_folders");
 
@@ -131,8 +98,7 @@ export const setFolderCollapsed = (folderId: FolderId, collapsed: boolean) =>
 export const reorderFolders = (ids: FolderId[]) =>
   invoke<void>("reorder_folders", { ids });
 
-/** `folder: null` files them into Default. A blocker stack moves as a unit,
- *  so this normally carries every id in the stack at once. */
+/** `folder: null` is Default. */
 export const moveWorkspacesToFolder = (
   workspaceIds: WorkspaceId[],
   folder: FolderId | null,
@@ -141,21 +107,15 @@ export const moveWorkspacesToFolder = (
     args: { workspace_ids: workspaceIds, folder },
   });
 
-// ── the workspace's agent session ──────────────────────────────────────────
-
-/** `null` when the workspace's session is dormant (or never started). */
 export const getSession = (workspaceId: WorkspaceId) =>
   invoke<SessionInfo | null>("get_session", { workspaceId });
 
-/** Reattach, resume, or start fresh — whichever the session's state calls
- *  for. The one call behind Start, Resume and Reconnect alike. */
+/** Reattach, resume, or start fresh — whichever the session's state calls for. */
 export const startAgentSession = (workspaceId: WorkspaceId) =>
   invoke<SessionInfo>("start_agent_session", { workspaceId });
 
-/** Change the workspace's agent and/or binary and restart its session under
- *  it. The conversation survives a switch between binaries of the same agent;
- *  switching agent starts a fresh one, since neither CLI can read the other's
- *  transcript. */
+/** Switching across agents starts a fresh conversation; neither CLI can read
+ *  the other's transcript. */
 export const switchAgent = (
   workspaceId: WorkspaceId,
   agent: Agent,
@@ -172,8 +132,6 @@ export const switchAgent = (
 export const acknowledgeSessionTurn = (workspaceId: WorkspaceId) =>
   invoke<void>("acknowledge_session_turn", { workspaceId });
 
-// ── session pty ────────────────────────────────────────────────────────────
-
 export const attachSession = (
   sessionId: string,
   onBytes: Channel<ArrayBuffer>,
@@ -187,8 +145,6 @@ export const sendInput = (sessionId: string, data: number[]) =>
 
 export const resizeSession = (sessionId: string, cols: number, rows: number) =>
   invoke<void>("resize_session", { sessionId, cols, rows });
-
-// ── github ─────────────────────────────────────────────────────────────────
 
 export const githubAuthStatus = () =>
   invoke<GithubAuthSnapshot>("github_auth_status");
@@ -218,8 +174,6 @@ export const detachPr = (
     },
   });
 
-// ── registry / system status ───────────────────────────────────────────────
-
 export const registryStatus = () => invoke<RegistryStatus>("registry_status");
 
 export const listDiscrepancies = () =>
@@ -247,7 +201,6 @@ export const removeOrphanDir = (path: string) =>
 
 export const runPurgeNow = () => invoke<void>("run_purge_now");
 
-/** The Tethys-owned locations the Configuration panel can open. */
 export type ConfigLocation = "repos_config" | "worktree_root" | "clone_dir";
 
 export const openConfigLocation = (location: ConfigLocation) =>
@@ -255,24 +208,13 @@ export const openConfigLocation = (location: ConfigLocation) =>
 
 export const cloneDirPath = () => invoke<string>("clone_dir_path");
 
-// ── misc ───────────────────────────────────────────────────────────────────
-
 export const getTheme = () => invoke<Theme | null>("get_theme");
 
 export const readClipboardFilePaths = () =>
   invoke<string[]>("read_clipboard_file_paths");
 
-// ── long-running jobs ──────────────────────────────────────────────────────
-
-/**
- * Commands that stream `JobEvent`s over a channel while they run. Driven by
- * `useBackendJob`, which needs the name and args as data rather than as a
- * call — hence the descriptor shape rather than a plain function.
- *
- * Both Rust commands take a single `args` struct, so the invoke payload is
- * `{ args: {…}, onEvent }` — the nesting is typed here so a call site can't
- * flatten it and find out from a runtime "missing required key args".
- */
+/** Descriptors rather than calls: `useBackendJob` needs the command name and
+ *  args as data. */
 export const jobs = {
   createWorkspace: (args: { args: CreateWorkspaceArgs }) => ({
     command: "create_workspace" as const,

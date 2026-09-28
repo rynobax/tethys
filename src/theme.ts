@@ -52,14 +52,6 @@ export function themeToXterm(theme: Theme): XtermTheme {
   };
 }
 
-/**
- * Map iTerm theme → app CSS custom properties.
- *
- * Some app roles don't exist in iTerm themes (sidebar vs content tint).
- * We synthesize those with `color-mix`, keeping the palette cohesive across
- * any theme. If a theme ends up with near-identical sidebar/content, bump
- * the delta here.
- */
 export function themeToCssVars(theme: Theme): Record<string, string> {
   const c = theme.colors;
   const a = c.ansi;

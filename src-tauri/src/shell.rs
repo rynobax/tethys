@@ -5,15 +5,8 @@ use tracing::{info, warn};
 
 use crate::error::{AppError, AppResult};
 
-/// Resolve `bin` to an absolute path by asking a login shell
-/// (`/bin/zsh -ilc 'which <bin>'`).
-///
-/// Desktop apps on macOS inherit a minimal `$PATH` — no nvm, volta, or
-/// Homebrew dirs — so every binary Tethys shells out to has to be found the
-/// way the user's own terminal would find it.
-///
-/// `install_hint` is the shell command to suggest when the binary is missing
-/// (e.g. `"brew install tmux"`); `None` gives generic advice.
+/// Asks a login shell because macOS desktop apps inherit a minimal `$PATH`
+/// without nvm, volta or Homebrew dirs.
 pub fn which(bin: &str, install_hint: Option<&str>) -> AppResult<PathBuf> {
     if bin.is_empty() || bin.contains(|c: char| c.is_whitespace() || c == '\'' || c == '"') {
         return Err(AppError::Other(format!("invalid binary name: {bin:?}")));
@@ -50,10 +43,8 @@ pub fn which(bin: &str, install_hint: Option<&str>) -> AppResult<PathBuf> {
     Ok(PathBuf::from(path))
 }
 
-/// Pull the actual command output from `which <bin>` after shell-integration
-/// noise. iTerm2 + zsh interactive mode prepends OSC escapes (ending in BEL
-/// `\x07`) before stdout gets piped to us — everything before the final BEL
-/// is preamble, not the path we want.
+/// Interactive zsh under iTerm2 prepends shell-integration OSC escapes, each
+/// ending in BEL; the path is whatever follows the last one.
 pub fn extract_path(raw: &str) -> String {
     let trimmed = match raw.rfind('\x07') {
         Some(idx) => &raw[idx + 1..],
@@ -77,8 +68,6 @@ mod tests {
         assert_eq!(extract_path(raw), "/Users/ryan/.local/bin/claude");
     }
 
-    /// Name validation runs before we ever spawn a shell, so these are the
-    /// one part of `which` that is testable without a login shell.
     #[test]
     fn rejects_names_that_could_break_out_of_the_which_command() {
         for bad in ["", "cla ude", "claude'", "claude\"", "claude; rm -rf /"] {

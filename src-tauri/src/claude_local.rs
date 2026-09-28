@@ -1,15 +1,8 @@
-//! Shared `.claude/settings.local.json` per repo: one file under
-//! `<data_dir>/symlinks/<repo-key>/settings.local.json` is symlinked into
-//! every worktree Tethys creates for that repo, so permission edits in any
-//! workspace propagate to all of them.
+//! Each repo has one shared `settings.local.json`, symlinked into every
+//! worktree of it so a permission granted in one workspace applies to all.
 //!
-//! For sessions started at the workspace *root* (parent of every repo's
-//! worktree subdir), we seed a `<workspace-root>/.claude/settings.local.json`
-//! at workspace-create time by union-merging each repo's permission lists.
-//! After that initial seed, the file belongs to the workspace — Claude (or
-//! you) may freely edit it. Tethys touches it again only to extend it with
-//! a newly-added repo's entries, and on purge to diff its contents against
-//! the per-repo files (so workspace-local grants can be merged back).
+//! The workspace root gets its own, seeded from the union of its repos' files.
+//! After seeding it's the workspace's to edit; Tethys only ever extends it.
 
 use std::path::Path;
 
@@ -23,26 +16,10 @@ use crate::error::{AppError, AppResult};
 use crate::job::JobTx;
 use crate::paths::Paths;
 
-/// Marker we write into the workspace-root settings.local.json so it's
-/// identifiable as Tethys-seeded. Unlike before, the file is *not*
-/// regenerated after seed — manual edits (and Claude's permission grants)
-/// are preserved.
 const SEEDED_MARKER: &str = "tethys (seeded on workspace create; safe to edit)";
 
-/// Ensure `<worktree>/.claude/settings.local.json` is a symlink to the
-/// repo's shared settings file, creating that file if it's the first
-/// worktree to touch it. The shared file is (re-)seeded on every worktree
-/// creation with a `sandbox.filesystem.allowWrite` grant for the repo's clone
-/// `.git` directory: every worktree's git metadata lives under there (in the
-/// app data dir) rather than beside the worktree, so without this grant Claude
-/// Code's sandbox denies routine git writes (index refresh, `add`, `commit`,
-/// branch tracking, push). Scoping to `.git` keeps the clone's source tree
-/// read-only. Claude Code unions these arrays across settings scopes, so the
-/// grant coexists with whatever Claude later writes to the same file.
-///
-/// If the worktree already has a real file there (e.g. the repo tracks one),
-/// leave it alone and warn — replacing it would show up as a git
-/// modification and discard committed content.
+/// A real file already at the link path (one the repo tracks) is left alone:
+/// replacing it would discard committed content.
 pub async fn install_symlink(
     worktree_path: &Path,
     paths: &Paths,
@@ -51,9 +28,8 @@ pub async fn install_symlink(
 ) -> AppResult<()> {
     let shared_path = paths.repo_shared_claude_local(repo_key);
     let mut shared = SettingsDoc::read(&shared_path).await?;
-    // Migrate files seeded by the earlier fix that granted the whole repos
-    // dir (which left the clone's source tree writable); the scoped `.git`
-    // grant below replaces it.
+    // Retire an older grant of the whole repos dir, which left clone sources
+    // writable.
     shared.revoke_write(&paths.repos_clone_dir());
     shared.allow_write(&paths.repo_git_dir(repo_key));
     shared.write_atomic(&shared_path).await?;
@@ -89,16 +65,6 @@ pub async fn install_symlink(
     Ok(())
 }
 
-/// Seed `<workspace_root>/.claude/settings.local.json` by union-merging
-/// `permissions.allow` / `deny` / `ask` from each repo's shared
-/// `settings.local.json`. File-glob entries that start with `./` are
-/// rewritten to be relative to the workspace root (prefixed with the repo
-/// key, which is also the worktree subdir name).
-///
-/// Called once at workspace create. After that, the file is owned by the
-/// workspace (Claude may write to it, the user may edit it) and Tethys only
-/// extends it via [`append_repo_to_workspace_root_settings`].
-/// Missing or unparseable per-repo files are skipped with a warning.
 pub async fn write_workspace_root_settings(
     workspace_root: &Path,
     repo_keys: &[String],
@@ -111,9 +77,6 @@ pub async fn write_workspace_root_settings(
     let mut root = SettingsDoc::new();
     root.set("_seededBy", Value::String(SEEDED_MARKER.into()));
 
-    // Merge each repo's shared entries in, rewritten to be relative to the
-    // workspace root. Order is repo order then file order, which the snapshot
-    // test relies on; `add_permission` dedupes.
     for repo_key in repo_keys {
         let repo_doc = SettingsDoc::read_lossy(&paths.repo_shared_claude_local(repo_key)).await;
         for category in PermissionCategory::ALL {
@@ -123,10 +86,6 @@ pub async fn write_workspace_root_settings(
         }
     }
 
-    // Sessions started at the workspace root run git against every repo's
-    // worktree, whose git dirs live under the app data dir — outside the
-    // sandbox's default writable set. Grant each repo's `.git` (see
-    // `install_symlink`).
     for repo_key in repo_keys {
         root.allow_write(&paths.repo_git_dir(repo_key));
     }
@@ -136,11 +95,6 @@ pub async fn write_workspace_root_settings(
     Ok(())
 }
 
-/// Extend an already-seeded `<workspace_root>/.claude/settings.local.json`
-/// with the permission entries of a newly-added repo. Reads the existing
-/// file, unions in the new repo's `allow` / `deny` / `ask` entries
-/// (deduplicated against what's already there), and writes it back.
-/// Any other keys / fields the user added to the file are preserved.
 pub async fn append_repo_to_workspace_root_settings(
     workspace_root: &Path,
     repo_key: &str,
@@ -169,7 +123,6 @@ pub async fn append_repo_to_workspace_root_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[tokio::test]
     async fn merges_dedupes_and_writes() {
@@ -279,10 +232,7 @@ mod tests {
                 .await
                 .unwrap();
         let parsed: Value = serde_json::from_str(&written).unwrap();
-        // No permissions block when nothing was found.
         assert!(parsed.get("permissions").is_none());
-        // The sandbox grant is still added — it's derived from the repo key,
-        // not from the (missing) per-repo settings file.
         let allow_write = parsed["sandbox"]["filesystem"]["allowWrite"]
             .as_array()
             .unwrap();
@@ -292,7 +242,6 @@ mod tests {
             Some(paths.repo_git_dir("never-symlinked").to_string_lossy().as_ref())
         );
     }
-
 
     #[tokio::test]
     async fn install_symlink_seeds_sandbox_git_dir_grant() {
@@ -321,7 +270,6 @@ mod tests {
             Some(paths.repo_git_dir("backend").to_string_lossy().as_ref())
         );
 
-        // The worktree's settings.local.json is a symlink to the shared file.
         let link = worktree.join(".claude/settings.local.json");
         assert_eq!(fs::read_link(&link).await.unwrap(), shared);
     }
@@ -332,7 +280,6 @@ mod tests {
         let paths = Paths {
             data_dir: tmp.path().to_path_buf(),
         };
-        // Pre-seed the shared file with the old over-broad grant.
         let shared = paths.repo_shared_claude_local("backend");
         fs::create_dir_all(shared.parent().unwrap()).await.unwrap();
         let mut root = SettingsDoc::new();

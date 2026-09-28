@@ -8,12 +8,8 @@ use tracing::{debug, error, info, warn};
 use crate::error::AppResult;
 use crate::sessions::SessionSupervisor;
 
-/// Payload sent by `tethys-hook` over the UDS. Defined once in the companion
-/// crate so the sender can't grow a field the receiver silently drops.
 pub use tethys_hook::HookMessage;
 
-/// Bind `hook.sock` and spawn an accept loop. If the socket already exists
-/// (prior run crashed without cleanup), remove it first.
 pub async fn start(
     socket_path: &Path,
     supervisor: Arc<SessionSupervisor>,

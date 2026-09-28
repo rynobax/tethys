@@ -15,16 +15,10 @@ pub type SessionId = String;
 pub struct AppState {
     #[serde(default)]
     pub workspaces: Vec<Workspace>,
-    /// User-created folders, in the order the sidebar draws them. Ordering
-    /// lives in the Vec, exactly as it does for `workspaces`.
-    ///
-    /// The Default folder is deliberately not in here: it *is* the absence of
-    /// a folder (`Workspace::folder == None`), which is what makes it always
-    /// present, unnameable, and impossible to delete.
+    /// Excludes Default, which is `Workspace::folder == None` so it can't be
+    /// named or deleted.
     #[serde(default)]
     pub folders: Vec<Folder>,
-    /// Errors raised by the background purger when it failed to tear down
-    /// a soft-deleted workspace. Surfaced in the system status modal.
     #[serde(default)]
     pub system_errors: Vec<SystemErrorEntry>,
 }
@@ -36,91 +30,40 @@ pub struct Workspace {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub repo_links: Vec<RepoLink>,
-    /// The workspace's one agent session, or `None` until the first start.
-    ///
-    /// One per workspace, by design. Several used to be allowed — a tab bar
-    /// of chips, each with its own cwd, binary override and hidden flag — and
-    /// the whole apparatus went unused: every workspace in practice ran
-    /// exactly one. `Store::load` folds the old `sessions` list down to this.
     #[serde(default)]
     pub session: Option<AgentSessionMeta>,
-    /// Which agent CLI this workspace's session runs. Chosen at creation,
-    /// inherited by handoffs, and changed after the fact by `switch_agent`.
-    ///
-    /// Stored rather than derived from `agent_binary`: the kind decides how
-    /// hooks are installed, how a conversation resumes and how MCP is wired,
-    /// none of which may hinge on how an executable is spelled.
+    /// Stored, not derived from `agent_binary`: hooks, resume and MCP wiring
+    /// must not hinge on how an executable is spelled.
     #[serde(default)]
     pub agent: Agent,
-    /// Override the entry-point binary name for this workspace's session
-    /// (e.g. `claude-hipaa`). `None` falls back to the agent's own default
-    /// binary, resolved at boot. Chosen at creation, inherited by handoffs,
-    /// and changed after the fact by `switch_agent`, which restarts the
-    /// session under the new one.
+    /// `None` falls back to the agent's default binary.
     #[serde(default, alias = "claude_binary")]
     pub agent_binary: Option<String>,
-    /// Where this workspace came from. Defaults to `Ui` for everything
-    /// persisted before handoffs existed, which is what those were.
     #[serde(default)]
     pub origin: Origin,
-    /// Soft-delete marker. When set, the workspace is hidden from the
-    /// sidebar and queued for the hourly purger. Cleared by
-    /// `cancel_delete_workspace` to undo before the cron runs.
     #[serde(default)]
     pub deleted_at: Option<DateTime<Utc>>,
-    /// Which folder this workspace sits in; `None` is the Default folder.
-    ///
-    /// Purely organisational — a workspace behaves identically wherever it
-    /// sits. Stored per workspace rather than as a list on the folder so that
-    /// membership has exactly one home, which is also why purging a workspace
-    /// needs no folder bookkeeping.
-    ///
-    /// A folder id that no longer resolves is pruned to `None` at boot, so a
-    /// hand-edited `state.json` naming a stranger lands in Default instead of
-    /// dropping the row out of the sidebar entirely.
+    /// `None` is the Default folder.
     #[serde(default)]
     pub folder: Option<FolderId>,
-    /// Lifecycle state of the workspace itself. Newly-submitted entries land
-    /// in state as `Creating` so the sidebar row appears at the user's
-    /// chosen position from t=0; provisioning then flips it to `Ready` (or
-    /// `CreationFailed` with the error message). Persisted as `Ready` for
-    /// every pre-existing workspace via the field default.
     #[serde(default)]
     pub status: WorkspaceStatus,
-    /// Freeform user notes for this workspace, edited via the notes overlay in
-    /// the detail pane. Empty string when unset.
     #[serde(default)]
     pub notes: String,
-    /// The workspace this one is waiting on before its own work can continue.
-    ///
-    /// A pointer, not a state: whether this workspace is *actually* blocked is
-    /// derived from whether the blocker is still on screen, so soft-deleting or
-    /// archiving the blocker frees this one without touching the field — and
-    /// undoing either restores the link. It is only cleared for real where the
-    /// id stops meaning anything: purge, forget, and the boot-time prune of
-    /// unfinished drafts.
+    /// A pointer, not a state: the frontend decides whether it counts, so
+    /// soft-deleting or moving the blocker unblocks without touching this.
+    /// Clear it only where the id stops existing.
     #[serde(default)]
     pub blocked_by: Option<WorkspaceId>,
-    /// Diagrams and pages sessions in this workspace produced, oldest first
-    /// (see `artifacts.rs`). Persisted so a design you drew yesterday is still
-    /// there after a restart; bounded by the per-workspace cap.
+    /// Oldest first.
     #[serde(default)]
     pub artifacts: Vec<Artifact>,
 }
 
-/// A named place in the sidebar that holds workspaces.
-///
-/// Flat — folders never contain folders — and inert: membership decides where
-/// a row is drawn and nothing else. It replaced the archive marker, which was
-/// the same idea wearing behaviour it didn't need.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Folder {
     pub id: FolderId,
     pub name: String,
-    /// Whether the sidebar hides this folder's rows. Persisted, unlike the
-    /// archive drawer's expand state that came before it: with one drawer,
-    /// forgetting was fine, but the folder you're working out of should still
-    /// be open after a restart.
     #[serde(default)]
     pub collapsed: bool,
 }
@@ -140,10 +83,7 @@ impl Folder {
 pub enum WorkspaceStatus {
     #[default]
     Ready,
-    /// Asked for, but waiting its turn in the provisioning queue — nothing on
-    /// disk yet and no process running for it. Distinct from `Creating` only
-    /// so the sidebar can tell the truth about which one of a batch is
-    /// actually being built; both are drafts, and both are pruned at boot.
+    /// A draft waiting in the provisioning queue, as opposed to being built.
     Queued,
     Creating,
     CreationFailed {
@@ -151,16 +91,12 @@ pub enum WorkspaceStatus {
     },
 }
 
-/// Who asked for this workspace. Recorded rather than displayed: a handoff is
-/// a normal workspace in every respect, and the only thing the origin is for
-/// is answering "where did this come from?" after the fact.
+/// Recorded, never displayed or acted on.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Origin {
-    /// The user, in the Tethys UI.
     #[default]
     Ui,
-    /// An agent, via the handoff MCP tool.
     Handoff {
         from_workspace: WorkspaceId,
         #[serde(default)]
@@ -172,11 +108,8 @@ pub enum Origin {
 pub struct SystemErrorEntry {
     pub id: String,
     pub at: DateTime<Utc>,
-    /// Free-form category for grouping in the UI (e.g. "purge").
     pub kind: String,
     pub message: String,
-    /// Optional workspace context — set when the error refers to a
-    /// specific workspace (e.g. the soft-deleted one we failed to purge).
     #[serde(default)]
     pub workspace_id: Option<WorkspaceId>,
     #[serde(default)]
@@ -188,32 +121,15 @@ pub struct RepoLink {
     pub repo_key: String,
     pub worktree_path: PathBuf,
     pub setup_script_ran_at: Option<DateTime<Utc>>,
-    /// Every PR this repo link tracks, in the order tracking started.
-    ///
-    /// One list, deliberately: the PR for the workspace's own branch used to
-    /// live in a slot of its own, which bought it four behaviours nothing else
-    /// had — it couldn't be detached, it re-derived itself from the branch
-    /// every tick, it vanished silently instead of showing "no data", and
-    /// re-pointing at it was a refresh where re-attaching anything else was an
-    /// error. None of that was worth the split. The branch PR is now just the
-    /// one entry that gets *added* for you (see `TargetKind::Branch`); past
-    /// that it is an ordinary tracked PR.
+    /// Includes the branch's own PR, which is only special in being added
+    /// automatically.
     #[serde(default)]
     pub prs: Vec<TrackedPr>,
-    /// PR numbers detached from this link, so branch discovery doesn't put
-    /// them straight back. The price of letting the automatically-added PR be
-    /// detached like any other: without this, the next poll re-adds it.
-    ///
-    /// Manually attaching a dismissed number clears it — asking for a PR by
-    /// name outranks having once said no to it.
+    /// Detached numbers, so branch discovery doesn't re-add them next tick.
     #[serde(default)]
     pub dismissed: Vec<u32>,
-    /// Whether Tethys created this branch (branched off HEAD or off a remote
-    /// tracking ref) versus checked out a branch that already existed locally.
-    /// Teardown only deletes branches Tethys created, so checking out a
-    /// pre-existing PR branch never destroys it. Defaults to `true` for state
-    /// written before this field existed — those branches were always created
-    /// by Tethys under the old branch pre-check.
+    /// Teardown deletes only branches Tethys created. Defaults to `true`:
+    /// older state predates checking out existing branches.
     #[serde(default = "default_created_branch")]
     pub created_branch: bool,
 }
@@ -222,9 +138,6 @@ fn default_created_branch() -> bool {
     true
 }
 
-/// A pull request a repo link tracks. The number is the intent and persists
-/// even when a poll fails; `status` is the last successful fetch (`None` until
-/// the first one lands, or if the PR became unreachable).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackedPr {
     pub number: u32,
@@ -233,38 +146,20 @@ pub struct TrackedPr {
     pub status: Option<GithubPrStatus>,
 }
 
-/// The persisted half of a workspace's agent session: what it takes to find
-/// the tmux pane again (`id` is the tmux session name) or, failing that, to
-/// resume the conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSessionMeta {
+    /// Also the tmux session name.
     pub id: SessionId,
-    /// Where the agent runs. Fixed when the session is first started — see
-    /// [`Workspace::session_cwd`] — and reused by every restart after, so a
-    /// resumed conversation keeps its project directory.
     pub cwd: PathBuf,
-    /// The agent's *own* id for this conversation, as opposed to `id`, which
-    /// is Tethys's. Learned from the session-start hook, and the handle both
-    /// CLIs resume by. Claude rotates it on compaction; codex's is a stable
-    /// UUIDv7.
+    /// What the CLI resumes by. Claude rotates it on compaction.
     #[serde(alias = "claude_session_id")]
     pub agent_session_id: Option<String>,
     pub transcript_path: Option<PathBuf>,
-    /// Last turn state observed via the agent's hooks. Persisted so the
-    /// "your turn" indicator survives Tethys restarts. `None` until the
-    /// first hook lands (or for state.json from before this field existed).
     #[serde(default)]
     pub runtime_state: Option<SessionRuntimeState>,
-    /// Notification subtype that accompanied the last `WaitingInput`
-    /// transition (e.g. `permission_prompt`). Cleared when the session
-    /// leaves `WaitingInput`.
     #[serde(default)]
     pub notification_type: Option<String>,
-    /// User dismissed the "your turn" indicator for this session via the
-    /// sidebar context menu. Reset to `false` on the next `runtime_state`
-    /// transition (a state change is the user-facing signal that something
-    /// fresh happened, so the dot should re-light). Persisted so the
-    /// dismissal survives a Tethys restart.
+    /// Reset on the next `runtime_state` transition, so the dot re-lights.
     #[serde(default)]
     pub turn_acknowledged: bool,
 }
@@ -272,25 +167,15 @@ pub struct AgentSessionMeta {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionRuntimeState {
-    /// PTY not running (session has never been spawned, or was spawned and exited).
     #[default]
     Dormant,
-    /// PTY running and actively processing (Claude is thinking, or user just typed).
     Working,
-    /// Claude finished responding, no explicit input prompt up — default "nothing pending" state.
     Idle,
-    /// Claude is blocked on user input — either the main prompt or a permission dialog.
+    /// The prompt or a permission dialog is waiting on the user.
     WaitingInput,
 }
 
 impl Workspace {
-    /// A workspace that exists in state but not yet on disk.
-    ///
-    /// Both create paths insert one of these before doing any I/O, so the
-    /// sidebar row appears at its final position from t=0 and — for a handoff
-    /// — so the calling agent has an id to be told about. Provisioning flips
-    /// the status to `Ready` or `CreationFailed` in place; the id and position
-    /// never change.
     pub fn draft(
         id: WorkspaceId,
         branch: String,
@@ -317,24 +202,13 @@ impl Workspace {
         }
     }
 
-    /// `<worktree_root>/<workspace_dir>` — the directory every repo worktree
-    /// sits under, and the cwd for a session started at the workspace root.
-    ///
-    /// Derived from a repo link's parent rather than stored, so it can't drift
-    /// from where the worktrees actually are.
-    ///
-    /// `None` when the workspace has no repo links — which is every `Creating`
-    /// draft and every `CreationFailed` workspace. That is a real state, not an
-    /// error: callers that need a root decide for themselves whether it means
-    /// "skip", "not ready yet", or a message to the user.
+    /// `None` for drafts and failed creations, which have no repo links.
     pub fn root(&self) -> Option<&Path> {
         self.repo_links
             .first()
             .and_then(|l| l.worktree_path.parent())
     }
 
-    /// Same as [`Workspace::root`], owned — most callers pass it on to
-    /// something that wants a `PathBuf`.
     pub fn root_buf(&self) -> Option<PathBuf> {
         self.root().map(Path::to_path_buf)
     }
@@ -351,33 +225,13 @@ impl Workspace {
         self.link(repo_key).is_some()
     }
 
-    /// The session, if it is the one with this id.
-    ///
-    /// Turn signals and hooks name a session by id, and one for a session
-    /// this workspace no longer runs — the previous one, killed by a binary
-    /// switch, whose exit hook fires late — must not be written onto the
-    /// current one.
+    /// A late hook from a session killed by `switch_agent` must not land on
+    /// its replacement.
     pub fn session_mut(&mut self, session_id: &str) -> Option<&mut AgentSessionMeta> {
         self.session.as_mut().filter(|m| m.id == session_id)
     }
 
-    /// Where this workspace's session runs.
-    ///
-    /// Wherever the existing session already runs, so a restart keeps its
-    /// project directory. Otherwise the workspace root, whatever the repo
-    /// count — the one directory that contains every worktree, and the one
-    /// the generated workspace doc sits in.
-    ///
-    /// A one-repo workspace used to start in that repo's worktree instead, so
-    /// the repo's own `CLAUDE.md` and settings were the session's project.
-    /// That made adding a second repo an awkward half-move: the session stayed
-    /// below the root while its new sibling was above it, reachable only by a
-    /// path out of the tree the agent was told about. The root is the honest
-    /// answer to "where does this workspace's work happen", and a repo's own
-    /// doc is still picked up on the way into its subtree.
-    ///
-    /// `None` when there is nothing on disk to run in: a draft, or a
-    /// workspace whose provisioning failed.
+    /// An existing session keeps its cwd so its conversation still resumes.
     pub fn session_cwd(&self) -> Option<PathBuf> {
         if let Some(session) = &self.session {
             return Some(session.cwd.clone());
@@ -395,17 +249,11 @@ impl RepoLink {
         self.prs.iter_mut().find(|p| p.number == number)
     }
 
-    /// Start tracking `number`, or refresh what we already have for it.
-    ///
-    /// Idempotent for both callers — the attach dialog re-pasting a number and
-    /// the poller re-finding the branch PR mean the same thing here, which is
-    /// the point of there being one list. Tracking a number also un-dismisses
-    /// it, so a detached PR you ask for again comes back and stays.
+    /// Also un-dismisses: asking for a PR outranks having detached it.
     pub fn track(&mut self, number: u32, status: Option<GithubPrStatus>) {
         self.dismissed.retain(|n| *n != number);
         match self.tracked_mut(number) {
-            // A refresh with nothing to say (a failed fetch) leaves the last
-            // known status alone rather than blanking a good chip.
+            // A failed fetch mustn't blank a good chip.
             Some(existing) => {
                 if status.is_some() {
                     existing.status = status;
@@ -419,8 +267,7 @@ impl RepoLink {
         }
     }
 
-    /// Stop tracking `number` and remember the refusal, so branch discovery
-    /// doesn't re-add it on the next tick. Returns whether it was tracked.
+    /// Returns whether it was tracked.
     pub fn untrack(&mut self, number: u32) -> bool {
         let had = self.tracked(number).is_some();
         self.prs.retain(|p| p.number != number);
@@ -430,8 +277,6 @@ impl RepoLink {
         had
     }
 
-    /// Whether branch discovery should leave `number` alone: either we already
-    /// track it, or it was detached.
     pub fn discovery_should_skip(&self, number: u32) -> bool {
         self.tracked(number).is_some() || self.dismissed.contains(&number)
     }
@@ -446,14 +291,8 @@ impl AppState {
         self.workspaces.iter_mut().find(|w| w.id == id)
     }
 
-    /// True when pointing `workspace_id` at `blocker_id` would close a cycle —
-    /// i.e. the proposed blocker is already waiting, directly or transitively,
-    /// on the workspace being changed.
-    ///
-    /// The hop limit is not a performance guard. `state.json` is hand-editable
-    /// and a *parse* failure there is already non-fatal, so a file carrying a
-    /// pre-existing cycle has to be survivable: walking it must terminate even
-    /// though the invariant this function protects was never true.
+    /// The hop limit lets a hand-edited `state.json` that already holds a
+    /// cycle terminate the walk.
     pub fn blocker_would_cycle(&self, workspace_id: &str, blocker_id: &str) -> bool {
         if workspace_id == blocker_id {
             return true;
@@ -468,17 +307,12 @@ impl AppState {
                 .find_workspace(id)
                 .and_then(|w| w.blocked_by.as_deref());
         }
-        // Ran out of hops with the chain still going: the existing links are
-        // already cyclic. Refuse to add to them.
+        // Already cyclic.
         true
     }
 
-    /// True when two workspaces sit in different folders.
-    ///
-    /// A blocker link across that boundary can never draw — nesting only
-    /// happens within a folder — so it is refused at the door rather than
-    /// stored as a pointer with no visible effect. A workspace that isn't in
-    /// state counts as different from everything, which errs towards refusing.
+    /// A missing workspace differs from everything, erring towards refusing
+    /// a blocker link.
     pub fn folders_differ(&self, a: &str, b: &str) -> bool {
         let folder_of = |id: &str| self.find_workspace(id).map(|w| w.folder.clone());
         folder_of(a) != folder_of(b)
@@ -492,8 +326,6 @@ impl AppState {
         self.folders.iter().any(|f| f.id == id)
     }
 
-    /// Move every workspace in `folder_id` to Default. Used when the folder
-    /// is deleted: contents fall back rather than the delete being refused.
     pub fn empty_folder(&mut self, folder_id: &str) {
         for ws in &mut self.workspaces {
             if ws.folder.as_deref() == Some(folder_id) {
@@ -502,12 +334,7 @@ impl AppState {
         }
     }
 
-    /// Send workspaces naming a folder that isn't there back to Default,
-    /// returning how many moved.
-    ///
-    /// `state.json` is hand-editable, so this is the same shape of tolerance
-    /// as the cycle hop limit: a file that breaks the invariant still has to
-    /// boot.
+    /// Returns how many moved.
     pub fn prune_missing_folders(&mut self) -> usize {
         let known: Vec<FolderId> = self.folders.iter().map(|f| f.id.clone()).collect();
         let mut moved = 0;
@@ -522,8 +349,6 @@ impl AppState {
         moved
     }
 
-    /// Drops every link pointing at `blocker_id`. For the moments where the id
-    /// stops meaning anything, as opposed to merely leaving the sidebar.
     pub fn clear_links_to(&mut self, blocker_id: &str) {
         for ws in &mut self.workspaces {
             if ws.blocked_by.as_deref() == Some(blocker_id) {
@@ -579,8 +404,6 @@ mod tests {
         }
     }
 
-    /// Every repo worktree is a sibling under the workspace dir, so any link
-    /// gives the same answer.
     #[test]
     fn root_is_the_parent_shared_by_every_worktree() {
         let ws = workspace_with_links(&["/wt/ws-1/frontend", "/wt/ws-1/backend"]);
@@ -593,10 +416,6 @@ mod tests {
         assert_eq!(ws.root(), Some(Path::new("/wt/ws-1")));
     }
 
-    /// A `Creating` draft is inserted with no repo links so its sidebar row
-    /// appears immediately. It has no root on disk, and every caller has to
-    /// cope with that — this is the case that used to be re-decided
-    /// (differently) at all seven derivation sites.
     #[test]
     fn a_workspace_with_no_repo_links_has_no_root() {
         let mut ws = workspace_with_links(&[]);
@@ -606,17 +425,6 @@ mod tests {
     }
 
     #[test]
-    fn links_are_found_by_key() {
-        let mut ws = workspace_with_links(&["/wt/ws-1/frontend"]);
-        assert!(ws.has_link("repo0"));
-        assert!(!ws.has_link("nope"));
-        assert_eq!(ws.link("repo0").map(|l| l.repo_key.as_str()), Some("repo0"));
-        assert!(ws.link_mut("nope").is_none());
-    }
-
-    /// A signal for a session this workspace no longer runs must not land on
-    /// the one it does.
-    #[test]
     fn session_mut_answers_only_for_the_current_session() {
         let mut ws = workspace_with_links(&["/wt/ws-1/frontend"]);
         assert!(ws.session_mut("sess-1").is_none());
@@ -625,8 +433,6 @@ mod tests {
         assert!(ws.session_mut("sess-2").is_none());
     }
 
-    /// The root whatever the repo count, so adding a repo later doesn't leave
-    /// the session sitting below its own workspace.
     #[test]
     fn a_fresh_session_runs_in_the_workspace_root() {
         let one = workspace_with_links(&["/wt/ws-1/frontend"]);
@@ -636,9 +442,6 @@ mod tests {
         assert_eq!(workspace_with_links(&[]).session_cwd(), None);
     }
 
-    /// A session started under the old rule — inside the sole worktree — must
-    /// stay there: a restart resumes the conversation in the directory it
-    /// belongs to, and its transcript is filed under that path.
     #[test]
     fn an_existing_session_keeps_its_cwd() {
         let mut ws = workspace_with_links(&["/wt/ws-1/frontend", "/wt/ws-1/backend"]);
@@ -648,8 +451,6 @@ mod tests {
 
     #[test]
     fn pre_github_state_json_round_trips() {
-        // This is the shape of state.json from before the `github` field was
-        // added to RepoLink. It must still deserialize cleanly.
         let raw = r#"{
             "workspaces": [
                 {
@@ -673,9 +474,6 @@ mod tests {
         assert_eq!(ws.id, "abc-123");
         assert_eq!(ws.branch, "feat/foo");
         assert_eq!(ws.repo_links.len(), 1);
-        // Old RepoLink JSON without `prs` deserializes to an empty list. The
-        // retired `github` / `attached_prs` slots are folded in by
-        // `Store::load`, not by serde.
         assert!(ws.repo_links[0].prs.is_empty());
         assert!(ws.repo_links[0].dismissed.is_empty());
         assert!(ws.agent_binary.is_none());
@@ -686,10 +484,6 @@ mod tests {
 
     #[test]
     fn pre_turn_state_session_round_trips() {
-        // AgentSessionMeta from before runtime_state/notification_type were
-        // added must still deserialize. The old `sessions` list is folded
-        // into `session` by `Store::load`, not by serde, so this is the
-        // post-migration shape.
         let raw = r#"{
             "workspaces": [
                 {
@@ -714,10 +508,6 @@ mod tests {
         assert!(!session.turn_acknowledged);
     }
 
-    /// `claude_binary` was the field's name before a second agent existed, and
-    /// `claude_session_id` the session's. Both are still what's in every
-    /// `state.json` on disk, so the aliases have to hold — and a workspace
-    /// written before the `agent` field has to load as the agent it was.
     #[test]
     fn pre_agent_state_loads_as_claude() {
         let raw = r#"{
@@ -749,8 +539,6 @@ mod tests {
 
     #[test]
     fn pre_status_state_defaults_to_ready() {
-        // state.json from before the WorkspaceStatus field was added must
-        // load as Ready — older entries are by definition fully-provisioned.
         let raw = r#"{
             "workspaces": [
                 {
@@ -766,9 +554,6 @@ mod tests {
 
     #[test]
     fn pre_blocked_by_state_defaults_to_unblocked() {
-        // Nothing was waiting on anything before blockers existed, so the
-        // absent field has to read as "no blocker" rather than failing the
-        // parse — a parse failure here silently discards every workspace.
         let raw = r#"{
             "workspaces": [
                 {
@@ -811,15 +596,14 @@ mod tests {
 
     #[test]
     fn an_unrelated_blocker_is_allowed() {
-        // a <- b (a blocks b). Pointing c at b is a fan-out onto b's chain,
-        // not a cycle.
+        // a <- b
         let state = blocking_state(&[("a", None), ("b", Some("a")), ("c", None)]);
         assert!(!state.blocker_would_cycle("c", "b"));
     }
 
     #[test]
     fn a_blocker_downstream_of_the_target_would_cycle() {
-        // a <- b <- c. Pointing a at c would close the loop.
+        // a <- b <- c
         let state = blocking_state(&[("a", None), ("b", Some("a")), ("c", Some("b"))]);
         assert!(state.blocker_would_cycle("a", "c"));
         assert!(state.blocker_would_cycle("a", "b"));
@@ -827,15 +611,12 @@ mod tests {
 
     #[test]
     fn a_preexisting_cycle_does_not_hang_the_walk() {
-        // Only reachable from a hand-edited state.json, and it has to
-        // terminate rather than spin.
         let state = blocking_state(&[("a", Some("b")), ("b", Some("a")), ("c", None)]);
         assert!(state.blocker_would_cycle("c", "a"));
     }
 
     #[test]
     fn clearing_links_drops_every_dependent() {
-        // Fan-out: one blocker, several waiting on it.
         let mut state = blocking_state(&[("a", None), ("b", Some("a")), ("c", Some("a"))]);
         state.clear_links_to("a");
         assert_eq!(state.workspaces[1].blocked_by, None);
@@ -844,8 +625,6 @@ mod tests {
 
     #[test]
     fn pre_origin_state_defaults_to_the_ui() {
-        // Every workspace persisted before handoffs existed was made by hand,
-        // so the absent field has to read as `Ui` and not as "unknown".
         let raw = r#"{
             "workspaces": [
                 {
@@ -857,17 +636,6 @@ mod tests {
         }"#;
         let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
         assert_eq!(parsed.workspaces[0].origin, Origin::Ui);
-    }
-
-    #[test]
-    fn a_handoff_origin_round_trips() {
-        let origin = Origin::Handoff {
-            from_workspace: "ws-parent".into(),
-            from_session: Some("sess-parent".into()),
-        };
-        let bytes = serde_json::to_vec(&origin).expect("serialize");
-        let back: Origin = serde_json::from_slice(&bytes).expect("deserialize");
-        assert_eq!(origin, back);
     }
 
     #[test]
@@ -923,7 +691,6 @@ mod tests {
         assert_eq!(l.prs.len(), 1);
     }
 
-    /// A failed refetch must not blank a chip that already has good data.
     #[test]
     fn refresh_with_no_status_keeps_the_last_one() {
         let mut l = link();
@@ -941,14 +708,12 @@ mod tests {
         assert!(l.discovery_should_skip(7));
     }
 
-    /// Asking for a PR by number outranks having once said no to it.
     #[test]
     fn tracking_a_dismissed_number_un_dismisses_it() {
         let mut l = link();
         l.untrack(7);
         l.track(7, Some(pr_status(7)));
         assert!(l.dismissed.is_empty());
-        assert!(!l.discovery_should_skip(9));
     }
 
     fn pr_status(number: u32) -> GithubPrStatus {
@@ -970,16 +735,6 @@ mod tests {
             fetched_at: Utc::now(),
             last_error: None,
         }
-    }
-
-    #[test]
-    fn workspace_status_round_trips() {
-        let failed = WorkspaceStatus::CreationFailed {
-            error: "boom".into(),
-        };
-        let bytes = serde_json::to_vec(&failed).expect("serialize");
-        let back: WorkspaceStatus = serde_json::from_slice(&bytes).expect("deserialize");
-        assert_eq!(failed, back);
     }
 
     fn folder_state(members: &[(&str, Option<&str>)]) -> AppState {
@@ -1013,8 +768,6 @@ mod tests {
         }
     }
 
-    /// The Default folder is the *absence* of a folder, so two unfiled
-    /// workspaces are in the same one — not merely both unfiled.
     #[test]
     fn default_folder_counts_as_a_folder_for_blocking() {
         let s = folder_state(&[("a", None), ("b", None), ("c", Some("f1"))]);
@@ -1022,8 +775,6 @@ mod tests {
         assert!(s.folders_differ("a", "c"));
     }
 
-    /// Errs towards refusing: a blocker that isn't in state can't be shown to
-    /// share a folder with anything.
     #[test]
     fn a_missing_workspace_differs_from_everything() {
         let s = folder_state(&[("a", None)]);

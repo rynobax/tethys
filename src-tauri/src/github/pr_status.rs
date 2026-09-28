@@ -1,13 +1,4 @@
-//! The GitHub PR status codec: build the GraphQL query, project the response
-//! onto `GithubPrStatus`, and apply the results to `AppState`.
-//!
-//! Split out of `poller.rs` because these two halves have opposite testing
-//! stories. Everything here is a free function over `&Value` / `&mut AppState`
-//! — no network, no `AppHandle` — and it carries the 30-odd tests that encode
-//! the hard-won rules: bugbot split out of the CI rollup, `mergeable: UNKNOWN`
-//! not flashing red, the null-`reviewDecision` fallback for unprotected repos.
-//! The polling loop next door is the part that needed seams before it could be
-//! tested at all.
+//! Build the PR GraphQL query, parse the response, and apply it to `AppState`.
 
 use std::collections::BTreeMap;
 
@@ -28,29 +19,17 @@ pub struct Target {
     pub kind: TargetKind,
 }
 
-/// What a target asks GitHub for. The two are asymmetric on purpose, and the
-/// asymmetry is the *only* place the workspace's own branch is special:
-/// `Branch` finds out which PR to track, and `Pr` is what every tracked PR —
-/// however it got there — is polled with afterwards.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetKind {
-    /// Look up the PR for a workspace's branch. Yields a number, not a status:
-    /// tracking it is the automatic equivalent of typing that number into the
-    /// attach dialog, and the status arrives the same way it does for a PR you
-    /// attached by hand.
+    /// Finds which PR number to track; yields no status.
     Branch(String),
-    /// Fetch status for a PR the link already tracks.
     Pr(u32),
 }
 
-/// What one target came back with.
 #[derive(Debug, Clone)]
 pub enum PollOutcome {
-    /// The PR number GitHub associates with the branch; `None` when the branch
-    /// has no PR at all.
     Discovered(Option<u32>),
-    /// A tracked PR's status. `None` means the PR became unreachable — the
-    /// number stays tracked, and the chip says so.
+    /// `None`: unreachable, but still tracked.
     Status {
         number: u32,
         status: Option<GithubPrStatus>,
@@ -64,8 +43,6 @@ pub struct PollResult {
     pub outcome: PollOutcome,
 }
 
-/// A PR number a branch scan turned up that the link wasn't tracking yet.
-/// Carries no status — the poller fetches that in the same tick.
 #[derive(Debug, Clone)]
 pub struct Discovery {
     pub workspace_id: WorkspaceId,
@@ -73,12 +50,6 @@ pub struct Discovery {
     pub number: u32,
 }
 
-/// What one pass over the poll results did: the status changes worth telling
-/// the UI about, and the numbers this pass started tracking.
-///
-/// The two travel together because they come from one `&mut AppState` pass —
-/// splitting them into a mutate and a read would leave a window where a PR is
-/// tracked but nothing has been asked to fetch it.
 #[derive(Debug, Clone, Default)]
 pub struct Applied {
     pub changed: Vec<PollResult>,
@@ -86,9 +57,7 @@ pub struct Applied {
 }
 
 impl PollResult {
-    /// Payload for `github:status_changed`. `pr_number` always names the PR
-    /// the status belongs to — there is no longer a slot to disambiguate.
-    /// Discovery results have no status and never produce an event.
+    /// Payload for `github:status_changed`.
     pub fn event(&self) -> Option<Value> {
         let PollOutcome::Status { number, status } = &self.outcome else {
             return None;
@@ -107,8 +76,6 @@ pub fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
     let mut var_decls = Vec::new();
     let mut body = String::new();
 
-    // Selection set for a tracked PR. Every PR goes through this, whether it
-    // was attached by hand or discovered from the workspace's branch.
     const PR_FIELDS: &str = r#"number
           url
           state
@@ -184,13 +151,8 @@ pub fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
                 var_decls.push(format!(
                     "${ow}: String!, ${nm}: String!, ${br}: String!, ${bn}: String!"
                 ));
-                // Just the number: this is a lookup, not a status fetch. The
-                // full selection below is pulled per *tracked* PR, so asking
-                // for it here as well would fetch the same PR twice a tick.
-                //
-                // `mergedPrs` is the fallback for when the branch has been
-                // deleted post-merge: GitHub nulls the `ref`, but the PR record
-                // persists and is queryable by headRefName.
+                // Number only: the full selection is fetched per tracked PR.
+                // `mergedPrs` covers a branch deleted on merge, whose `ref` is null.
                 body.push_str(&format!(
                     r#"q{i}: repository(owner: ${ow}, name: ${nm}) {{
     ref(qualifiedName: ${br}) {{
@@ -209,10 +171,7 @@ pub fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
 "#
                 ));
             }
-            // The number is inlined rather than passed as a variable: `gh api
-            // graphql -f` only sends strings, and GitHub's `number` argument is
-            // an `Int!`. It's a `u32` we parsed ourselves, so there's nothing
-            // to inject.
+            // Inlined: `-f` only sends strings and `number` is an `Int!`.
             TargetKind::Pr(number) => {
                 var_decls.push(format!("${ow}: String!, ${nm}: String!"));
                 body.push_str(&format!(
@@ -256,7 +215,6 @@ pub fn parse_response(targets: &[Target], data: &Value) -> Vec<PollResult> {
 }
 
 fn parse_branch_pr_number(repo: &Value) -> Option<u32> {
-    /// First PR number out of a `{ nodes: [{ number }] }` connection.
     fn first_number(connection: Option<&Value>) -> Option<u32> {
         connection?
             .get("nodes")?
@@ -267,9 +225,6 @@ fn parse_branch_pr_number(repo: &Value) -> Option<u32> {
             .map(|n| n as u32)
     }
 
-    // Prefer the PR associated with the live branch ref. If the branch was
-    // deleted on merge, `ref` will be null — fall back to the most recent
-    // merged/closed PR for that branch name.
     let assoc = repo
         .get("ref")
         .and_then(|r| r.get("associatedPullRequests"));
@@ -287,10 +242,7 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
     };
     let is_draft = pr.get("isDraft").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    // GitHub's `mergeable` is `MERGEABLE | CONFLICTING | UNKNOWN`. UNKNOWN
-    // shows up briefly after a push while GitHub computes the merge — only
-    // treat the explicit CONFLICTING signal as a conflict, so we don't flash
-    // a false-positive red square during recomputation.
+    // UNKNOWN is transient while GitHub recomputes after a push.
     let has_merge_conflicts = pr
         .get("mergeable")
         .and_then(|v| v.as_str())
@@ -302,19 +254,13 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
             Some("APPROVED") => ReviewDecision::Approved,
             Some("CHANGES_REQUESTED") => ReviewDecision::ChangesRequested,
             Some("REVIEW_REQUIRED") => ReviewDecision::ReviewRequired,
-            // Null whenever the base branch doesn't require reviews — GitHub
-            // has no verdict to report, but approvals still exist. Without
-            // this fallback the review square stays gray forever on every PR
-            // in an unprotected repo.
+            // Null when the base branch doesn't require reviews.
             _ => review_decision_from_reviews(pr),
         }
     } else {
         ReviewDecision::None
     };
 
-    // Pending requests only: GitHub removes a reviewer from `reviewRequests`
-    // as soon as they submit a review of any kind, so a count above zero means
-    // someone has been asked and hasn't answered.
     let review_requested = state == PrState::Open
         && pr
             .get("reviewRequests")
@@ -322,9 +268,6 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
             .and_then(|n| n.as_u64())
             .is_some_and(|n| n > 0);
 
-    // Walk threads once, splitting unresolved counts between human reviewers
-    // and bugbot. The human count drives the review (eye) square; the bugbot
-    // count drives the bugbot square — resolving a bugbot finding clears it.
     let (unresolved_threads, bugbot_unresolved) = if state == PrState::Open {
         pr.get("reviewThreads")
             .and_then(|r| r.get("nodes"))
@@ -374,9 +317,6 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
         .and_then(|c| c.get("nodes"))
         .and_then(|n| n.as_array());
 
-    // Split bugbot out of the rollup. If we have per-context data, recompute
-    // the non-bugbot aggregate so the CI indicator isn't poisoned by bugbot's
-    // result. Otherwise fall back to the top-level rollup state.
     let (checks, bugbot_check) = match context_nodes {
         Some(nodes) => {
             let mut non_bugbot = Vec::new();
@@ -398,10 +338,8 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
         None => (rollup_state.unwrap_or(ChecksRollup::None), ChecksRollup::None),
     };
 
-    // Bugbot's CheckRun conclusion is unreliable — it can complete as
-    // SUCCESS or NEUTRAL even when bugbot found bugs. Drive the indicator
-    // off unresolved bugbot review threads instead, so resolving a finding
-    // (or pushing a fix that GitHub auto-resolves) clears the square.
+    // Bugbot's conclusion can be SUCCESS/NEUTRAL despite findings; its
+    // unresolved threads are the real signal.
     let bugbot = if bugbot_unresolved > 0 {
         ChecksRollup::Failure
     } else if matches!(bugbot_check, ChecksRollup::Pending) {
@@ -433,11 +371,7 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
     })
 }
 
-/// Reads the PR's place in a merge queue. `isInMergeQueue` is the fact of the
-/// matter and `mergeQueueEntry` only refines it, so a PR GitHub says is queued
-/// still reports `Queued` when the entry is missing — losing the refinement is
-/// survivable, silently drawing the PR as un-queued is the bug this exists to
-/// prevent.
+/// `isInMergeQueue` is authoritative; a missing entry still means `Queued`.
 fn parse_merge_queue(pr: &Value) -> Option<MergeQueueState> {
     let queued = pr
         .get("isInMergeQueue")
@@ -458,9 +392,7 @@ fn parse_merge_queue(pr: &Value) -> Option<MergeQueueState> {
     }
 }
 
-/// Projects GraphQL's `stack` + `stackEntry` into one value. All three numbers
-/// have to be there: a stack we can't position the PR within would group chips
-/// without being able to order them.
+/// All three numbers or nothing: an unpositioned stack can't be ordered.
 fn parse_stack(pr: &Value) -> Option<PrStack> {
     let u32_at = |v: Option<&Value>| v.and_then(Value::as_u64).map(|n| n as u32);
     let stack = pr.get("stack")?;
@@ -489,14 +421,9 @@ fn context_is_bugbot(node: &Value) -> bool {
     name.to_lowercase().contains("bugbot")
 }
 
-/// GitHub login used by Cursor Bugbot to post reviews and threads.
 const BUGBOT_LOGIN: &str = "cursor";
 
-/// Derive a verdict from the reviews themselves, for when GitHub declines to
-/// compute a `reviewDecision`. `latestOpinionatedReviews` is already one
-/// APPROVED/CHANGES_REQUESTED per reviewer, so this only has to pick a winner:
-/// a block outranks an approval. Bugbot is skipped — it drives its own square,
-/// and a bot shouldn't read as a human blocking the PR.
+/// A block outranks an approval. Bugbot has its own indicator, so it's skipped.
 fn review_decision_from_reviews(pr: &Value) -> ReviewDecision {
     let Some(nodes) = pr
         .get("latestOpinionatedReviews")
@@ -543,9 +470,6 @@ fn thread_first_author(thread: &Value) -> Option<&str> {
         .and_then(|l| l.as_str())
 }
 
-/// Map a single check-run / status-context node to a rollup-style state.
-/// Mirrors GitHub's own aggregation: any incomplete check is `Pending`;
-/// completed checks use their `conclusion`.
 fn context_state(node: &Value) -> Option<ChecksRollup> {
     let typename = node.get("__typename").and_then(|v| v.as_str())?;
     match typename {
@@ -599,14 +523,7 @@ fn aggregate_rollup(states: impl Iterator<Item = ChecksRollup>) -> ChecksRollup 
     }
 }
 
-/// Apply parsed results to `AppState`: write each tracked PR's status, and
-/// start tracking any PR a branch scan turned up that we didn't have.
-///
-/// A scan that comes back empty takes nothing away. Once a PR is tracked it
-/// stays until it's detached, exactly like one attached by hand — the branch is
-/// how a PR gets *found*, not what keeps it on screen. That is also why a
-/// branch whose PR was closed and replaced ends up with two chips rather than
-/// one silently swapped for the other.
+/// A scan never untracks: tracking ends only at detach.
 pub fn apply_results(state: &mut AppState, results: &[PollResult]) -> Applied {
     let mut applied = Applied::default();
     for result in results {
@@ -622,10 +539,6 @@ pub fn apply_results(state: &mut AppState, results: &[PollResult]) -> Applied {
                 if link.discovery_should_skip(*number) {
                     continue;
                 }
-                // Tracked now, status filled by the follow-up pass in this
-                // same tick. The gap is why the chip can render statusless at
-                // all — and if that fetch fails it reads "no data", the same
-                // as a hand-attached PR that went unreachable.
                 link.track(*number, None);
                 applied.discovered.push(Discovery {
                     workspace_id: result.workspace_id.clone(),
@@ -634,16 +547,13 @@ pub fn apply_results(state: &mut AppState, results: &[PollResult]) -> Applied {
                 });
             }
             PollOutcome::Status { number, status } => {
-                // A PR detached mid-tick has nothing left to write to.
+                // Detached mid-tick.
                 let Some(tracked) = link.tracked_mut(*number) else {
                     continue;
                 };
                 let meaningful = is_meaningful_change(tracked.status.as_ref(), status.as_ref());
-                // Store every poll, even a no-op one, so `fetched_at` tracks
-                // when we last heard from GitHub rather than when the PR last
-                // changed. The UI fades a status once it goes stale — that's
-                // meant to flag a wedged poller, not a PR nobody has touched
-                // in a day.
+                // Stored even when unchanged: staleness should flag a wedged
+                // poller, not an idle PR.
                 tracked.status = status.clone();
                 if meaningful {
                     applied.changed.push(result.clone());
@@ -654,9 +564,7 @@ pub fn apply_results(state: &mut AppState, results: &[PollResult]) -> Applied {
     applied
 }
 
-/// Compare two statuses ignoring `fetched_at`. Emit only on real changes so
-/// we don't spam the UI every 45s with "nothing changed, but the timestamp
-/// did".
+/// Ignores `fetched_at`.
 fn is_meaningful_change(old: Option<&GithubPrStatus>, new: Option<&GithubPrStatus>) -> bool {
     match (old, new) {
         (None, None) => false,
@@ -684,6 +592,7 @@ fn is_meaningful_change(old: Option<&GithubPrStatus>, new: Option<&GithubPrStatu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::test_support;
 
     fn mk_target(i: usize) -> Target {
         mk_target_kind(i, TargetKind::Branch(format!("feat/foo-{i}")))
@@ -693,36 +602,45 @@ mod tests {
         Target {
             workspace_id: format!("ws-{i}"),
             repo_key: "frontend".to_string(),
-            slug: GithubSlug {
-                owner: "rynobax".to_string(),
-                name: "tethys".to_string(),
-            },
+            slug: GithubSlug::new("rynobax", "tethys"),
             kind,
         }
     }
 
-    /// The PR node out of a fixture: the branch ref's first associated PR, or
-    /// the merged fallback.
-    fn pr_node(data: &Value) -> Option<&Value> {
-        fn first(connection: Option<&Value>) -> Option<&Value> {
-            connection?.get("nodes")?.as_array()?.first()
+    /// An open PR node, with `extra`'s keys overriding the defaults.
+    fn pr_with(extra: Value) -> Value {
+        let mut pr = json!({
+            "number": 1,
+            "url": "u",
+            "state": "OPEN",
+            "isDraft": false,
+            "headRefName": "feat/foo-0",
+            "reviewThreads": {"nodes": []},
+            "commits": commit(Value::Null),
+        });
+        let (Some(pr_obj), Some(extra_obj)) = (pr.as_object_mut(), extra.as_object()) else {
+            panic!("both have to be objects");
+        };
+        for (k, v) in extra_obj {
+            pr_obj.insert(k.clone(), v.clone());
         }
-        let assoc = data
-            .get("q0")
-            .and_then(|r| r.get("ref"))
-            .and_then(|r| r.get("associatedPullRequests"));
-        first(assoc).or_else(|| first(data.get("q0").and_then(|r| r.get("mergedPrs"))))
+        pr
     }
 
-    /// Run a fixture's PR node through the projection.
-    ///
-    /// The fixtures below are shaped like a branch-scan response because that
-    /// is what they were written against, and a branch scan now selects only
-    /// `number`. What they exercise is [`parse_pr_node`] — the projection every
-    /// tracked PR goes through, however it came to be tracked — so the shape
-    /// they arrive in no longer matters.
-    fn parse_one(data: &Value) -> Option<GithubPrStatus> {
-        parse_pr_node(pr_node(data)?)
+    fn parse(extra: Value) -> GithubPrStatus {
+        parse_pr_node(&pr_with(extra)).expect("should parse")
+    }
+
+    fn commit(rollup: Value) -> Value {
+        json!({"nodes": [{"commit": {"oid": "o", "statusCheckRollup": rollup}}]})
+    }
+
+    fn check_run(name: &str, status: &str, conclusion: Option<&str>) -> Value {
+        json!({"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion})
+    }
+
+    fn thread(resolved: bool, author: &str) -> Value {
+        json!({"isResolved": resolved, "comments": {"nodes": [{"author": {"login": author}}]}})
     }
 
     #[test]
@@ -757,8 +675,6 @@ mod tests {
         assert_eq!(discovered(&data), Some(42));
     }
 
-    /// A branch deleted on merge nulls the `ref`, but the PR record survives
-    /// and is still queryable by branch name.
     #[test]
     fn branch_scan_falls_back_to_the_merged_pr_number() {
         let data = json!({
@@ -786,9 +702,6 @@ mod tests {
         assert_eq!(discovered(&data), None);
     }
 
-    /// A scan is a lookup, not a status fetch — pulling the full selection here
-    /// would fetch every branch PR twice a tick, once by branch and once by
-    /// number.
     #[test]
     fn branch_scan_query_asks_only_for_the_number() {
         let (q, _) = build_query(&[mk_target(0)]);
@@ -798,45 +711,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_no_pr_returns_none() {
-        let data = json!({
-            "q0": {
-                "ref": { "associatedPullRequests": { "nodes": [] } }
-            }
-        });
-        assert!(parse_one(&data).is_none());
-    }
-
-    #[test]
     fn parse_open_pr_with_checks() {
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 42,
-                            "url": "https://github.com/rynobax/tethys/pull/42",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "reviewThreads": {
-                                "nodes": [
-                                    {"isResolved": false},
-                                    {"isResolved": true},
-                                    {"isResolved": false}
-                                ]
-                            },
-                            "commits": {
-                                "nodes": [{"commit": {
-                                    "oid": "abc123",
-                                    "statusCheckRollup": {"state": "FAILURE"}
-                                }}]
-                            }
-                        }]
-                    }
-                }
+        let status = parse(json!({
+            "number": 42,
+            "reviewThreads": {
+                "nodes": [
+                    {"isResolved": false},
+                    {"isResolved": true},
+                    {"isResolved": false}
+                ]
+            },
+            "commits": {
+                "nodes": [{"commit": {
+                    "oid": "abc123",
+                    "statusCheckRollup": {"state": "FAILURE"}
+                }}]
             }
-        });
-        let status = parse_one(&data).expect("should parse");
+        }));
         assert_eq!(status.pr_number, 42);
         assert_eq!(status.state, PrState::Open);
         assert_eq!(status.checks, ChecksRollup::Failure);
@@ -845,93 +736,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_falls_back_to_merged_prs_when_ref_null() {
-        // Branch deleted post-merge: GitHub returns `ref: null`, but the PR
-        // record is still reachable via pullRequests(headRefName:).
-        let data = json!({
-            "q0": {
-                "ref": null,
-                "mergedPrs": {
-                    "nodes": [{
-                        "number": 99,
-                        "url": "https://github.com/x/y/pull/99",
-                        "state": "MERGED",
-                        "isDraft": false,
-                        "reviewThreads": { "nodes": [] },
-                        "commits": {
-                            "nodes": [{"commit": {"oid": "deadbeef", "statusCheckRollup": null}}]
-                        }
-                    }]
-                }
-            }
-        });
-        let status = parse_one(&data).expect("should fall back to mergedPrs");
-        assert_eq!(status.pr_number, 99);
-        assert_eq!(status.state, PrState::Merged);
-    }
-
-    #[test]
-    fn parse_prefers_ref_over_merged_prs_fallback() {
-        // Branch still live with an open PR — ignore any older merged PRs
-        // that happen to share the branch name.
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 5,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
-                            }
-                        }]
-                    }
-                },
-                "mergedPrs": {
-                    "nodes": [{
-                        "number": 3,
-                        "url": "u",
-                        "state": "MERGED",
-                        "isDraft": false,
-                        "reviewThreads": {"nodes": []},
-                        "commits": {
-                            "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
-                        }
-                    }]
-                }
-            }
-        });
-        let status = parse_one(&data).unwrap();
-        assert_eq!(status.pr_number, 5);
-        assert_eq!(status.state, PrState::Open);
-    }
-
-    #[test]
     fn parse_merged_pr_zeroes_unresolved() {
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 7,
-                            "url": "https://github.com/x/y/pull/7",
-                            "state": "MERGED",
-                            "isDraft": false,
-                            "reviewThreads": {
-                                "nodes": [{"isResolved": false}, {"isResolved": false}]
-                            },
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "z", "statusCheckRollup": null}}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let status = parse_one(&data).expect("parse");
+        let status = parse(json!({
+            "state": "MERGED",
+            "reviewThreads": {
+                "nodes": [{"isResolved": false}, {"isResolved": false}]
+            },
+        }));
         assert_eq!(status.state, PrState::Merged);
         assert_eq!(status.unresolved_threads, 0);
         assert_eq!(status.checks, ChecksRollup::None);
@@ -939,126 +750,29 @@ mod tests {
 
     #[test]
     fn parse_null_rollup_maps_to_none() {
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": true,
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let status = parse_one(&data).expect("parse");
+        let status = parse(json!({"isDraft": true}));
         assert_eq!(status.checks, ChecksRollup::None);
         assert!(status.is_draft);
     }
 
     #[test]
     fn parse_mergeable_conflicting_sets_flag() {
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "mergeable": "CONFLICTING",
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let s = parse_one(&data).unwrap();
-        assert!(s.has_merge_conflicts);
+        assert!(parse(json!({"mergeable": "CONFLICTING"})).has_merge_conflicts);
     }
 
     #[test]
     fn parse_mergeable_unknown_does_not_set_flag() {
-        // GitHub returns UNKNOWN briefly after a push while it recomputes the
-        // merge — don't flash a false positive in that window.
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "mergeable": "UNKNOWN",
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let s = parse_one(&data).unwrap();
-        assert!(!s.has_merge_conflicts);
+        assert!(!parse(json!({"mergeable": "UNKNOWN"})).has_merge_conflicts);
     }
 
     #[test]
     fn parse_mergeable_clean_does_not_set_flag() {
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "mergeable": "MERGEABLE",
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let s = parse_one(&data).unwrap();
-        assert!(!s.has_merge_conflicts);
+        assert!(!parse(json!({"mergeable": "MERGEABLE"})).has_merge_conflicts);
     }
 
     #[test]
     fn is_meaningful_change_ignores_fetched_at() {
-        let base = GithubPrStatus {
-            pr_number: 1,
-            url: "u".into(),
-            state: PrState::Open,
-            is_draft: false,
-            checks: ChecksRollup::Success,
-            bugbot: ChecksRollup::None,
-            has_merge_conflicts: false,
-            review_decision: ReviewDecision::None,
-            review_requested: false,
-            unresolved_threads: 0,
-            head_branch: Some("feat/foo".into()),
-            stack: None,
-            merge_queue: None,
-            head_sha: "sha".into(),
-            fetched_at: Utc::now(),
-            last_error: None,
-        };
+        let base = test_support::status(1);
         let mut later = base.clone();
         later.fetched_at = Utc::now() + chrono::Duration::seconds(60);
         assert!(!is_meaningful_change(Some(&base), Some(&later)));
@@ -1078,332 +792,113 @@ mod tests {
 
     #[test]
     fn parse_splits_bugbot_from_checks_rollup() {
-        // Bugbot says FAILURE, the rest of CI is SUCCESS. The top-level rollup
-        // would be FAILURE, but `checks` should reflect non-bugbot only.
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {
-                                    "oid": "o",
-                                    "statusCheckRollup": {
-                                        "state": "FAILURE",
-                                        "contexts": {"nodes": [
-                                            {"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS"},
-                                            {"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
-                                            {"__typename": "CheckRun", "name": "Cursor Bugbot", "status": "COMPLETED", "conclusion": "FAILURE"}
-                                        ]}
-                                    }
-                                }}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let s = parse_one(&data).unwrap();
+        let s = parse(json!({
+            "commits": commit(json!({
+                "state": "FAILURE",
+                "contexts": {"nodes": [
+                    check_run("build", "COMPLETED", Some("SUCCESS")),
+                    check_run("test", "COMPLETED", Some("SUCCESS")),
+                    check_run("Cursor Bugbot", "COMPLETED", Some("FAILURE")),
+                ]}
+            })),
+        }));
         assert_eq!(s.checks, ChecksRollup::Success);
         assert_eq!(s.bugbot, ChecksRollup::Failure);
     }
 
     #[test]
     fn parse_bugbot_pending_when_in_progress() {
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {
-                                    "oid": "o",
-                                    "statusCheckRollup": {
-                                        "state": "PENDING",
-                                        "contexts": {"nodes": [
-                                            {"__typename": "CheckRun", "name": "Cursor Bugbot", "status": "IN_PROGRESS", "conclusion": null}
-                                        ]}
-                                    }
-                                }}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let s = parse_one(&data).unwrap();
+        let s = parse(json!({
+            "commits": commit(json!({
+                "state": "PENDING",
+                "contexts": {"nodes": [check_run("Cursor Bugbot", "IN_PROGRESS", None)]}
+            })),
+        }));
         assert_eq!(s.bugbot, ChecksRollup::Pending);
         assert_eq!(s.checks, ChecksRollup::None);
     }
 
+    fn bugbot_neutral() -> Value {
+        commit(json!({
+            "state": "SUCCESS",
+            "contexts": {"nodes": [check_run("Cursor Bugbot", "COMPLETED", Some("NEUTRAL"))]}
+        }))
+    }
+
     #[test]
     fn parse_unresolved_bugbot_thread_marks_failure() {
-        // Cursor Bugbot's CheckRun reports NEUTRAL even when it found bugs —
-        // the actionable signal is the unresolved review thread it leaves.
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "reviewThreads": {"nodes": [
-                                {
-                                    "isResolved": false,
-                                    "comments": {"nodes": [{"author": {"login": "cursor"}}]}
-                                }
-                            ]},
-                            "commits": {
-                                "nodes": [{"commit": {
-                                    "oid": "abc123",
-                                    "statusCheckRollup": {
-                                        "state": "SUCCESS",
-                                        "contexts": {"nodes": [
-                                            {"__typename": "CheckRun", "name": "Cursor Bugbot", "status": "COMPLETED", "conclusion": "NEUTRAL"}
-                                        ]}
-                                    }
-                                }}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let s = parse_one(&data).unwrap();
+        let s = parse(json!({
+            "reviewThreads": {"nodes": [thread(false, "cursor")]},
+            "commits": bugbot_neutral(),
+        }));
         assert_eq!(s.bugbot, ChecksRollup::Failure);
     }
 
     #[test]
     fn parse_resolved_bugbot_thread_does_not_mark_failure() {
-        // Once the user resolves bugbot's thread, the square should clear and
-        // fall back to the underlying check state.
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "reviewThreads": {"nodes": [
-                                {
-                                    "isResolved": true,
-                                    "comments": {"nodes": [{"author": {"login": "cursor"}}]}
-                                }
-                            ]},
-                            "commits": {
-                                "nodes": [{"commit": {
-                                    "oid": "abc123",
-                                    "statusCheckRollup": {
-                                        "state": "SUCCESS",
-                                        "contexts": {"nodes": [
-                                            {"__typename": "CheckRun", "name": "Cursor Bugbot", "status": "COMPLETED", "conclusion": "NEUTRAL"}
-                                        ]}
-                                    }
-                                }}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let s = parse_one(&data).unwrap();
+        let s = parse(json!({
+            "reviewThreads": {"nodes": [thread(true, "cursor")]},
+            "commits": bugbot_neutral(),
+        }));
         assert_eq!(s.bugbot, ChecksRollup::Neutral);
     }
 
     #[test]
     fn parse_bugbot_threads_excluded_from_unresolved_count() {
-        // Bugbot leaves its findings as review threads. They shouldn't tip the
-        // human-review indicator yellow — bugbot has its own square.
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "reviewDecision": "APPROVED",
-                            "reviewThreads": {"nodes": [
-                                {
-                                    "isResolved": false,
-                                    "comments": {"nodes": [{"author": {"login": "cursor"}}]}
-                                },
-                                {
-                                    "isResolved": false,
-                                    "comments": {"nodes": [{"author": {"login": "alice"}}]}
-                                }
-                            ]},
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let s = parse_one(&data).unwrap();
+        let s = parse(json!({
+            "reviewDecision": "APPROVED",
+            "reviewThreads": {"nodes": [thread(false, "cursor"), thread(false, "alice")]},
+        }));
         assert_eq!(s.unresolved_threads, 1);
     }
 
     #[test]
     fn parse_falls_back_to_top_level_rollup_when_no_contexts() {
-        // Older fixture shape — no contexts list. We still get the legacy rollup
-        // for `checks`, and `bugbot` falls through to None.
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": {"state": "SUCCESS"}}}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let s = parse_one(&data).unwrap();
+        let s = parse(json!({"commits": commit(json!({"state": "SUCCESS"}))}));
         assert_eq!(s.checks, ChecksRollup::Success);
         assert_eq!(s.bugbot, ChecksRollup::None);
     }
 
     #[test]
     fn parse_review_decision_open() {
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "reviewDecision": "APPROVED",
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": {"state": "SUCCESS"}}}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let s = parse_one(&data).unwrap();
+        let s = parse(json!({"reviewDecision": "APPROVED"}));
         assert_eq!(s.review_decision, ReviewDecision::Approved);
     }
 
-    /// An open PR with `count` pending review requests and no reviews.
     fn requested_pr(count: u64) -> Value {
         json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "reviewDecision": "REVIEW_REQUIRED",
-                            "reviewRequests": {"totalCount": count},
-                            "latestOpinionatedReviews": {"nodes": []},
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
-                            }
-                        }]
-                    }
-                }
-            }
+            "reviewDecision": "REVIEW_REQUIRED",
+            "reviewRequests": {"totalCount": count},
+            "latestOpinionatedReviews": {"nodes": []},
         })
     }
 
-    /// `REVIEW_REQUIRED` is the same whether or not anyone has been asked, so
-    /// the pending request count is what tells "waiting on a reviewer" from
-    /// "nobody has been asked yet".
     #[test]
     fn parse_review_requested_from_pending_requests() {
-        let s = parse_one(&requested_pr(1)).unwrap();
+        let s = parse(requested_pr(1));
         assert!(s.review_requested);
         assert_eq!(s.review_decision, ReviewDecision::ReviewRequired);
 
-        let s = parse_one(&requested_pr(0)).unwrap();
+        let s = parse(requested_pr(0));
         assert!(!s.review_requested);
         assert_eq!(s.review_decision, ReviewDecision::ReviewRequired);
     }
 
     #[test]
     fn parse_review_requested_missing_field_is_false() {
-        let s = parse_one(&reviewed_pr(Value::Null, json!([]))).unwrap();
-        assert!(!s.review_requested);
+        assert!(!parse(reviewed_pr(Value::Null, json!([]))).review_requested);
     }
 
     #[test]
     fn parse_review_decision_null_maps_to_none() {
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "reviewDecision": null,
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let s = parse_one(&data).unwrap();
+        let s = parse(json!({"reviewDecision": null}));
         assert_eq!(s.review_decision, ReviewDecision::None);
     }
 
-    /// An open PR whose `reviewDecision` is `decision`, carrying `reviews` as
-    /// its latest opinionated reviews.
     fn reviewed_pr(decision: Value, reviews: Value) -> Value {
         json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "reviewDecision": decision,
-                            "latestOpinionatedReviews": {"nodes": reviews},
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
-                            }
-                        }]
-                    }
-                }
-            }
+            "reviewDecision": decision,
+            "latestOpinionatedReviews": {"nodes": reviews},
         })
     }
 
@@ -1411,129 +906,62 @@ mod tests {
         json!({"state": state, "author": {"login": login}})
     }
 
-    /// Repos without required reviews get a null `reviewDecision` from GitHub
-    /// no matter how many approvals land, so the approval has to come from the
-    /// reviews themselves.
     #[test]
     fn parse_review_decision_falls_back_to_approval_when_null() {
-        let data = reviewed_pr(Value::Null, json!([review("APPROVED", "christianbundy")]));
-        let s = parse_one(&data).unwrap();
+        let s = parse(reviewed_pr(Value::Null, json!([review("APPROVED", "christianbundy")])));
         assert_eq!(s.review_decision, ReviewDecision::Approved);
     }
 
     #[test]
     fn parse_review_decision_fallback_blocks_over_approval() {
-        let data = reviewed_pr(
+        let s = parse(reviewed_pr(
             Value::Null,
             json!([
                 review("APPROVED", "alice"),
                 review("CHANGES_REQUESTED", "bob"),
             ]),
-        );
-        let s = parse_one(&data).unwrap();
+        ));
         assert_eq!(s.review_decision, ReviewDecision::ChangesRequested);
     }
 
-    /// Bugbot has its own square — its verdict must not move the human one.
     #[test]
     fn parse_review_decision_fallback_ignores_bugbot() {
-        let data = reviewed_pr(
+        let s = parse(reviewed_pr(
             Value::Null,
             json!([review("CHANGES_REQUESTED", BUGBOT_LOGIN)]),
-        );
-        let s = parse_one(&data).unwrap();
+        ));
         assert_eq!(s.review_decision, ReviewDecision::None);
     }
 
-    /// When GitHub does compute a decision it accounts for CODEOWNERS and
-    /// required-approval counts, so it outranks anything we'd infer.
     #[test]
     fn parse_review_decision_prefers_github_verdict() {
-        let data = reviewed_pr(
+        let s = parse(reviewed_pr(
             json!("REVIEW_REQUIRED"),
             json!([review("APPROVED", "alice")]),
-        );
-        let s = parse_one(&data).unwrap();
+        ));
         assert_eq!(s.review_decision, ReviewDecision::ReviewRequired);
     }
 
     #[test]
     fn parse_review_decision_zero_on_merged() {
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "MERGED",
-                            "isDraft": false,
-                            "reviewDecision": "APPROVED",
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let s = parse_one(&data).unwrap();
+        let s = parse(json!({"state": "MERGED", "reviewDecision": "APPROVED"}));
         assert_eq!(s.review_decision, ReviewDecision::None);
     }
 
     #[test]
     fn parse_captures_head_branch() {
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "headRefName": "feat/foo-0",
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let s = parse_one(&data).unwrap();
-        assert_eq!(s.head_branch.as_deref(), Some("feat/foo-0"));
-        // A PR outside a `gh stack` reports no stack at all — which is what
-        // keeps the UI from grouping hand-based PRs.
+        let s = parse(json!({"headRefName": "feat/bar"}));
+        assert_eq!(s.head_branch.as_deref(), Some("feat/bar"));
         assert_eq!(s.stack, None);
     }
 
     #[test]
     fn parse_captures_gh_stack_membership() {
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 4240,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "headRefName": "mui-autonext-queue-item",
-                            "stack": {"number": 4245, "size": 6},
-                            "stackEntry": {"position": 2},
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        let s = parse_one(&data).unwrap();
+        let s = parse(json!({
+            "number": 4240,
+            "stack": {"number": 4245, "size": 6},
+            "stackEntry": {"position": 2},
+        }));
         assert_eq!(
             s.stack,
             Some(PrStack {
@@ -1544,98 +972,49 @@ mod tests {
         );
     }
 
-    /// A stack we can't place the PR within can't be ordered, so it's no more
-    /// use than no stack at all.
     #[test]
     fn parse_drops_a_stack_with_no_position() {
-        let data = json!({
-            "q0": {
-                "ref": {
-                    "associatedPullRequests": {
-                        "nodes": [{
-                            "number": 1,
-                            "url": "u",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "headRefName": "feat/foo-0",
-                            "stack": {"number": 9, "size": 2},
-                            "stackEntry": null,
-                            "reviewThreads": {"nodes": []},
-                            "commits": {
-                                "nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]
-                            }
-                        }]
-                    }
-                }
-            }
-        });
-        assert_eq!(parse_one(&data).unwrap().stack, None);
+        let s = parse(json!({
+            "stack": {"number": 9, "size": 2},
+            "stackEntry": null,
+        }));
+        assert_eq!(s.stack, None);
     }
 
-    /// A queued PR and a PR nobody has merged yet are both `OPEN`; the queue
-    /// entry is the only thing that tells them apart.
     #[test]
     fn parse_captures_merge_queue_state() {
-        let s = parse_one(&pr_with(json!({
+        let s = parse(json!({
             "isInMergeQueue": true,
             "mergeQueueEntry": {"state": "AWAITING_CHECKS"},
-        })))
-        .unwrap();
+        }));
         assert_eq!(s.state, PrState::Open);
         assert_eq!(s.merge_queue, Some(MergeQueueState::AwaitingChecks));
     }
 
-    /// The refinement is optional; the fact isn't.
     #[test]
     fn parse_falls_back_to_queued_without_an_entry() {
-        let s = parse_one(&pr_with(json!({
+        let s = parse(json!({
             "isInMergeQueue": true,
             "mergeQueueEntry": null,
-        })))
-        .unwrap();
+        }));
         assert_eq!(s.merge_queue, Some(MergeQueueState::Queued));
     }
 
-    /// Repos without a queue configured report the same shape as ones whose
-    /// queue this PR hasn't entered, and neither draws anything.
     #[test]
     fn parse_reports_no_queue_for_an_unqueued_pr() {
-        let s = parse_one(&pr_with(json!({
+        let s = parse(json!({
             "isInMergeQueue": false,
             "mergeQueueEntry": null,
-        })))
-        .unwrap();
+        }));
         assert_eq!(s.merge_queue, None);
     }
 
-    /// Entering the queue is worth an event: it's the difference between the
-    /// two chips this field exists to tell apart.
     #[test]
     fn entering_the_merge_queue_is_a_meaningful_change() {
-        let before = parse_one(&pr_with(json!({"isInMergeQueue": false}))).unwrap();
+        let before = parse(json!({"isInMergeQueue": false}));
         let mut after = before.clone();
         after.merge_queue = Some(MergeQueueState::Queued);
         assert!(is_meaningful_change(Some(&before), Some(&after)));
-    }
-
-    /// Builds a branch-scan response for one open PR, merged with `extra`.
-    fn pr_with(extra: Value) -> Value {
-        let mut pr = json!({
-            "number": 1,
-            "url": "u",
-            "state": "OPEN",
-            "isDraft": false,
-            "headRefName": "feat/foo-0",
-            "reviewThreads": {"nodes": []},
-            "commits": {"nodes": [{"commit": {"oid": "o", "statusCheckRollup": null}}]}
-        });
-        let (Some(pr_obj), Some(extra_obj)) = (pr.as_object_mut(), extra.as_object()) else {
-            panic!("both have to be objects");
-        };
-        for (k, v) in extra_obj {
-            pr_obj.insert(k.clone(), v.clone());
-        }
-        json!({"q0": {"ref": {"associatedPullRequests": {"nodes": [pr]}}}})
     }
 
     #[test]
@@ -1644,7 +1023,6 @@ mod tests {
         let (q, vars) = build_query(&targets);
         assert!(q.contains("q0: repository(owner: $q0_owner, name: $q0_name)"));
         assert!(q.contains("pullRequest(number: 512)"));
-        // A number-targeted query has no branch to look up.
         assert!(!q.contains("$q0_branch"));
         assert!(!vars.contains_key("q0_branch"));
         assert_eq!(vars.get("q0_name").unwrap(), "tethys");
@@ -1654,20 +1032,12 @@ mod tests {
     fn parse_pr_target_reads_pull_request_node() {
         let data = json!({
             "q0": {
-                "pullRequest": {
+                "pullRequest": pr_with(json!({
                     "number": 512,
-                    "url": "https://github.com/rynobax/tethys/pull/512",
-                    "state": "OPEN",
-                    "isDraft": false,
                     "headRefName": "feat/second-branch",
                     "reviewThreads": {"nodes": [{"isResolved": false}]},
-                    "commits": {
-                        "nodes": [{"commit": {
-                            "oid": "sha512",
-                            "statusCheckRollup": {"state": "SUCCESS"}
-                        }}]
-                    }
-                }
+                    "commits": commit(json!({"state": "SUCCESS"})),
+                }))
             }
         });
         let target = mk_target_kind(0, TargetKind::Pr(512));
@@ -1680,7 +1050,6 @@ mod tests {
 
     #[test]
     fn parse_missing_pr_target_returns_none() {
-        // A detached-or-bogus number comes back as `pullRequest: null`.
         let data = json!({ "q0": { "pullRequest": null } });
         let target = mk_target_kind(0, TargetKind::Pr(999));
         assert!(status_of(parse_response(&[target], &data).remove(0)).is_none());
@@ -1709,59 +1078,13 @@ mod tests {
         }
     }
 
-    fn mk_status(number: u32) -> GithubPrStatus {
-        GithubPrStatus {
-            pr_number: number,
-            url: format!("https://github.com/rynobax/tethys/pull/{number}"),
-            state: PrState::Open,
-            is_draft: false,
-            checks: ChecksRollup::Success,
-            bugbot: ChecksRollup::None,
-            has_merge_conflicts: false,
-            review_decision: ReviewDecision::None,
-            review_requested: false,
-            unresolved_threads: 0,
-            head_branch: None,
-            stack: None,
-            merge_queue: None,
-            head_sha: "sha".into(),
-            fetched_at: Utc::now(),
-            last_error: None,
-        }
-    }
-
     fn mk_state_tracking(numbers: &[u32]) -> AppState {
+        let mut ws = test_support::workspace("ws-0", "feat/foo-0", "frontend");
+        for n in numbers {
+            ws.repo_links[0].track(*n, None);
+        }
         AppState {
-            workspaces: vec![crate::state::Workspace {
-                id: "ws-0".into(),
-                branch: "feat/foo-0".into(),
-                created_at: Utc::now(),
-                repo_links: vec![crate::state::RepoLink {
-                    repo_key: "frontend".into(),
-                    worktree_path: "/tmp/wt/frontend".into(),
-                    setup_script_ran_at: None,
-                    prs: numbers
-                        .iter()
-                        .map(|n| crate::state::TrackedPr {
-                            number: *n,
-                            tracked_at: Utc::now(),
-                            status: None,
-                        })
-                        .collect(),
-                    dismissed: Vec::new(),
-                    created_branch: true,
-                }],
-                session: None,
-                agent: Default::default(),
-                agent_binary: None,
-                origin: crate::state::Origin::Ui,
-                deleted_at: None,
-                folder: None,
-                status: Default::default(),
-                notes: String::new(),
-            blocked_by: None,
-            artifacts: Vec::new(),
-            }],
+            workspaces: vec![ws],
             ..Default::default()
         }
     }
@@ -1770,8 +1093,8 @@ mod tests {
     fn apply_writes_each_status_to_its_own_tracked_pr() {
         let mut state = mk_state_tracking(&[10, 512]);
         let results = vec![
-            status_result(10, Some(mk_status(10))),
-            status_result(512, Some(mk_status(512))),
+            status_result(10, Some(test_support::status(10))),
+            status_result(512, Some(test_support::status(512))),
         ];
         let applied = apply_results(&mut state, &results);
         assert_eq!(applied.changed.len(), 2);
@@ -1786,24 +1109,21 @@ mod tests {
 
     #[test]
     fn apply_ignores_a_status_for_an_untracked_number() {
-        // The user detached the PR between building the query and applying it.
         let mut state = mk_state_tracking(&[512]);
-        let applied = apply_results(&mut state, &[status_result(777, Some(mk_status(777)))]);
+        let applied =
+            apply_results(&mut state, &[status_result(777, Some(test_support::status(777)))]);
         assert!(applied.changed.is_empty());
         let link = &state.workspaces[0].repo_links[0];
         assert_eq!(link.prs.len(), 1);
         assert!(link.tracked(512).unwrap().status.is_none());
     }
 
-    /// The automatic half of tracking: a scan finds a number nobody asked for
-    /// by hand, and it becomes an ordinary tracked PR awaiting its status.
     #[test]
     fn a_scan_starts_tracking_a_new_number() {
         let mut state = mk_state_tracking(&[]);
         let applied = apply_results(&mut state, &[discovery_result(Some(42))]);
         assert_eq!(applied.discovered.len(), 1);
         assert_eq!(applied.discovered[0].number, 42);
-        // No status yet — the poller's follow-up pass fills it this same tick.
         assert!(applied.changed.is_empty());
         let link = &state.workspaces[0].repo_links[0];
         assert_eq!(link.prs.len(), 1);
@@ -1818,8 +1138,6 @@ mod tests {
         assert_eq!(state.workspaces[0].repo_links[0].prs.len(), 1);
     }
 
-    /// The reason detach has to be remembered: a scan runs every tick and would
-    /// otherwise put the branch's PR straight back.
     #[test]
     fn a_scan_does_not_resurrect_a_detached_pr() {
         let mut state = mk_state_tracking(&[42]);
@@ -1829,13 +1147,10 @@ mod tests {
         assert!(state.workspaces[0].repo_links[0].prs.is_empty());
     }
 
-    /// A branch with no PR takes nothing away. Tracking ends at detach, not at
-    /// whatever the branch happens to point to now — which is what makes an
-    /// automatically-added PR behave like a hand-attached one.
     #[test]
     fn an_empty_scan_leaves_tracked_prs_alone() {
         let mut state = mk_state_tracking(&[42]);
-        apply_results(&mut state, &[status_result(42, Some(mk_status(42)))]);
+        apply_results(&mut state, &[status_result(42, Some(test_support::status(42)))]);
         let applied = apply_results(&mut state, &[discovery_result(None)]);
         assert!(applied.discovered.is_empty());
         let link = &state.workspaces[0].repo_links[0];
@@ -1843,28 +1158,23 @@ mod tests {
         assert!(link.tracked(42).unwrap().status.is_some());
     }
 
-    /// A PR nobody has touched still has to look freshly polled, or the UI
-    /// fades it as stale while the poller is working perfectly.
     #[test]
     fn apply_advances_fetched_at_without_emitting() {
         let mut state = mk_state_tracking(&[512]);
-        let mut first = mk_status(512);
+        let mut first = test_support::status(512);
         first.fetched_at = Utc::now() - chrono::Duration::hours(6);
         state.workspaces[0].repo_links[0].prs[0].status = Some(first.clone());
 
         let mut polled = first.clone();
         polled.fetched_at = Utc::now();
 
-        // Nothing about the PR changed, so the frontend hears nothing...
         let applied = apply_results(&mut state, &[status_result(512, Some(polled.clone()))]);
         assert!(applied.changed.is_empty());
-        // ...but the timestamp still moves.
         let stored = state.workspaces[0].repo_links[0].prs[0]
             .status
             .as_ref()
             .unwrap();
         assert_eq!(stored.fetched_at, polled.fetched_at);
-        assert!(stored.fetched_at > first.fetched_at);
     }
 
     #[test]
@@ -1873,8 +1183,6 @@ mod tests {
         assert_eq!(result.event().unwrap()["pr_number"], json!(512));
     }
 
-    /// A scan has no status to report, so it produces no event — the follow-up
-    /// fetch it triggers is what the UI hears about.
     #[test]
     fn a_discovery_produces_no_event() {
         assert!(discovery_result(Some(42)).event().is_none());

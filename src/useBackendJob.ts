@@ -15,12 +15,7 @@ interface UseBackendJobOptions {
   onSuccess?: (key: string, result: unknown) => void;
 }
 
-/**
- * Runs a backend job exactly once per `descriptor.key`. The invocation is
- * tied to the descriptor, not to any component's mount lifecycle, so callers
- * can freely mount and unmount the UI that displays the job without
- * re-firing it.
- */
+/** Runs a backend job exactly once per `descriptor.key`. */
 export function useBackendJob(
   descriptor: JobDescriptor | null,
   options: UseBackendJobOptions = {},
@@ -69,7 +64,6 @@ export function useBackendJob(
         });
         setState((s) => (s === "running" ? "failed" : s));
       });
-    // descriptor is keyed by `key`; command/args are captured on first run.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 

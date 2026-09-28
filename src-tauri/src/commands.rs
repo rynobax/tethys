@@ -64,20 +64,13 @@ pub async fn github_reprobe_auth(
 #[derive(Debug, Deserialize)]
 pub struct AttachPrArgs {
     pub workspace_id: WorkspaceId,
-    /// `null` => infer the repo from the reference's `owner/repo`, or from the
-    /// workspace's only GitHub-linked repo.
+    /// `None` infers it from the reference, or the only GitHub-linked repo.
     #[serde(default)]
     pub repo_key: Option<String>,
     /// `123`, `#123`, `owner/repo#123`, or a full GitHub PR URL.
     pub reference: String,
 }
 
-/// Manually track an extra PR on a workspace's repo link.
-///
-/// The poller only ever discovers the PR for the workspace's own branch, so a
-/// second branch cut inside the same worktree needs its PR attached by hand.
-/// The work is in [`github::attach`], which an agent's `link_pr` call reaches
-/// through the same door.
 #[tauri::command]
 pub async fn attach_pr(
     store: State<'_, Arc<Store>>,
@@ -102,11 +95,6 @@ pub struct DetachPrArgs {
     pub pr_number: u32,
 }
 
-/// Stop tracking a PR. Nothing on GitHub is touched.
-///
-/// Works on any tracked PR, including the one branch discovery added — which is
-/// the whole reason [`RepoLink::untrack`] remembers the number. Without that,
-/// detaching the PR for the workspace's own branch would last 45 seconds.
 #[tauri::command]
 pub async fn detach_pr(
     store: State<'_, Arc<Store>>,
@@ -124,11 +112,8 @@ pub async fn detach_pr(
     Ok(())
 }
 
-/// The editor Tethys opens files and worktrees in. Centralized so switching
-/// editors is a one-line change shared by every "open in editor" action.
 const EDITOR_APP: &str = "Visual Studio Code";
 
-/// Open `path` (a file or directory) in [`EDITOR_APP`] via macOS `open -a`.
 fn open_in_editor(path: &Path) -> AppResult<()> {
     std::process::Command::new("open")
         .args(["-a", EDITOR_APP])
@@ -143,9 +128,7 @@ fn open_in_editor(path: &Path) -> AppResult<()> {
     Ok(())
 }
 
-/// The VS Code CLI shipped inside the app bundle. Preferred over `code` on
-/// `PATH` because a bundled Tethys launched from Finder inherits a minimal
-/// `PATH` that won't include the `/usr/local/bin/code` symlink.
+/// Launched from Finder, Tethys's `PATH` lacks the `code` symlink.
 const VSCODE_CLI_BUNDLED: &str =
     "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
 
@@ -157,15 +140,8 @@ fn vscode_cli() -> &'static str {
     }
 }
 
-/// Open a workspace root in VS Code, reusing the last active window instead of
-/// spawning a new one.
-///
-/// `open -a` hands the path to VS Code as a document, which opens a fresh
-/// window every time. That gets expensive fast: each worktree is a full
-/// checkout with its own `node_modules`, so every extra window means another
-/// independent extension-host / TS-server / lint-server stack with nothing
-/// shared. `--reuse-window` keeps all workspaces in a single window, swapping
-/// the folder rather than multiplying the tooling.
+/// `--reuse-window`, not `open -a`: every window over a full checkout is
+/// another extension-host / TS-server stack with nothing shared.
 fn open_workspace_in_editor(path: &Path) -> AppResult<()> {
     let status = std::process::Command::new(vscode_cli())
         .arg("--reuse-window")
@@ -187,29 +163,18 @@ fn open_workspace_in_editor(path: &Path) -> AppResult<()> {
     Ok(())
 }
 
-/// Where the base clones every worktree is branched off live.
-///
-/// Display-only companion to [`ConfigLocation::CloneDir`]: the Configuration
-/// panel shows each path beside the row that opens it, and this is the one
-/// path the frontend can't already read off the registry.
 #[tauri::command]
 pub fn clone_dir_path(paths: State<'_, Paths>) -> PathBuf {
     paths.repos_clone_dir()
 }
 
-/// A Tethys-owned location the Configuration panel can open.
-///
-/// Named rather than passed as a path, so the only things openable this way are
-/// the three Tethys itself knows about.
+/// Named rather than a path, so nothing else is openable this way.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigLocation {
-    /// `repos.toml`. Written from the starter template first if absent — this
-    /// is the way out of the "repos not configured" notice.
+    /// Seeded from the starter template if absent.
     ReposConfig,
-    /// The registry's `worktree_root`, where per-workspace worktrees live.
     WorktreeRoot,
-    /// The base clones every worktree is branched off.
     CloneDir,
 }
 
@@ -231,16 +196,11 @@ pub fn open_config_location(
             }
             open_in_editor(&path)
         }
-        // Both directories go through the workspace opener rather than
-        // `open -a`, for the reason spelled out there: each is a pile of full
-        // checkouts, and a fresh window per open multiplies the whole
-        // extension-host / TS-server stack.
         ConfigLocation::WorktreeRoot => {
             open_workspace_in_editor(&registry.require()?.worktree_root)
         }
         ConfigLocation::CloneDir => {
-            // Nothing has been cloned yet on a fresh install, and opening a
-            // missing path is an error rather than an empty window.
+            // Absent on a fresh install, and opening a missing path errors.
             let path = paths.repos_clone_dir();
             std::fs::create_dir_all(&path)?;
             open_workspace_in_editor(&path)
@@ -253,10 +213,6 @@ pub async fn open_in_vscode(
     store: State<'_, Arc<Store>>,
     id: WorkspaceId,
 ) -> AppResult<()> {
-    // A workspace that exists but has no repo links is a Creating draft or a
-    // failed creation — it has no root on disk yet. That is a different thing
-    // from "no such workspace", and saying so is the difference between the
-    // user waiting and the user hunting for a bug.
     let workspace_root: PathBuf = store
         .with_workspace(&id, Workspace::root_buf)
         .await?
@@ -269,8 +225,7 @@ pub async fn open_in_vscode(
     open_workspace_in_editor(&workspace_root)
 }
 
-/// Show the embedded GitHub PR webview over `(x, y, width, height)` — logical
-/// pixels in the main window — navigating it to `url`. See [`crate::pr_view`].
+/// Logical pixels in the main window.
 #[tauri::command]
 pub fn show_pr_view(
     app: AppHandle,
@@ -284,7 +239,6 @@ pub fn show_pr_view(
     crate::pr_view::show(&app, url, x, y, width, height, viewport_height)
 }
 
-/// Hide the embedded PR webview when a non-PR tab takes the panel.
 #[tauri::command]
 pub fn hide_pr_view(app: AppHandle) -> AppResult<()> {
     crate::pr_view::hide(&app)
@@ -292,29 +246,18 @@ pub fn hide_pr_view(app: AppHandle) -> AppResult<()> {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateWorkspaceArgs {
-    /// Frontend-minted UUID. Lets us insert a `Creating` draft into state
-    /// immediately, so the sidebar row appears in its final position from
-    /// the moment the user clicks Create — no later reorder, no parallel
-    /// "pending" concept.
+    /// Frontend-minted, so the draft's row appears in place immediately.
     pub workspace_id: WorkspaceId,
     pub branch: String,
     pub repo_selections: Vec<String>,
-    /// Which agent CLI the workspace's session runs. `None` means Claude,
-    /// which is what every workspace created before codex support was.
     #[serde(default)]
     pub agent: Option<Agent>,
-    /// Optional alternate entry-point binary name (e.g. `claude-hipaa`).
-    /// Resolved on the login-shell PATH at spawn time.
     #[serde(default)]
     pub agent_binary: Option<String>,
-    /// Folder the new workspace lands in; `None` is the Default folder.
     #[serde(default)]
     pub folder: Option<FolderId>,
 }
 
-/// Validate the request, insert the `Creating` draft, then hand the actual
-/// provisioning to [`provision_workspace`], streaming its progress to the
-/// frontend via `on_event`.
 #[tauri::command]
 pub async fn create_workspace(
     store: State<'_, Arc<Store>>,
@@ -343,7 +286,6 @@ pub async fn create_workspace(
         .as_ref()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    // Validate up-front so the user finds out before we clone repos.
     if let Some(bin) = agent_binary.as_deref() {
         agent_bin::resolve_named(bin)?;
     }
@@ -359,8 +301,6 @@ pub async fn create_workspace(
         })
         .collect::<AppResult<Vec<_>>>()?;
 
-    // Rename rather than refuse on a collision: the draft goes into state
-    // under the name actually used, so the sidebar row shows it from the start.
     let branch_name::Reserved {
         branch,
         workspace_dir,
@@ -376,9 +316,7 @@ pub async fn create_workspace(
     );
     store
         .mutate(|s| {
-            // A folder that vanished between the dialog opening and Create
-            // being clicked would otherwise strand the row: `folder` is
-            // pruned to Default at boot, but not before.
+            // It may have been deleted while the dialog was open.
             if let Some(folder) = &draft.folder {
                 if !s.folder_exists(folder) {
                     return Err(AppError::FolderNotFound(folder.clone()));
@@ -421,12 +359,7 @@ pub struct AddRepoArgs {
     pub repo_key: String,
 }
 
-/// Add another repo's worktree to an existing workspace on the workspace's
-/// branch. Mirrors a single-repo iteration of `create_workspace`: clone +
-/// branch pre-check + worktree add + claude_local symlink + setup script,
-/// then push the new `RepoLink` into state on success. On failure, tears
-/// down only the worktree it created — leaves the rest of the workspace
-/// intact.
+/// On failure, tears down only the new worktree.
 #[tauri::command]
 pub async fn add_repo_to_workspace(
     store: State<'_, Arc<Store>>,
@@ -477,9 +410,7 @@ pub async fn add_repo_to_workspace(
 
     let tx = spawn_event_forwarder(on_event);
 
-    // Same gate as a create: this runs the repo's setup script, which is the
-    // expensive part either way, and it has no business racing a workspace
-    // that's already installing.
+    // Runs the setup script, the expensive part of a create.
     let _slot = queue.acquire_announcing(&tx, Some(&args.repo_key)).await;
 
     let provision = provision_repo_worktree(RepoProvision {
@@ -495,11 +426,8 @@ pub async fn add_repo_to_workspace(
         Ok(link) => {
             let updated = store
                 .update_workspace(&args.workspace_id, |ws| {
-                    // Re-check both pre-conditions, not just one: provisioning
-                    // took minutes of git I/O and the user may have soft-deleted
-                    // the workspace in the meantime. Pushing a link onto a
-                    // deleted workspace hands the purger a worktree it doesn't
-                    // know it owns.
+                    // Re-checked: provisioning took minutes. A link on a deleted
+                    // workspace hands the purger a worktree it doesn't know of.
                     if ws.deleted_at.is_some() {
                         return Err(AppError::Other(
                             "workspace was deleted while the repo was being provisioned"
@@ -524,8 +452,6 @@ pub async fn add_repo_to_workspace(
                 &tx,
             )
             .await;
-            // The new repo changes both the "checked out here" list and the
-            // "available to add" list, so the whole doc is rewritten.
             regen_workspace_claude_md(&updated, reg, &paths, &tx).await;
 
             info!(
@@ -541,9 +467,8 @@ pub async fn add_repo_to_workspace(
             let msg = e.to_string();
             warn!(error = %msg, "add_repo_to_workspace failed; rolling back worktree");
             tx.status(format!("rolling back: {msg}"), None);
-            // `provision_repo_worktree` already self-cleans on failure (deleting
-            // any branch it created). This is a backstop for a stray worktree;
-            // `created_branch: false` ensures it never deletes a branch here.
+            // Backstop: `provision_repo_worktree` already cleans up, including
+            // any branch it created.
             teardown_repo_worktree(RepoTeardown {
                 repo_key: &repo.key,
                 worktree_path: &worktree_path,
@@ -559,11 +484,7 @@ pub async fn add_repo_to_workspace(
     }
 }
 
-/// Soft delete: mark the workspace as deleted and kill its live PTY session
-/// so it can't keep writing to a worktree we're about to tear down. The
-/// hourly purger does the actual git/worktree cleanup once the entry is
-/// older than the grace window. Use `cancel_delete_workspace` to undo
-/// before the purger runs.
+/// Soft delete; the purger tears down once the grace window passes.
 #[tauri::command]
 pub async fn delete_workspace(
     app: AppHandle,
@@ -575,17 +496,13 @@ pub async fn delete_workspace(
         .with_workspace(&id, |w| w.session.as_ref().map(|m| m.id.clone()))
         .await?;
 
-    // Kill the tmux session so claude stops writing to the worktree before
-    // the purger removes it. The supervisor reacts to the resulting
-    // session:exit and cleans up its own state.
+    // Stop the agent writing to a worktree about to be removed.
     if let Some(sid) = session_id.filter(|_| !tmux_bin.0.as_os_str().is_empty()) {
         tmux::kill_session(&tmux_bin.0, &sid);
     }
 
     store
         .update_workspace(&id, |ws| {
-            // Idempotent: re-deleting an already-soft-deleted workspace
-            // refreshes the timestamp, which extends the grace window.
             ws.deleted_at = Some(Utc::now());
             Ok(())
         })
@@ -596,8 +513,6 @@ pub async fn delete_workspace(
     Ok(())
 }
 
-/// Undo a soft delete. Only succeeds if the purger hasn't already
-/// reaped the workspace.
 #[tauri::command]
 pub async fn cancel_delete_workspace(
     app: AppHandle,
@@ -614,11 +529,8 @@ pub async fn cancel_delete_workspace(
     Ok(())
 }
 
-/// Reorder the workspaces the sidebar is showing. The frontend computes a new
-/// ordering by drag-and-drop and posts the resulting ID list — the whole
-/// *visual* order, folders and blocker nesting flattened, not just the rows
-/// that moved. Workspaces not in the list keep their current relative
-/// position in `AppState.workspaces`.
+/// Named ids move to the front in the given order; the rest keep their
+/// relative order behind them.
 #[tauri::command]
 pub async fn reorder_workspaces(
     store: State<'_, Arc<Store>>,
@@ -626,30 +538,24 @@ pub async fn reorder_workspaces(
 ) -> AppResult<()> {
     store
         .mutate(|s| {
-            // Validate every id exists; bail without mutating on mismatch
-            // so a stale frontend snapshot can't shuffle the wrong rows.
             for id in &ids {
                 if !s.workspaces.iter().any(|w| &w.id == id) {
                     return Err(AppError::WorkspaceNotFound(id.clone()));
                 }
             }
-            // Pull the named workspaces out in their requested order.
             let mut moved: Vec<Workspace> = Vec::with_capacity(ids.len());
             for id in &ids {
                 if let Some(pos) = s.workspaces.iter().position(|w| &w.id == id) {
                     moved.push(s.workspaces.remove(pos));
                 }
             }
-            // Re-insert at the front. Soft-deleted entries that weren't
-            // included keep their positions after the moved block.
             for ws in moved.into_iter().rev() {
                 s.workspaces.insert(0, ws);
             }
             Ok(())
         })
         .await?;
-    // No event: the frontend reorders optimistically so the dropped row
-    // doesn't flicker, and re-broadcasting the order would undo that.
+    // No event: the frontend already reordered, and a refetch would flicker.
     Ok(())
 }
 
@@ -658,10 +564,6 @@ pub async fn list_folders(store: State<'_, Arc<Store>>) -> AppResult<Vec<Folder>
     Ok(store.read(|s| s.folders.clone()).await)
 }
 
-/// Create an empty folder at the end of the list.
-///
-/// Duplicate names are allowed: identity is the id, and refusing them would
-/// buy an error path in exchange for nothing.
 #[tauri::command]
 pub async fn create_folder(store: State<'_, Arc<Store>>, name: String) -> AppResult<Folder> {
     let name = name.trim().to_string();
@@ -706,10 +608,7 @@ pub async fn rename_folder(
         .await
 }
 
-/// Delete a folder; its workspaces fall back to Default.
-///
-/// Contents are never destroyed and the delete is never refused for being
-/// non-empty — emptying a folder by hand first would be busywork.
+/// Its workspaces fall back to Default.
 #[tauri::command]
 pub async fn delete_folder(store: State<'_, Arc<Store>>, id: FolderId) -> AppResult<()> {
     store
@@ -747,9 +646,7 @@ pub async fn set_folder_collapsed(
         .await
 }
 
-/// Reorder folders. Same contract as [`reorder_workspaces`]: the named ids are
-/// pulled out in the given order and re-inserted at the front, so anything
-/// left out keeps its relative position behind them.
+/// Same contract and silence as [`reorder_workspaces`].
 #[tauri::command]
 pub async fn reorder_folders(
     store: State<'_, Arc<Store>>,
@@ -774,25 +671,17 @@ pub async fn reorder_folders(
             Ok(())
         })
         .await
-    // No event, for the same reason `reorder_workspaces` sends none: the
-    // frontend already moved the row locally and a round-trip would flicker it.
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct MoveWorkspacesToFolderArgs {
-    /// Every workspace being moved. A drag carries a whole blocker stack, so
-    /// this is usually more than one id and always all of them at once.
+    /// A whole blocker stack at once, so a move can't split one.
     pub workspace_ids: Vec<WorkspaceId>,
-    /// Destination; `None` is the Default folder.
     pub folder: Option<FolderId>,
 }
 
-/// File workspaces into a folder.
-///
-/// Blocker links are left alone. A stack always moves as a unit, so a move
-/// can't split one, and whether a link *draws* is derived from the two ending
-/// up in the same folder rather than stored.
+/// Silent, like [`reorder_workspaces`].
 #[tauri::command]
 pub async fn move_workspaces_to_folder(
     store: State<'_, Arc<Store>>,
@@ -822,25 +711,15 @@ pub async fn move_workspaces_to_folder(
             Ok(())
         })
         .await
-    // Silent, like the reorder it arrives with: the sidebar has already drawn
-    // the row in its new folder.
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SetWorkspaceBlockerArgs {
     pub workspace_id: WorkspaceId,
-    /// The workspace to wait on, or `None` to clear the link.
     pub blocker_id: Option<WorkspaceId>,
 }
 
-/// Point a workspace at the blocker it is waiting on, or clear the link.
-///
-/// Goes through `mutate` rather than `update_workspace` because the cycle
-/// check has to read the whole graph, not just the row being written. Unlike
-/// `reorder_workspaces` it does emit `workspace:changed` — the sidebar's
-/// nesting is derived from this field, so a silent write would leave the
-/// tree stale.
 #[tauri::command]
 pub async fn set_workspace_blocker(
     store: State<'_, Arc<Store>>,
@@ -863,10 +742,7 @@ pub async fn set_workspace_blocker(
                 if s.blocker_would_cycle(&workspace_id, blocker) {
                     return Err(AppError::BlockerWouldCycle);
                 }
-                // The sidebar only nests within a folder, so a cross-folder
-                // link would be stored and then never drawn. The frontend
-                // already filters the candidates it offers; this is the door,
-                // not the only lock.
+                // Nesting is per folder: a cross-folder link would never draw.
                 if s.folders_differ(&workspace_id, blocker) {
                     return Err(AppError::BlockerInAnotherFolder);
                 }
@@ -881,9 +757,7 @@ pub async fn set_workspace_blocker(
     Ok(())
 }
 
-/// Trigger the background purger immediately. Used by the "Run cleanup
-/// now" button on the system status page. Still respects the 1-hour
-/// grace window — entries deleted under an hour ago stay put.
+/// Still respects the grace window.
 #[tauri::command]
 pub fn run_purge_now(purger: State<'_, Arc<Purger>>) -> AppResult<()> {
     purger.request_tick();
@@ -969,8 +843,6 @@ pub async fn list_discrepancies(
     Ok(reconcile::scan(&snapshot, reg, &pending).await)
 }
 
-/// Delete a directory that the reconciler flagged as orphaned. The path is
-/// validated against `worktree_root` to block traversal-style misuse.
 #[tauri::command]
 pub async fn remove_orphan_dir(
     registry: State<'_, Arc<RegistryLoad>>,
@@ -988,9 +860,7 @@ pub async fn remove_orphan_dir(
     Ok(())
 }
 
-/// Drop a workspace from state without running any git ops. Used when a
-/// workspace's worktrees are all missing and the user just wants the row
-/// gone.
+/// State-only removal: no git ops.
 #[tauri::command]
 pub async fn forget_workspace(
     app: AppHandle,
@@ -1017,8 +887,6 @@ pub async fn forget_workspace(
         return Err(AppError::WorkspaceNotFound(id));
     }
 
-    // State is gone — kill the tmux session too so it doesn't become an
-    // orphan reaped on the next boot.
     if let Some(sid) = session_id.filter(|_| !tmux_bin.0.as_os_str().is_empty()) {
         tmux::kill_session(&tmux_bin.0, &sid);
     }
@@ -1028,10 +896,7 @@ pub async fn forget_workspace(
     Ok(())
 }
 
-/// The live snapshot of a workspace's session. `None` when the workspace has
-/// never started one, or when this run hasn't spawned or reattached it yet —
-/// the frontend shows Start or Resume accordingly, and both lead to
-/// `start_claude_session`.
+/// `None` until this run has spawned or reattached the session.
 #[tauri::command]
 pub async fn get_session(
     supervisor: State<'_, Arc<SessionSupervisor>>,
@@ -1047,7 +912,6 @@ pub async fn get_session(
     Ok(session_id.and_then(|id| supervisor.info(&id)))
 }
 
-/// The user dismissed the workspace's "your turn" indicator.
 #[tauri::command]
 pub async fn acknowledge_session_turn(
     supervisor: State<'_, Arc<SessionSupervisor>>,
@@ -1063,9 +927,6 @@ pub async fn acknowledge_session_turn(
     Ok(())
 }
 
-/// Put the workspace's agent session on screen: reattach it, resume it, or
-/// start it fresh, whichever is the least that gets there. See
-/// `sessions::open_session`.
 #[tauri::command]
 pub async fn start_agent_session(
     supervisor: State<'_, Arc<SessionSupervisor>>,
@@ -1092,23 +953,11 @@ pub async fn start_agent_session(
 #[derive(Debug, serde::Deserialize)]
 pub struct SwitchAgentArgs {
     pub workspace_id: WorkspaceId,
-    /// The agent the chosen binary is. Sent alongside the name rather than
-    /// inferred from it: the kind decides how the session is spawned and
-    /// resumed, and must not hinge on spelling.
+    /// Sent rather than inferred from the binary's name, which can be anything.
     pub agent: Agent,
-    /// Binary name to switch to (e.g. `claude`, `claude-hipaa`, `codex`).
     pub agent_binary: String,
 }
 
-/// Change the workspace's agent and/or entry-point binary and restart its
-/// session under it. The running tmux session is killed first so
-/// `open_session` can't just reattach the old process; the conversation is
-/// resumed if it's on disk, and an empty chat simply starts over.
-///
-/// Switching between binaries of the *same* agent resumes the conversation.
-/// Switching agent cannot: the two keep their transcripts in different places
-/// in different formats, so the old conversation is left where it is and a
-/// fresh one starts.
 #[tauri::command]
 pub async fn switch_agent(
     supervisor: State<'_, Arc<SessionSupervisor>>,
@@ -1123,18 +972,13 @@ pub async fn switch_agent(
     if binary.is_empty() {
         return Err(AppError::Other("no agent binary name provided".into()));
     }
-    // Fail fast if the binary isn't on the login-shell PATH, before we tear
-    // down the running session.
+    // Before tearing down the running session.
     agent_bin::resolve_named(&binary)?;
 
     let session_id = store
         .update_workspace(&args.workspace_id, |ws| {
-            // Read the id out before anything below can drop it — it's what
-            // kills the old tmux session further down.
             let previous = ws.session.as_ref().map(|m| m.id.clone());
-            // Changing agent strands the old conversation: the new CLI can't
-            // read the other's transcript, so `open_session` would find
-            // nothing resumable anyway. Dropping the meta says so outright.
+            // Neither CLI can read the other's transcript.
             if ws.agent != args.agent {
                 ws.session = None;
             }
@@ -1144,7 +988,7 @@ pub async fn switch_agent(
         })
         .await?;
 
-    // Harmless if it already exited.
+    // So `open_session` can't just reattach the old process.
     if let Some(sid) = session_id.filter(|_| !tmux_bin.0.as_os_str().is_empty()) {
         tmux::kill_session(&tmux_bin.0, &sid);
     }
@@ -1168,9 +1012,8 @@ pub struct SetWorkspaceNotesArgs {
     pub notes: String,
 }
 
-/// Persist the freeform notes for a workspace. The frontend holds the
-/// authoritative text while editing and debounces calls here, so this does not
-/// emit `workspace:changed` (doing so would churn the pane on every keystroke).
+/// Quiet: the frontend owns the text while editing, and an event per debounced
+/// keystroke would churn the pane.
 #[tauri::command]
 pub async fn set_workspace_notes(
     store: State<'_, Arc<Store>>,
@@ -1192,11 +1035,8 @@ pub async fn list_artifacts(
     Ok(artifacts.list(&workspace_id).await)
 }
 
-/// Open a Page in the default browser. Goes through `open` rather than
-/// plugin-opener's `openPath`, which is scope-gated to paths fixed in the
-/// capability file — and a workspace's files live wherever `repos.toml` says.
-/// Only a path the store already holds can be opened, so the frontend can't
-/// hand over an arbitrary one.
+/// Not plugin-opener's `openPath`, which is scoped to paths fixed in the
+/// capability file. Takes an artifact id so no arbitrary path can be opened.
 #[tauri::command]
 pub async fn open_artifact(
     artifacts: State<'_, Arc<ArtifactStore>>,
@@ -1230,9 +1070,6 @@ pub async fn dismiss_artifact(
     Ok(())
 }
 
-/// Subscribe to live PTY bytes and return the current scrollback. The
-/// channel carries raw bytes via `InvokeResponseBody::Raw` — no JSON
-/// serialization overhead per chunk.
 #[tauri::command]
 pub fn attach_session(
     supervisor: State<'_, Arc<SessionSupervisor>>,
@@ -1257,10 +1094,7 @@ pub fn send_input(
     session_id: String,
     data: Vec<u8>,
 ) -> AppResult<()> {
-    supervisor.send_input(&session_id, &data)?;
-    // Turn state is driven by Claude Code's UserPromptSubmit / Stop /
-    // Notification hooks — no optimistic flip needed here.
-    Ok(())
+    supervisor.send_input(&session_id, &data)
 }
 
 #[tauri::command]
@@ -1278,12 +1112,8 @@ pub fn get_theme(paths: State<'_, Paths>) -> AppResult<Option<Theme>> {
     Theme::load_saved(&paths.theme_file())
 }
 
-/// Read file paths from the macOS general pasteboard. Used on Cmd+V when the
-/// browser-side `clipboardData` only carries opaque `File` objects (no
-/// `text/plain`, no `text/uri-list`) — WKWebView hides the real path. We need
-/// it so paste-of-a-file inserts the path text iTerm2-style instead of relying
-/// on WKWebView's hidden auto-insert (which always triggers Claude Code's
-/// `[Image #N]` flow regardless of the actual file type).
+/// WKWebView hides a pasted file's path, and its own auto-insert always lands
+/// in Claude Code as `[Image #N]`, whatever the file is.
 #[tauri::command]
 pub fn read_clipboard_file_paths() -> AppResult<Vec<String>> {
     const SCRIPT: &str = r#"ObjC.import('AppKit');
@@ -1312,12 +1142,6 @@ JSON.stringify(paths);"#;
     Ok(serde_json::from_str(stdout.trim())?)
 }
 
-/// Seed `<workspace_root>/.claude/settings.local.json` from the workspace's
-/// current set of repo links. Called once at workspace create; the file is
-/// not regenerated thereafter. Best-effort: failures are surfaced as a
-/// status event but never fail the parent command.
-/// Extend an existing workspace-root settings.local.json with the entries
-/// of a newly-added repo. Best-effort.
 async fn append_repo_to_workspace_root_settings(
     workspace: &Workspace,
     repo_key: &str,
@@ -1347,10 +1171,6 @@ async fn append_repo_to_workspace_root_settings(
     }
 }
 
-/// Rewrite `<workspace_root>/CLAUDE.md` from the workspace's repo links plus
-/// the registry, so sessions know which repos are here, which aren't, and what
-/// each one needs. Best-effort: a failure is a status event, never a failed
-/// command.
 async fn regen_workspace_claude_md(
     workspace: &Workspace,
     registry: &RepoRegistry,
@@ -1378,9 +1198,6 @@ fn emit_workspace_changed(app: &AppHandle, workspace_id: &str) {
     );
 }
 
-/// Spawn a task that drains an mpsc of `JobEvent` into the Tauri `Channel`.
-/// Returns a `JobTx` the orchestrator uses to emit events. Dropping the tx
-/// (or returning from the command) closes the mpsc and the forwarder exits.
 fn spawn_event_forwarder(channel: Channel<JobEvent>) -> JobTx {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<JobEvent>();
     tokio::spawn(async move {

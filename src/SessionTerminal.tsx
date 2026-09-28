@@ -4,21 +4,11 @@ import type { Terminal } from "@xterm/xterm";
 import * as api from "./ipc/commands";
 import { usePtyTerminal } from "./usePtyTerminal";
 
-/**
- * Backslash-escape spaces in a filesystem path. Matches iTerm2's drop
- * format inside a bracketed paste — Claude Code unescapes `\ ` and resolves
- * the path, which triggers the `[Image #N]` attachment flow for images.
- */
+/** iTerm2's drop format, which Claude Code unescapes and resolves. */
 function escapeDroppedPath(p: string): string {
   return p.replace(/([\\ ])/g, "\\$1");
 }
 
-/** macOS line/word editing over and above xterm's defaults.
- *
- * Convention: Cmd = whole line, Alt = word. Each row maps a (key, modifier)
- * pair to the readline byte sequence the shell / Claude Code / TUI beneath
- * understands.
- */
 type EditBind = { key: string; mod: "cmd" | "alt"; bytes: number[] };
 const EDIT_BINDS: EditBind[] = [
   { key: "ArrowLeft", mod: "cmd", bytes: [0x01] }, // Ctrl-A: beginning of line
@@ -32,20 +22,9 @@ const EDIT_BINDS: EditBind[] = [
 ];
 
 /**
- * Drag files from Finder onto the window → paste escaped paths into the
- * active session, like iTerm2. Wrapped in bracketed-paste markers
- * (`\x1b[200~…\x1b[201~`) so Claude Code recognizes it as a paste and runs
- * its path-→-image attachment flow, producing `[Image #N]` for images.
- *
- * The event is window-wide and only one SessionTerminal is mounted at a time,
- * so the subscription is made once for the app's lifetime and routed to
- * whichever pane is current. It used to be per mount, and the unlisten on
- * teardown raced Tauri's own registration: `listen()` resolves with the id
- * before the eval'd script that records the listener has run in the page, so
- * unlistening right after (StrictMode double-mount, a fast workspace switch)
- * threw `listeners[eventId].handlerId` from inside Tauri — as an unhandled
- * rejection, since its unlisten is async — and leaked the listener, so a
- * later drop could paste into the previous workspace's session as well.
+ * Subscribed once for the app's lifetime and routed to the mounted pane:
+ * unlistening soon after `listen()` resolves races Tauri's own registration,
+ * throws, and leaks the listener.
  */
 type DropTarget = { sessionId: string; term: Terminal };
 let dropTarget: DropTarget | null = null;
@@ -77,13 +56,6 @@ interface Props {
   sessionId: string;
 }
 
-/**
- * xterm.js surface for a Claude session.
- *
- * The pane lifecycle — construction, attach, streaming, resize, teardown —
- * lives in `usePtyTerminal`. What's left here is what only a Claude session
- * needs: Finder paste interception, macOS editing keybinds, and drag-drop.
- */
 export function SessionTerminal({ sessionId }: Props) {
   const { containerRef } = usePtyTerminal(sessionId, {
     onReady: (term, container) => wireClaudeExtras(term, container, sessionId),
@@ -92,9 +64,6 @@ export function SessionTerminal({ sessionId }: Props) {
   return <div className="session-terminal" ref={containerRef} />;
 }
 
-/**
- * The three Claude-specific behaviours, and their teardown.
- */
 function wireClaudeExtras(
   term: Terminal,
   container: HTMLDivElement,
@@ -106,18 +75,9 @@ function wireClaudeExtras(
     });
   };
 
-  // Cmd+V of a file from Finder/screenshot: WKWebView delivers only an
-  // opaque `File` (no `text/plain`, no `text/uri-list`) and then quietly
-  // auto-inserts the temp path into the helper textarea after the paste
-  // event. xterm wraps that text in bracketed-paste markers, which trips
-  // Claude Code's path-→-image flow indiscriminately — turning a pasted log
-  // path into `[Image #N]`.
-  //
-  // For image MIME we want that flow (it's the whole point of pasting a
-  // screenshot). For everything else we want iTerm2-style behavior: the path
-  // appears as plain typed text. Branch on file MIME, intercept the non-image
-  // case, read real paths from NSPasteboard via Rust, and inject raw bytes
-  // without bracketed-paste markers.
+  // WKWebView pastes a file as an opaque `File` and then auto-inserts its temp
+  // path, which xterm bracket-pastes and Claude turns into `[Image #N]`. Keep
+  // that for images; for anything else, type the real paths as plain text.
   const helperTextarea = container.querySelector<HTMLTextAreaElement>(
     ".xterm-helper-textarea",
   );
@@ -144,12 +104,9 @@ function wireClaudeExtras(
   };
   helperTextarea?.addEventListener("paste", onPaste, true);
 
-  // Returning false suppresses xterm's default dispatch for that key; we send
-  // our own byte sequence instead.
   term.attachCustomKeyEventHandler((ev) => {
     if (ev.type !== "keydown") return true;
 
-    // Shift+Enter → newline (Option+Enter equivalent in Claude Code).
     if (
       ev.key === "Enter" &&
       ev.shiftKey &&

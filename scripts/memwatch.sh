@@ -1,22 +1,15 @@
 #!/bin/bash
 # Sample system + per-app memory every N seconds, and dump a detailed snapshot
-# when something crosses a threshold. Built to catch the intermittent
-# "everything eats all the RAM and the machine hangs" event in the act.
+# when something crosses a threshold. A singleton: a second launch exits.
 #
 #   memwatch.sh [interval_seconds] [--foreground]
-#
-# Tethys launches this at boot (src-tauri/src/memwatch.rs). It is a singleton:
-# a second invocation while one is already sampling exits immediately, so
-# starting Tethys repeatedly (or launching by hand) never stacks samplers.
 #
 # Output: ~/memwatch/samples.tsv    one row per sample
 #         ~/memwatch/snap-<ts>.txt  detail dump when a threshold trips
 #         ~/memwatch/memwatch.pid   pid of the live sampler
 #
-# Memory is `phys_footprint` — the number Activity Monitor shows — read from
-# `top`, NOT the `ps rss` this script used to use. RSS excludes compressed and
-# swapped pages, so it understates by 2-3x exactly when the machine is under
-# the pressure we're trying to catch.
+# Memory is `phys_footprint`, not RSS: RSS excludes compressed and swapped
+# pages, so it understates exactly under the pressure we're trying to catch.
 
 set -u
 
@@ -34,8 +27,7 @@ OUT="$HOME/memwatch"
 SAMPLES="$OUT/samples.tsv"
 PIDFILE="$OUT/memwatch.pid"
 
-# A single process at this size is the symptom we're chasing, and no threshold
-# on a *named* app would have caught it — the point is to trip on whoever it is.
+# Deliberately not per-app: trip on whoever it is.
 PROC_ALARM_MB="${PROC_ALARM_MB:-8000}"
 SWAP_ALARM_MB="${SWAP_ALARM_MB:-12000}"
 FREE_ALARM_MB="${FREE_ALARM_MB:-250}"
@@ -64,10 +56,8 @@ if [ -s "$SAMPLES" ] && [ "$(head -1 "$SAMPLES")" != "$HEADER" ]; then
 fi
 [ -s "$SAMPLES" ] || printf '%s\n' "$HEADER" >"$SAMPLES"
 
-# One sample: join `ps` (pid, ppid, full argv) against `top` (pid,
-# phys_footprint) and bucket every process on the machine. Two calls and one
-# awk, rather than the old script's five `ps | grep` subshells, so every column
-# in a row describes the same instant.
+# One `ps` and one `top`, joined on pid, so every column in a row describes the
+# same instant.
 sample_row() {
   {
     ps -Ao pid=,ppid=,command=
@@ -124,9 +114,7 @@ sample_row() {
         else if (ancestor(p, claude_pid))             kids   += m
         else if (is_tethys)                           tethys += m
         else if (cmd[p] ~ /com\.apple\.WebKit\.WebContent/) webview += m
-        # A session running tests under docker compose spends its memory in
-        # the Docker VM, a launchd child that descends from no claude process,
-        # so it would otherwise be invisible in every per-app column here.
+        # docker compose test runs live in a VM that descends from no session.
         else if (cmd[p] ~ /Virtualization\.framework|Docker\.app|com\.docker/) docker += m
         else if ((p in dev_pid) || ancestor(p, dev_pid))    devstack += m
         else if (cmd[p] ~ /iTerm\.app\/Contents\/MacOS/)    iterm += m
@@ -134,9 +122,6 @@ sample_row() {
         else if (cmd[p] ~ /Google Chrome\.app/)             chrome += m
       }
 
-      # Three largest processes, with enough of the command line to identify
-      # them later. The old script cut this at the first whitespace, which made
-      # every row say "/Applications/Google".
       for (p in by_mb) {
         if (by_mb[p] > t1v) { t3v=t2v; t3=t2; t2v=t1v; t2=t1; t1v=by_mb[p]; t1=p }
         else if (by_mb[p] > t2v) { t3v=t2v; t3=t2; t2v=by_mb[p]; t2=p }
@@ -168,8 +153,6 @@ snapshot() {
       awk '$1 ~ /^[0-9]+$/ {print $1}' |
       while read -r p; do ps -o pid=,ppid=,etime=,command= -p "$p" 2>/dev/null | cut -c1-160; done
     echo; echo "=== claude processes and everything they spawned ==="
-    # The hypothesis this column exists to test: a session running a big test
-    # suite. Descendants are what cost the memory, not `claude` itself.
     ps -Ao pid=,ppid=,etime=,command= | awk '
       { pid[$1]=$1; pp[$1]=$2; line[$1]=$0
         a=$4; sub(/.*\//,"",a); if (a=="claude") cl[$1]=1 }
@@ -234,10 +217,7 @@ if [ "$FOREGROUND" = 1 ]; then
   echo $$ >"$PIDFILE"
   main_loop
 else
-  # Detach into a background subshell that ignores the terminal's signals, so
-  # the sampler survives Ctrl-C on the `pnpm tauri dev` that started Tethys —
-  # and survives Tethys itself dying, which is when the aftermath matters most.
-  # SIGTERM is deliberately left alone: `pkill -f memwatch.sh` still works.
+  # Survives Ctrl-C on `pnpm tauri dev` and Tethys dying; SIGTERM still works.
   ( trap '' HUP INT; main_loop >/dev/null 2>>"$OUT/memwatch.err" ) &
   echo $! >"$PIDFILE"
   echo "[memwatch] sampling every ${INTERVAL}s -> $SAMPLES (pid $!)" >&2

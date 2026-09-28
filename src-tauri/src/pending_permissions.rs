@@ -1,12 +1,7 @@
-//! Captures permission entries that exist in a workspace's combined
-//! `<workspace-root>/.claude/settings.local.json` but aren't present in the
-//! union of its per-repo shared files. These come from sessions Claude
-//! ran at the workspace root (cwd = workspace dir), where grants get
-//! written to the combined file and would otherwise be orphaned on purge.
-//!
-//! The captured entries land in `<data_dir>/pending_permissions.json` and
-//! are surfaced in the UI for the user to fold into the appropriate
-//! per-repo file(s) or dismiss.
+//! A session at the workspace root writes its grants to the root's
+//! `.claude/settings.local.json`, which purge deletes. Anything there that no
+//! per-repo shared file already has is kept for the user to fold into a repo
+//! or dismiss.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -26,23 +21,16 @@ pub struct PendingPermission {
     pub id: String,
     pub workspace_id: String,
     pub workspace_branch: String,
-    /// Repos the source workspace contained at the moment of capture. Used
-    /// by the UI to populate the "apply to which repo(s)" dropdown even
-    /// after the workspace is gone.
+    /// Outlives the workspace, for the apply UI's repo picker.
     #[serde(default)]
     pub workspace_repo_keys: Vec<String>,
     pub captured_at: DateTime<Utc>,
     pub category: PermissionCategory,
-    /// The entry as it appeared in the workspace-root combined file, with
-    /// `./<repo-key>/...` prefixes preserved.
+    /// As written at the root, `./<repo-key>/` prefixes included.
     pub raw_entry: String,
-    /// When the entry's path argument starts with `./<repo-key>/` for one
-    /// of `workspace_repo_keys`, the matched repo key. Used as the default
-    /// target in the apply UI.
+    /// The repo whose `./<repo-key>/` prefix the entry's path starts with.
     pub suggested_repo_key: Option<String>,
-    /// The entry with the matched `./<repo-key>/` prefix stripped — the
-    /// form it should take in the per-repo shared file. Only set when
-    /// `suggested_repo_key` is set.
+    /// `raw_entry` without that prefix, the form a per-repo file wants.
     pub stripped_entry: Option<String>,
 }
 
@@ -52,9 +40,6 @@ pub struct PendingPermissionsFile {
     pub entries: Vec<PendingPermission>,
 }
 
-/// Diff the workspace's combined settings file against the union of its
-/// per-repo shared files and append any extra entries to the pending list.
-/// Called from `purge_workspace` before the worktree dirs are removed.
 pub async fn capture_for_purge(workspace: &Workspace, paths: &Paths) -> AppResult<()> {
     let Some(workspace_root) = workspace.root_buf() else {
         return Ok(());
@@ -69,8 +54,8 @@ pub async fn capture_for_purge(workspace: &Workspace, paths: &Paths) -> AppResul
         .map(|r| r.repo_key.clone())
         .collect();
 
-    // What the combined file should contain if nothing was granted inside a
-    // workspace-root session: every per-repo entry, scoped to its repo.
+    // Every per-repo entry, scoped to its repo: what the root file holds if no
+    // root session granted anything.
     let mut expected: BTreeSet<String> = BTreeSet::new();
     for repo_key in &repo_keys {
         let repo_doc = SettingsDoc::read_lossy(&paths.repo_shared_claude_local(repo_key)).await;
@@ -140,14 +125,8 @@ async fn save_file(path: &Path, file: &PendingPermissionsFile) -> AppResult<()> 
     Ok(())
 }
 
-/// Apply a pending entry to one or more per-repo shared `settings.local.json`
-/// files, then remove it from the pending list. Writing to a repo's shared
-/// file means the entry persists into every workspace that includes that
-/// repo from then on.
-///
-/// Uses `stripped_entry` only when applying to the suggested repo (where
-/// the prefix corresponded). Otherwise writes `raw_entry` verbatim — the
-/// caller is overriding our suggestion and is responsible for the form.
+/// Any repo but the suggested one gets `raw_entry` verbatim: the prefix only
+/// means something for the repo it names.
 pub async fn apply_pending(
     paths: &Paths,
     pending_id: &str,

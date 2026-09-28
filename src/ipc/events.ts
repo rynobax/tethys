@@ -7,17 +7,7 @@ import type {
   TurnChangedEvent,
 } from "../types";
 
-/**
- * Every event the backend emits, with its payload type.
- *
- * The names used to be string literals scattered across eleven
- * `useTauriEvent` calls in four files, each restating a type parameter that
- * nothing validated. Collecting them makes drift a diff you can read: the
- * table is what `scripts/check-ipc-parity.mjs` compares against the Rust
- * emit sites. That check is what surfaced `workspace:reordered`: emitted,
- * listened to by nobody, and documented in a comment as driving a refresh it
- * did not drive. It has since been removed.
- */
+/** Checked against Rust's emit sites by `scripts/check-ipc-parity.mjs`. */
 export interface AppEvents {
   "workspace:changed": { workspace_id: string };
   "session:changed": { workspace_id: string };
@@ -37,11 +27,6 @@ export interface AppEvents {
 
 export type AppEventName = keyof AppEvents;
 
-/**
- * Subscribe to a backend event. Same behaviour as `useTauriEvent`, but the
- * name is checked against `AppEvents` and the payload type comes with it
- * rather than being asserted at the call site.
- */
 export function useAppEvent<K extends AppEventName>(
   name: K,
   handler: (payload: AppEvents[K]) => void,

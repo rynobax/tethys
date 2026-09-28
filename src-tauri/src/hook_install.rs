@@ -13,28 +13,20 @@ const EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "user-submit"),
     ("PreToolUse", "pre-tool"),
-    // Claude Code has no `PermissionResponse` hook — we have no way to
-    // observe the moment a user accepts/denies a permission prompt. Post
-    // is the next-best signal: when a (potentially permission-gated) tool
-    // finishes, we know the prompt was answered, so flip back to Working.
-    // This lags by however long the tool takes to run.
+    // There's no `PermissionResponse` hook; a gated tool finishing is the
+    // first sign its prompt was answered, lagging by the tool's runtime.
     ("PostToolUse", "post-tool"),
     ("Stop", "stop"),
-    // StopFailure fires when a turn dies to an API error — without this
-    // the session would hang in Working forever.
+    // A turn that dies to an API error would otherwise stay Working forever.
     ("StopFailure", "stop-failure"),
     ("Notification", "notify"),
-    // PermissionRequest covers sandbox-escape prompts (network / fs) that
-    // Notification doesn't fire for. Elicitation covers MCP user-input
-    // requests with the same semantics.
+    // Sandbox-escape prompts don't fire Notification.
     ("PermissionRequest", "permission-request"),
     ("Elicitation", "elicitation"),
 ];
 
-/// Ensure the Tethys hook entries are present in `settings_path` for all
-/// three events we care about. Idempotent: safe to call on every boot.
-/// Wrapped in an advisory `flock` on `lock_path` so two Tethys instances
-/// racing don't clobber each other.
+/// Idempotent. The `flock` keeps racing Tethys instances from clobbering each
+/// other.
 pub fn install(
     settings_path: &Path,
     lock_path: &Path,
@@ -50,7 +42,6 @@ pub fn install(
 
     let result = install_inner(settings_path, tethys_hook_bin);
 
-    // Release lock regardless. fs2 returns Err if lock was never held; ignore.
     FileExt::unlock(&lock_file).ok();
     drop(lock_file);
 
@@ -92,8 +83,7 @@ fn install_inner(settings_path: &Path, tethys_hook_bin: &Path) -> AppResult<()> 
                 AppError::Other(format!("settings.json `hooks.{event}` is not an array"))
             })?;
 
-        // Drop any stale Tethys entries (matched by the description marker)
-        // so a reinstall after a path change doesn't accumulate duplicates.
+        // Replace rather than append, so a moved binary leaves no duplicate.
         arr.retain(|entry| {
             entry.get("description").and_then(Value::as_str) != Some(MARKER)
         });
@@ -110,9 +100,7 @@ fn install_inner(settings_path: &Path, tethys_hook_bin: &Path) -> AppResult<()> 
 
     write_atomic(settings_path, &value)?;
 
-    // Verify: re-read and confirm at least one entry with our marker for
-    // each event. Cheap defense against partial writes or concurrent editor
-    // clobbers outside our lock.
+    // Editors write this file outside our lock.
     verify(settings_path)?;
 
     info!(path = %settings_path.display(), "installed Tethys Claude Code hooks");

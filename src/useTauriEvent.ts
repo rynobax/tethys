@@ -6,23 +6,10 @@ import {
 } from "@tauri-apps/api/event";
 
 /**
- * Subscribe to a Tauri event for the lifetime of the component.
- *
- * Handles two failure modes the naive `listen().then(un => un())` pattern
- * has in dev:
- *   - Cleanup fires before `listen()` resolves (StrictMode double-mount,
- *     fast re-renders): we defer the unlisten until the promise settles, and
- *     then by one more macrotask. `listen()` resolves with the id before the
- *     eval'd script that records the listener has run in the page, so an
- *     unlisten in that gap throws `listeners[eventId].handlerId` inside Tauri
- *     and never reaches the Rust side, leaking the listener.
- *   - `un()` rejects because Tauri's internal listener map was cleared out
- *     from under us (Vite HMR module re-evaluation): we swallow it — the
- *     listener is effectively gone either way. Tauri's unlisten is async, so
- *     a try/catch around the call would miss this; it has to be a `.catch`.
- *
- * The handler is captured in a ref so a new reference each render doesn't
- * re-subscribe.
+ * An unlisten issued right after `listen()` resolves runs before Tauri has
+ * recorded the listener, throws, and leaks it — hence the extra macrotask.
+ * Unlisten rejections are swallowed: after an HMR reload the listener is
+ * already gone.
  */
 export function useTauriEvent<T>(
   event: string,
@@ -34,7 +21,7 @@ export function useTauriEvent<T>(
   useEffect(() => {
     let disposed = false;
     let un: UnlistenFn | null = null;
-    // Typed `() => void`, but it's an async function at runtime.
+    // Typed `() => void`, but async at runtime.
     const release = (fn: UnlistenFn) => {
       Promise.resolve(fn()).catch(() => {});
     };

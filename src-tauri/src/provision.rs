@@ -1,11 +1,3 @@
-//! Provisioning and teardown of one repo's worktree inside a workspace.
-//!
-//! This lived in the middle of `commands.rs`, which meant the riskiest code in
-//! the app — including the rule deciding whether Purge may delete one of the
-//! user's own branches — sat between two awaits in a 2000-line module and
-//! could only be exercised through the Tauri runtime. Nothing here takes a
-//! Tauri type, so it is testable against a temp-dir git remote.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -34,19 +26,13 @@ pub struct RepoProvision<'a> {
     pub tx: &'a JobTx,
 }
 
-/// Clone (if needed) → pull → resolve branch → worktree add → install
-/// `.claude/settings.local.json` symlink → run setup script. Returns the
-/// `RepoLink` to push into state. Atomic for its own repo: any failure past
-/// `worktree add` tears down this repo's worktree (and its branch, if Tethys
-/// created it) before bubbling. Sibling repos remain the caller's
-/// responsibility (we don't know whether more still need provisioning).
+/// Atomic for its own repo only: sibling repos are the caller's to roll back.
 pub async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLink> {
     let clone_path = ctx.paths.repo_clone_path(&ctx.repo.key);
 
     git::ensure_clone(&clone_path, &ctx.repo.remote_url, ctx.tx, &ctx.repo.key).await?;
-    // A stray checkout in the clone would otherwise feed the wrong base into
-    // the pull (fast-forwards HEAD) and into any `track_from = None` worktree
-    // (branches off HEAD). Put it back on the default branch first.
+    // A stray checkout would become the base of the pull and of any worktree
+    // branched off HEAD.
     git::ensure_clone_on_default_branch(
         &clone_path,
         ctx.repo.default_branch.as_deref(),
@@ -69,9 +55,6 @@ pub async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLi
         );
     }
 
-    // Everything past `worktree_add` leaves on-disk state behind, so on failure
-    // we tear down this repo's own worktree (and its branch, only if we created
-    // it) before bubbling. Sibling repos are the caller's responsibility.
     let provisioned = async {
         git::worktree_add(
             &clone_path,
@@ -141,12 +124,7 @@ pub async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLi
     }
 }
 
-/// Copy each entry in `copy_files` from the base clone into the new worktree.
-/// These are typically gitignored files (`.env`, etc.) that `git worktree add`
-/// won't carry over but setup scripts and dev servers need. Missing sources
-/// are silently skipped; an existing file at the destination is left alone.
-/// Paths must be relative and free of `..` segments — anything else is
-/// rejected to keep the copy contained inside `clone_path` / `worktree_path`.
+/// Carries gitignored files (`.env` etc.) that `git worktree add` doesn't.
 async fn copy_configured_files(
     clone_path: &Path,
     worktree_path: &Path,
@@ -192,18 +170,12 @@ pub struct RepoTeardown<'a> {
     pub repo_key: &'a str,
     pub worktree_path: &'a Path,
     pub branch: &'a str,
-    /// Whether Tethys created this branch. A pre-existing branch (e.g. a PR
-    /// branch checked out for local edits) is left intact — only the worktree
-    /// is removed.
+    /// A pre-existing branch (e.g. someone's PR) is never deleted.
     pub created_branch: bool,
     pub paths: &'a Paths,
     pub tx: &'a JobTx,
 }
 
-/// Best-effort reverse of `provision_repo_worktree`: force-remove the
-/// worktree, prune stale registrations, and delete the branch when Tethys
-/// created it. Errors are streamed as status events but never bubbled —
-/// teardown is always best-effort.
 pub async fn teardown_repo_worktree(ctx: RepoTeardown<'_>) {
     if ctx.worktree_path.exists() {
         let clone_path = ctx.paths.repo_clone_path(ctx.repo_key);
@@ -223,71 +195,36 @@ pub async fn teardown_repo_worktree(ctx: RepoTeardown<'_>) {
 }
 
 pub struct WorkspaceProvision<'a> {
-    /// Id of the `Creating` draft the caller already inserted into state.
     pub workspace_id: &'a str,
     pub branch: &'a str,
-    /// Directory name under `worktree_root`, shared by every repo's worktree.
     pub workspace_dir: &'a str,
-    /// Repos to span, already resolved against the registry.
     pub repos: &'a [Repo],
     pub registry: &'a RepoRegistry,
     pub paths: &'a Paths,
     pub store: &'a Arc<Store>,
     pub in_progress: &'a InProgressWorkspaces,
-    /// The one-at-a-time gate. Held for the whole of provisioning, so a batch
-    /// of workspaces asked for at once is built one after another.
     pub queue: &'a ProvisionQueue,
     pub tx: &'a JobTx,
 }
 
-/// Provision every repo of a workspace whose `Creating` draft is already in
-/// state, then seed the files a session expects to find at the root.
-///
-/// Waits its turn first: only one workspace is provisioned at a time, so
-/// asking for several at once builds them one after another instead of
-/// starving each other's setup scripts into their timeouts. A job that has to
-/// wait says so — on its log channel, and on its own row, which goes `Queued`
-/// until a slot frees up.
-///
-/// On success the draft flips to `Ready` and the stored `Workspace` comes back.
-/// On failure every worktree that did land is torn down, the partial parent dir
-/// is removed, and the draft flips to `CreationFailed` with the message — so
-/// the row stays where it is with the error visible, and `forget_workspace` is
-/// how it goes away.
-///
-/// The caller supplies the event sink, which is the whole reason this isn't
-/// still inside the Tauri command: the UI path streams into a `Channel` the
-/// frontend opened, and a handoff has no frontend to stream to.
 pub async fn provision_workspace(ctx: WorkspaceProvision<'_>) -> AppResult<Workspace> {
-    // Register as in-progress so the reconciler doesn't flag our worktree dirs
-    // as orphans mid-create. The guard clears on any exit — normal return,
-    // `?`, panic, or task cancellation. Taken before the queue wait below, so
-    // a job parked in the queue still holds its directory name and a handoff
-    // landing meanwhile suffixes its branch instead of picking the same one.
+    // Keeps the reconciler off our dirs. Taken before queueing so a handoff
+    // landing meanwhile can't claim the same directory name.
     let _in_progress_guard = ctx.in_progress.insert(ctx.workspace_dir.to_string());
 
-    // Wait for the machine. The slot is held until this function returns, and
-    // released just as reliably on the failure paths below, since dropping the
-    // guard is what admits the next job.
     let mut waited = false;
     let _slot = match ctx.queue.try_acquire() {
         Some(slot) => slot,
         None => {
             waited = true;
             ctx.tx.status(ctx.queue.wait_message(), None);
-            // Say it on the row too. A handoff has no log pane to read, and a
-            // sidebar full of rows all claiming to be "creating" while one
-            // machine does the work one at a time is a lie worth not telling.
+            // A handoff has no log pane, so the row has to say it.
             set_status(ctx.store, ctx.workspace_id, WorkspaceStatus::Queued).await;
             ctx.queue.acquire().await
         }
     };
 
-    // Queueing turned "deleted mid-create" from a race into an ordinary thing
-    // to do — the row sits there for minutes, doing nothing, invitingly. Bail
-    // before the first clone: nothing is on disk yet, so there is nothing to
-    // roll back, and the row is left `Queued` rather than `CreationFailed` —
-    // it never failed, it was called off.
+    // Left `Queued`, not `CreationFailed`: it was called off, not failed.
     let live = ctx
         .store
         .with_workspace(ctx.workspace_id, |w| w.deleted_at.is_none())
@@ -300,15 +237,10 @@ pub async fn provision_workspace(ctx: WorkspaceProvision<'_>) -> AppResult<Works
         return Err(AppError::Other(msg.into()));
     }
 
-    // Only now does the row start telling the truth about being built.
     if waited {
         set_status(ctx.store, ctx.workspace_id, WorkspaceStatus::Creating).await;
     }
 
-    // Provisioned links accumulate here so the rollback path can tear down
-    // exactly what succeeded (each carries whether Tethys created its branch).
-    // A failing repo self-cleans inside `provision_repo_worktree`, so it never
-    // appears here.
     let mut created: Vec<RepoLink> = Vec::new();
     let orchestrate = async {
         for repo in ctx.repos {
@@ -355,9 +287,6 @@ pub async fn provision_workspace(ctx: WorkspaceProvision<'_>) -> AppResult<Works
             ctx.tx
                 .status(format!("tearing down partial workspace: {msg}"), None);
 
-            // Best-effort teardown of the repos we fully provisioned. Each link
-            // records whether Tethys created its branch, so a pre-existing
-            // branch we merely checked out (e.g. a PR branch) is left intact.
             for link in created.iter().rev() {
                 teardown_repo_worktree(RepoTeardown {
                     repo_key: &link.repo_key,
@@ -370,8 +299,6 @@ pub async fn provision_workspace(ctx: WorkspaceProvision<'_>) -> AppResult<Works
                 .await;
             }
 
-            // Remove the now-empty parent dir so the reconciler doesn't flag it
-            // as an orphan on the next tick.
             let parent = ctx.registry.worktree_root.join(ctx.workspace_dir);
             if parent.exists() && reconcile::is_under(&ctx.registry.worktree_root, &parent) {
                 if let Err(e) = tokio::fs::remove_dir_all(&parent).await {
@@ -402,10 +329,6 @@ pub async fn provision_workspace(ctx: WorkspaceProvision<'_>) -> AppResult<Works
     }
 }
 
-/// Move a draft between its two waiting states. Best-effort by design: the
-/// only way this fails is the workspace being gone, and a row that no longer
-/// exists doesn't need its status corrected — the caller finds out for real at
-/// the liveness check.
 async fn set_status(store: &Arc<Store>, workspace_id: &str, status: WorkspaceStatus) {
     if let Err(e) = store
         .update_workspace(workspace_id, |ws| {
@@ -418,9 +341,6 @@ async fn set_status(store: &Arc<Store>, workspace_id: &str, status: WorkspaceSta
     }
 }
 
-/// Write the two files a session finds at a workspace root: the union-merged
-/// `.claude/settings.local.json` and the generated `CLAUDE.md`. Both are
-/// best-effort — a workspace with neither is still a usable workspace.
 async fn seed_workspace_root(
     workspace: &Workspace,
     registry: &RepoRegistry,
@@ -541,8 +461,6 @@ mod tests {
         }
     }
 
-    /// Everything `provision_workspace` needs beyond a `fixture`: a store
-    /// holding a `Creating` draft per workspace, and the queue they share.
     struct TestCtx {
         store: Arc<Store>,
         registry: RepoRegistry,
@@ -627,12 +545,9 @@ mod tests {
         );
     }
 
-    /// Checking out a branch that already exists is how you pick up a PR
-    /// branch for local edits — and Tethys must not claim ownership of it.
     #[tokio::test]
     async fn checking_out_an_existing_branch_does_not_claim_ownership() {
         let f = fixture();
-        // Provision once to create the branch and the clone...
         let first = f.worktree_root.join("ws-1").join("api");
         provision_repo_worktree(RepoProvision {
             repo: &repo("api", &f.origin, None),
@@ -643,7 +558,6 @@ mod tests {
         })
         .await
         .unwrap();
-        // ...then release it so a second workspace can check it out.
         let clone = f.paths.repo_clone_path("api");
         git_ok(&clone, &["worktree", "remove", "--force", &first.to_string_lossy()]);
 
@@ -664,8 +578,6 @@ mod tests {
         );
     }
 
-    /// The teardown contract, in the case that actually exercises it: a setup
-    /// script fails after `worktree add` has already put things on disk.
     #[tokio::test]
     async fn a_failing_setup_script_removes_the_worktree_and_its_own_branch() {
         let f = fixture();
@@ -690,13 +602,9 @@ mod tests {
         );
     }
 
-    /// Same failure, but the branch pre-existed. The worktree goes; the user's
-    /// branch stays. This is the invariant that decides whether a rollback can
-    /// destroy work the user did outside Tethys.
     #[tokio::test]
     async fn a_failing_setup_script_leaves_a_pre_existing_branch_intact() {
         let f = fixture();
-        // Create the branch via a first, successful provision, then release it.
         let first = f.worktree_root.join("ws-1").join("api");
         provision_repo_worktree(RepoProvision {
             repo: &repo("api", &f.origin, None),
@@ -730,15 +638,12 @@ mod tests {
         );
     }
 
-    /// `copy_files` carries gitignored files (.env and friends) that
-    /// `git worktree add` won't.
     #[tokio::test]
     async fn configured_files_are_copied_from_the_clone() {
         let f = fixture();
         let mut r = repo("api", &f.origin, None);
         r.copy_files = vec![".env".into()];
 
-        // Seed the clone by provisioning once, then drop a file into it.
         let first = f.worktree_root.join("ws-0").join("api");
         provision_repo_worktree(RepoProvision {
             repo: &repo("api", &f.origin, None),
@@ -765,9 +670,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "SECRET=1");
     }
 
-    /// Two workspaces asked for at once, one machine: their setup scripts must
-    /// not overlap. The script writes a start/end pair into a shared log, so
-    /// interleaving would show up as `start start end end`.
     #[tokio::test]
     async fn two_workspaces_are_provisioned_one_after_the_other() {
         let f = fixture();
@@ -797,16 +699,13 @@ mod tests {
         );
     }
 
-    /// Waiting in the queue is long enough to change your mind in. A workspace
-    /// deleted while it waits is abandoned where it stands — nothing cloned,
-    /// nothing on disk for the purger to chase.
     #[tokio::test]
     async fn a_workspace_deleted_while_queued_is_never_built() {
         let f = fixture();
         let ctx = TestCtx::new(&f, "sleep 0.4").await;
 
         let cancel = async {
-            // Long enough that "ws-b" is parked in the queue behind "ws-a".
+            // "ws-b" is parked behind "ws-a" by now.
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             ctx.store
                 .update_workspace("ws-b", |ws| {
@@ -841,7 +740,6 @@ mod tests {
         );
     }
 
-    /// Paths that could escape the worktree are rejected before any copying.
     #[tokio::test]
     async fn copy_files_rejects_paths_that_escape_the_worktree() {
         let f = fixture();

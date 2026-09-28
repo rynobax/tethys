@@ -11,12 +11,6 @@ use crate::job::{JobTx, LogStream};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
-/// Run a repo's setup script in the newly-created worktree.
-/// Shell is `/bin/sh -c <script>` so users can pass full commands
-/// (`"yarn install && yarn build"`).
-///
-/// `timeout_secs` defaults to `DEFAULT_TIMEOUT_SECS` (10 min) when `None`.
-/// On timeout: SIGTERM, then SIGKILL after a 5s grace.
 pub async fn run_setup_script(
     script: &str,
     cwd: &Path,
@@ -65,7 +59,6 @@ pub async fn run_setup_script(
         Ok(Ok(status)) => status,
         Ok(Err(e)) => return Err(AppError::Io(e)),
         Err(_) => {
-            // Timed out — SIGTERM, then SIGKILL after grace.
             tx.status(
                 format!("setup script timed out after {}s; terminating", duration.as_secs()),
                 Some(repo),

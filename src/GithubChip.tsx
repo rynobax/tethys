@@ -86,9 +86,6 @@ function BugbotIcon() {
   );
 }
 
-/** A train of entries advancing out of a queue. Deliberately unlike the merge
-    glyph next to it: being queued is the state right before merging, so the two
-    are worth telling apart at a glance. */
 function MergeQueueIcon() {
   return (
     <svg className="gh-state-icon" viewBox="0 0 16 16" aria-hidden="true">
@@ -114,7 +111,7 @@ function MergeQueueIcon() {
   );
 }
 
-/** Octicon git-merge: the chip's whole story once a PR lands. */
+/** Octicon git-merge. */
 function MergedIcon() {
   return (
     <svg className="gh-state-icon" viewBox="0 0 16 16" aria-hidden="true">
@@ -161,8 +158,6 @@ function Square({
   );
 }
 
-/** Red once the queue is about to give up on the PR — those two need acting
-    on, where the rest of the queue is just waiting. */
 function mergeQueueTone(state: MergeQueueState): "pending" | "bad" {
   return state === "unmergeable" || state === "locked" ? "bad" : "pending";
 }
@@ -204,15 +199,12 @@ function reviewTone(
 ): SquareTone {
   switch (decision) {
     case "approved":
-      // Approved with unresolved threads is still "feedback outstanding".
       return unresolved > 0 ? "yellow" : "green";
     case "changes_requested":
       return "red";
     case "review_required":
     case "none":
-      // No verdict yet. Yellow once the ball is in someone's court — a
-      // reviewer who's been asked, or threads left for you — and gray only
-      // when nobody has been asked at all, so gray means "go request one".
+      // Gray means "go request a review".
       return unresolved > 0 || requested ? "yellow" : "gray";
   }
 }
@@ -290,16 +282,9 @@ export function GithubChip({
   onDetach,
 }: {
   status: GithubPrStatus;
-  /** When false, the chip is informational only — no click-to-open, no hover. */
   linkable?: boolean;
-  /**
-   * Extra hover context, prepended to the tooltip. The sidebar passes the repo
-   * key, since it drops the repo label from the row and the chip is then the
-   * only place that attribution can live.
-   */
+  /** Prepended to the tooltip. */
   context?: string;
-  /** When set, renders a detach button. The sidebar leaves it off — detaching
-   *  is a workspace-header action — but any tracked PR can be detached. */
   onDetach?: () => void;
 }) {
   const stale = isStale(status.fetched_at);
@@ -308,9 +293,7 @@ export function GithubChip({
   const onClick = linkable
     ? (e: React.MouseEvent) => {
         e.stopPropagation();
-        openUrl(status.url).catch(() => {
-          /* non-fatal */
-        });
+        openUrl(status.url).catch(() => {});
       }
     : undefined;
 
@@ -400,7 +383,6 @@ export function GithubChip({
   );
 }
 
-/** Removes a manually-attached PR from the workspace. Nothing on GitHub changes. */
 export function PrDetachButton({
   prNumber,
   onDetach,

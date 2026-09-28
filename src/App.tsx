@@ -45,13 +45,7 @@ import {
 } from "./workspaceDerived";
 import "./App.css";
 
-/** The agent CLIs a workspace can run, shared by the new-workspace form and
- *  the workspace header's "run with" switcher. First entry is the default.
- *
- *  One list, two fields: the binary is what gets executed, the agent is what
- *  decides how it's spawned, resumed and hooked. The agent is carried here
- *  rather than derived from the name, so a differently-spelled wrapper (or a
- *  second `claude-*` variant) can't be mistaken for the wrong harness. */
+// First entry is the default. The agent is stated, never derived from the name.
 const AGENT_CHOICES = [
   { binary: "claude", agent: "claude" },
   { binary: "claude-hipaa", agent: "claude" },
@@ -59,29 +53,18 @@ const AGENT_CHOICES = [
   { binary: "codex", agent: "codex" },
 ] as const satisfies readonly { binary: string; agent: Agent }[];
 
-/** The agent a binary name belongs to. Falls back to Claude for a name the
- *  list no longer carries — a workspace pinned to a retired binary keeps
- *  working rather than becoming unopenable. */
+// Claude for a retired binary, so a workspace pinned to one stays openable.
 const agentFor = (binary: string): Agent =>
   AGENT_CHOICES.find((c) => c.binary === binary)?.agent ?? "claude";
 
-/** Bracketed-paste markers: Claude Code treats the wrapped bytes as pasted
- *  text rather than typed keystrokes, so the draft lands in the prompt box
- *  without being submitted. Mirrors the drag-drop paste in SessionTerminal. */
+// Bracketed paste lands the draft in the composer without submitting it.
 const PASTE_START = "\x1b[200~";
 const PASTE_END = "\x1b[201~";
-/** Give Claude's TUI a beat to mount its input box after the SessionStart
- *  hook fires before pasting, so the draft isn't swallowed by the startup
- *  redraw. */
+// So the draft isn't swallowed by the TUI's startup redraw.
 const DRAFT_PROMPT_SETTLE_MS = 500;
 
-/**
- * One in-flight (or just-settled) add-repo job, as the detail pane needs to
- * draw it. Lives in `App` so the work outlives the pane that started it.
- */
 interface AddRepoRun {
-  /** Identifies this invocation, so a dismissed job's late events are
-   *  dropped instead of landing on whatever replaced it. */
+  // Per invocation, so a dismissed job's late events can't land on its successor.
   key: string;
   repoKey: string;
   events: JobEvent[];
@@ -98,80 +81,32 @@ function App() {
   const [selectedId, setSelectedId] = useState<WorkspaceId | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /**
-   * Args for create_workspace invocations the runner is currently driving,
-   * keyed by workspace_id. The backend inserts a `Creating` draft into
-   * `workspaces` from t=0, so this map only carries the args the runner
-   * needs to pass to invoke; sidebar position lives entirely in `workspaces`.
-   * Entries are removed on success (after auto-start) or on user dismissal.
-   */
   const [creationRuns, setCreationRuns] = useState<
     Map<WorkspaceId, CreateWorkspaceArgs>
   >(new Map());
-  /**
-   * In-flight `add_repo_to_workspace` invocations, keyed by workspace id.
-   *
-   * The job is driven from here rather than from inside the workspace's
-   * detail pane, because a pane unmounts the moment you select another
-   * workspace — which is why adding a repo used to be a modal you had to sit
-   * and watch. The channel writes straight into this map, so nothing has to
-   * stay mounted for the log to keep accumulating; the detail pane only
-   * *displays* the run it is handed, as a popup over its own header.
-   *
-   * `key` is minted per invocation and captured by the channel closure, so
-   * events from a job the user has already dismissed can't land on the run
-   * that replaced it.
-   */
+  // Driven from here, not the detail pane, because the pane unmounts when you
+  // select another workspace and the log has to keep accumulating.
   const [addRepoRuns, setAddRepoRuns] = useState<Map<WorkspaceId, AddRepoRun>>(
     new Map(),
   );
-  /**
-   * Per-workspace attention state, tracked by listening to
-   * `session:turn_changed` globally so the sidebar dot doesn't need a
-   * session fetch per workspace.
-   *
-   * Stores the backend's derived answers rather than the raw
-   * running/runtime_state/turn_acknowledged triple. Deriving it here is what
-   * let the sidebar and the detail pane drift apart.
-   */
+  // The backend's derived answers, never re-derived here: doing so let the
+  // sidebar and the detail pane drift apart.
   const [turnStates, setTurnStates] = useState<
     Map<WorkspaceId, { needsTurn: boolean; working: boolean }>
   >(new Map());
-  /**
-   * Each workspace's live session, cached so switching into a workspace
-   * shows the terminal immediately instead of flashing "Dormant" during
-   * the get_session round-trip. Populated eagerly on workspace load and
-   * kept in sync via session:* events. `null` is a real answer: dormant.
-   */
+  // Cached so switching in doesn't flash "Dormant" during get_session. `null`
+  // is a real answer: dormant.
   const [sessionByWorkspace, setSessionByWorkspace] = useState<
     Map<WorkspaceId, SessionInfo | null>
   >(new Map());
-  /**
-   * Draft "initial prompt" text the user types while a workspace is still
-   * provisioning, keyed by workspace_id. Once that workspace's live session
-   * reports `tui_ready` (the agent turned bracketed paste on, so its composer
-   * is on screen), the draft is pasted into the session — bracketed paste, no
-   * submit — and the entry is dropped.
-   */
   const [draftPrompts, setDraftPrompts] = useState<Map<WorkspaceId, string>>(
     new Map(),
   );
-  /**
-   * Live notes text per workspace, keyed by workspace_id. The notes editor
-   * remounts on every workspace switch, and `workspaces[].notes` can't seed it
-   * on the way back in: `set_workspace_notes` deliberately doesn't emit
-   * `workspace:changed` (that would churn the pane on every keystroke), so the
-   * copy in `workspaces` stays at whatever the last `refresh()` read — stale
-   * the moment the user types. This map is the authoritative text while the app
-   * is running; the backend still gets debounced writes for restarts.
-   */
+  // Authoritative while running: `set_workspace_notes` emits no
+  // `workspace:changed`, so `workspaces[].notes` goes stale as you type.
   const [noteDrafts, setNoteDrafts] = useState<Map<WorkspaceId, string>>(
     new Map(),
   );
-  /**
-   * Workspaces whose draft prompt has already been pasted (or is mid-paste),
-   * so the flush effect doesn't double-send on repeated `session:changed`.
-   */
   const flushedDraftsRef = useRef<Set<WorkspaceId>>(new Set());
   const [theme, setTheme] = useState<Theme | null>(null);
 
@@ -207,9 +142,7 @@ function App() {
       next.set(workspace_id, { needsTurn: needs_turn, working });
       return next;
     });
-    // Keep the cached SessionInfo in sync so WorkspaceDetail sees the new
-    // runtime_state without a full re-fetch. A signal for a session that is
-    // no longer the workspace's (replaced by a binary switch) is skipped.
+    // A signal for a session a binary switch has replaced is skipped.
     setSessionByWorkspace((prev) => {
       const s = prev.get(workspace_id);
       if (!s || s.id !== session_id) return prev;
@@ -236,9 +169,6 @@ function App() {
           ...w,
           repo_links: w.repo_links.map((r) => {
             if (r.repo_key !== repo_key) return r;
-            // Every status names its PR, and every PR lives in one list, so
-            // there's no slot to pick between. A number we don't track was
-            // detached mid-tick; the backend already dropped it.
             return {
               ...r,
               prs: r.prs.map((p) =>
@@ -262,9 +192,6 @@ function App() {
   );
 
   const handleClearTurn = useCallback((workspace: Workspace) => {
-    // Backend persists turn_acknowledged + emits session:turn_changed
-    // back, which updates turnStates. No optimistic local update needed —
-    // the round-trip is fast and the persisted flag is the source of truth.
     api
       .acknowledgeSessionTurn(workspace.id)
       .catch((e) => console.error("acknowledge_session_turn failed:", e));
@@ -278,14 +205,8 @@ function App() {
         next.set(workspaceId, session);
         return next;
       });
-      // Seed turnStates from the snapshot. The backend restores turn state
-      // from disk at boot but deliberately emits nothing (the frontend isn't
-      // subscribed yet) — without this the sidebar dot stays dark across
-      // restarts until the next live event fires.
-      //
-      // This used to race the `dormant` event handler, which deleted the
-      // entry while this re-inserted a stale one. Both sides now read the
-      // same derived flags, so they can't disagree.
+      // The backend restores turn state at boot without emitting, since
+      // nothing is subscribed yet; this is what lights the dot after a restart.
       setTurnStates((prev) => {
         const needsTurn = session?.needs_turn ?? false;
         const working = session?.working ?? false;
@@ -315,8 +236,6 @@ function App() {
       setRegistry(reg);
       setDiscrepancies(disc);
       setError(null);
-      // Pre-load every workspace's session so switching in doesn't render
-      // a stale "Dormant" pane.
       await Promise.all(list.map((w) => refreshSessionFor(w.id)));
     } catch (e) {
       setError(String(e));
@@ -335,12 +254,6 @@ function App() {
     refreshSessionFor(payload.workspace_id);
   });
 
-  // Paste any draft initial-prompt into a workspace's agent session once
-  // it's up. The PTY reader emits `session:changed` (which refreshes
-  // `sessionByWorkspace`) the moment the agent turns bracketed paste on,
-  // and `tui_ready` is that fact. The SessionStart hook used to be the
-  // signal, but codex fires it at the first turn rather than at startup, so
-  // the draft arrived after the user's first message.
   useEffect(() => {
     for (const [workspaceId, prompt] of draftPrompts) {
       if (flushedDraftsRef.current.has(workspaceId)) continue;
@@ -361,7 +274,6 @@ function App() {
           await api.sendInput(sessionId, bytes);
         } catch (e) {
           console.error("flush draft prompt failed:", e);
-          // Let a later `session:changed` retry the paste.
           flushedDraftsRef.current.delete(workspaceId);
           return;
         }
@@ -390,18 +302,12 @@ function App() {
   const handleCreateSuccess = useCallback(
     async (workspaceId: WorkspaceId, result: unknown) => {
       const ws = result as Workspace;
-      // Tear down the runner now that provisioning is done — the workspace
-      // already lives in `workspaces` with status=Ready, so the detail
-      // pane swaps from JobLogPane to WorkspaceDetail naturally.
       setCreationRuns((prev) => {
         if (!prev.has(workspaceId)) return prev;
         const next = new Map(prev);
         next.delete(workspaceId);
         return next;
       });
-      // Auto-start the workspace's agent session. Where it runs — the
-      // only repo's worktree, or the workspace root — is the backend's
-      // call (`Workspace::session_cwd`).
       try {
         await api.startAgentSession(ws.id);
       } catch (e) {
@@ -419,7 +325,6 @@ function App() {
         next.delete(workspaceId);
         return next;
       });
-      // Drop any draft prompt the user typed for this (now-abandoned) workspace.
       setDraftPrompts((prev) => {
         if (!prev.has(workspaceId)) return prev;
         const next = new Map(prev);
@@ -428,34 +333,23 @@ function App() {
       });
       flushedDraftsRef.current.delete(workspaceId);
       setSelectedId((cur) => (cur === workspaceId ? null : cur));
-      // Drop the failed draft from state. `forget_workspace` is a hard
-      // delete with no grace window — the right call here since there are
-      // no worktrees on disk for a CreationFailed entry (the backend
-      // already tore them down) and no purger semantics to preserve.
+      // A failed draft has no worktrees, so no grace window is needed.
       try {
         await api.forgetWorkspace(workspaceId);
       } catch (e) {
-        // Workspace may already be gone (e.g. invoke rejected before the
-        // draft was even inserted) — not fatal, just log and move on.
+        // The invoke may have been rejected before the draft was inserted.
         console.warn("forget_workspace failed:", e);
       }
     },
     [],
   );
 
-  /**
-   * Kick off `add_repo_to_workspace` for a workspace and stream its events
-   * into `addRepoRuns`. Nothing about this is tied to the detail pane, so
-   * the user is free to work in another workspace while it provisions —
-   * and to come back to a finished (or failed) log when they return.
-   */
   const startAddRepo = useCallback(
     (workspaceId: WorkspaceId, repoKey: string) => {
       const runKey = crypto.randomUUID();
       const patch = (update: (run: AddRepoRun) => AddRepoRun) =>
         setAddRepoRuns((prev) => {
           const cur = prev.get(workspaceId);
-          // A run the user dismissed, or one replaced by a later attempt.
           if (!cur || cur.key !== runKey) return prev;
           const next = new Map(prev);
           next.set(workspaceId, update(cur));
@@ -524,8 +418,7 @@ function App() {
 
   const handleDelete = useCallback(async (workspace: Workspace) => {
     setSelectedId((cur) => (cur === workspace.id ? null : cur));
-    // CreationFailed entries have no worktrees on disk, so skip the
-    // soft-delete + 1-hour grace window and just drop from state.
+    // A failed draft has no worktrees, so no grace window is needed.
     try {
       await (workspace.status.kind === "creation_failed"
         ? api.forgetWorkspace(workspace.id)
@@ -535,9 +428,8 @@ function App() {
     }
   }, []);
 
-  // Folders are only ever written from here, so the local list is kept in
-  // step by hand rather than by a round-trip: same reason `handleReorder`
-  // does it, and it means a rename or a collapse repaints instantly.
+  // Folders are only written from here, so local state is mirrored by hand
+  // and the backend emits nothing.
   const handleCreateFolder = useCallback(async (name: string) => {
     try {
       const folder = await api.createFolder(name);
@@ -557,8 +449,6 @@ function App() {
   }, []);
 
   const handleDeleteFolder = useCallback(async (id: FolderId) => {
-    // Its workspaces fall back to Default — mirrored locally so the rows
-    // reappear at the top rather than vanishing until the next refresh.
     setFolders((prev) => prev.filter((f) => f.id !== id));
     setWorkspaces((prev) =>
       prev.map((w) => (w.folder === id ? { ...w, folder: null } : w)),
@@ -610,10 +500,8 @@ function App() {
   );
 
   const handleReorder = useCallback(async (ids: WorkspaceId[]) => {
-    // Optimistically reorder so the drop animation lands on the right row,
-    // then fire the backend command. This local update is the only thing that
-    // repaints the sidebar — the backend emits nothing for a reorder, because
-    // a round-trip would flicker the row that was just dropped.
+    // The only repaint: the backend emits nothing, since a round-trip would
+    // flicker the row just dropped.
     setWorkspaces((prev) => {
       const byId = new Map(prev.map((w) => [w.id, w]));
       const moved: Workspace[] = [];
@@ -632,8 +520,6 @@ function App() {
     }
   }, []);
 
-  /** A drag that crossed a folder boundary: the same optimistic-then-tell-the-
-   *  backend shape as a plain reorder, with the membership write alongside. */
   const handleMoveToFolder = useCallback(
     async (
       ids: WorkspaceId[],
@@ -716,12 +602,7 @@ function App() {
           {registry && !registryOk && (
             <RegistryNotice registry={registry} onChanged={refresh} />
           )}
-          {/*
-          Mount one runner per in-flight creation so the invoke stays
-          alive — and its JobEvents stay in component state — regardless
-          of which pane is visible. The runner only renders its
-          JobLogPane when its workspace id is the current selection.
-        */}
+          {/* Mounted whether shown or not, so each invoke outlives navigation. */}
           {Array.from(creationRuns.entries()).map(([id, args]) => (
             <CreationRunner
               key={id}
@@ -780,9 +661,7 @@ function App() {
             onClose={() => setCreating(false)}
             onSubmit={(partial) => {
               setCreating(false);
-              // Mint the workspace id on the frontend so we can select the
-              // row before the backend has even started provisioning. The
-              // backend uses the same id when it inserts the Creating draft.
+              // Minted here so the row can be selected before provisioning starts.
               const id = crypto.randomUUID();
               const args: CreateWorkspaceArgs = {
                 ...partial,
@@ -802,12 +681,6 @@ function App() {
   );
 }
 
-/**
- * Drives one in-flight `create_workspace` invoke. Stays mounted for the
- * full lifetime of the entry in `creationRuns`, so JobEvents accumulate in
- * component state regardless of navigation; renders the JobLogPane only
- * when its workspace id is the current selection.
- */
 function CreationRunner({
   workspaceId,
   args,
@@ -920,16 +793,11 @@ function WorkspaceDetail({
   onDismissAddRepo,
 }: {
   workspace: Workspace;
-  /** The live half of the workspace's session; `null` while dormant. */
   session: SessionInfo | null;
   availableRepos: Repo[];
-  /** Live notes text for this workspace — the App-level draft when there is
-   *  one, else the persisted `workspace.notes`. */
   notes: string;
   onNotesChange: (notes: string) => void;
   onRequestDelete: () => void;
-  /** This workspace's add-repo job, if one is running or waiting to be
-   *  dismissed. Owned by `App`, so it survives leaving the workspace. */
   addRepoRun: AddRepoRun | null;
   onStartAddRepo: (repoKey: string) => void;
   onDismissAddRepo: () => void;
@@ -939,24 +807,18 @@ function WorkspaceDetail({
   const [addingRepo, setAddingRepo] = useState(false);
   const [attachingPr, setAttachingPr] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // One add-repo job per workspace at a time — the popup shows one log, and
-  // the setup queue would run them one after the other regardless.
   const addRepoBusy = addRepoRun?.state === "running";
-  // Sessions already auto-opened this app-run — guards against a retry loop
-  // if the spawn fails, while a manual Resume click can still try again.
+  // Guards against a retry loop when the spawn fails; a manual Resume still retries.
   const autoOpenedRef = useRef<Set<string>>(new Set());
   const prStripRef = useHorizontalScroll<HTMLDivElement>();
 
   const meta = workspace.session;
 
-  // Start, Resume and Reconnect are one call: the backend reattaches,
-  // resumes, or starts fresh, whichever the session's state calls for.
   const openSession = async () => {
     setBusy(true);
     setError(null);
     try {
       await api.startAgentSession(workspace.id);
-      // App-level listener on `session:changed` refreshes the cache.
     } catch (e) {
       setError(String(e));
     } finally {
@@ -964,11 +826,8 @@ function WorkspaceDetail({
     }
   };
 
-  // How to name this workspace's agent in the session status copy.
   const agentLabel = workspace.agent === "codex" ? "codex" : "Claude";
 
-  // Restart the session under another entry-point binary. History carries
-  // over between binaries of the same agent; switching agent starts fresh.
   const switchBinary = async (agent: Agent, binary: string) => {
     setBusy(true);
     setError(null);
@@ -981,7 +840,6 @@ function WorkspaceDetail({
     }
   };
 
-  // A dormant session with a saved conversation resumes without a click.
   useEffect(() => {
     if (!meta || session) return;
     if (!meta.agent_session_id) return;
@@ -991,9 +849,6 @@ function WorkspaceDetail({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meta?.id, meta?.agent_session_id, session?.id]);
 
-  // The backend emits `workspace:changed`, which refreshes the chip row. It
-  // also records the number as dismissed, so a PR detached from the workspace's
-  // own branch doesn't come back on the next poll.
   const detachPr = async (repoKey: string, prNumber: number) => {
     setError(null);
     try {
@@ -1063,15 +918,9 @@ function WorkspaceDetail({
             </button>
           </div>
           </div>
-          {/* The PRs get a row of their own under the title: one line that
-              scrolls sideways rather than wrapping, since sharing the title
-              row with the action buttons left it a few chips wide once the
-              side panel took its share. "+ PR" is pinned at its end. */}
           <div className="header-prs-row">
             <div className="header-prs" ref={prStripRef}>
               {workspace.repo_links.map((r) =>
-                // Skipped entirely for repos with no PRs, so the row's gap
-                // doesn't double up around an empty group.
                 r.prs.length > 0 ? (
                   <span className="gh-chip-group" key={r.repo_key}>
                     <RepoPrChips link={r} onDetach={detachPr} />
@@ -1115,8 +964,7 @@ function WorkspaceDetail({
         )}
 
         <div className="session-pane">
-          {/* Floated over the session rather than shown above it, so an
-              add-repo job can't resize the terminal on its way in and out. */}
+          {/* Floated, so its arrival can't resize the terminal. */}
           {addRepoRun && (
             <AddRepoPopup
               branch={workspace.branch}
@@ -1192,11 +1040,6 @@ function WorkspaceDetail({
   );
 }
 
-/**
- * Which agent binary the workspace's session runs under. Picking
- * another restarts the session under it, keeping the conversation when there
- * is one on disk.
- */
 function BinaryMenu({
   current,
   disabled,
@@ -1309,8 +1152,6 @@ function WorkspaceInfoDialog({
   );
 }
 
-/** Chips for the PRs manually attached to one repo link. */
-/** Names the stack and where its tracked members sit in it. */
 function stackTitle(group: PrGroup): string {
   const stack = group.stack!;
   const members = group.prs
@@ -1319,11 +1160,6 @@ function stackTitle(group: PrGroup): string {
   return `Stack #${stack.number}, ${stack.size} PRs, base-first: ${members}`;
 }
 
-/**
- * One repo's PR chips: the branch PR and any attached ones, with the members of
- * a `gh stack` wrapped together in stack order. Chips stay one-per-PR — the
- * container is the only thing the grouping adds.
- */
 function RepoPrChips({
   link,
   onDetach,
@@ -1331,8 +1167,6 @@ function RepoPrChips({
   link: RepoLink;
   onDetach: (repoKey: string, prNumber: number) => void;
 }) {
-  // Anything tracked can be detached, including the PR the poller found on its
-  // own — `dismissed` on the backend is what stops the next scan re-adding it.
   const chip = ({ status, number }: LinkPr) => (
     <GithubChip
       status={status}
@@ -1359,8 +1193,6 @@ function RepoPrChips({
                 {chip(entry)}
               </Fragment>
             ))}
-            {/* A stack whose other branches aren't checked out here would
-                otherwise look like the whole thing. */}
             {group.prs.length < group.stack.size && (
               <span className="gh-stack-count">
                 {group.prs.length} of {group.stack.size}
@@ -1376,11 +1208,8 @@ function RepoPrChips({
       {link.prs
         .filter((pr) => !pr.status)
         .map((pr) => (
-          // Both paths fetch before they record — attaching by hand, and the
-          // poller's follow-up pass on a PR it just discovered — so this shows
-          // up only if the PR became unreachable (deleted, or GitHub is down).
-          // With no status there's no stack membership, so it can't join a
-          // group.
+          // Every path fetches before recording, so this means the PR became
+          // unreachable.
           <span
             key={pr.number}
             className="gh-chip gh-chip-missing"
@@ -1398,10 +1227,6 @@ function RepoPrChips({
   );
 }
 
-/**
- * Attach a PR that the poller can't find on its own — anything on a branch
- * other than the workspace's. Accepts a PR URL or a bare number.
- */
 function AttachPrDialog({
   workspace,
   onClose,
@@ -1410,8 +1235,7 @@ function AttachPrDialog({
   onClose: () => void;
 }) {
   const [reference, setReference] = useState("");
-  // `null` = let the backend infer the repo (from the URL, or because there's
-  // only one candidate).
+  // `null` lets the backend infer it.
   const [repoKey, setRepoKey] = useState<string | null>(
     workspace.repo_links.length === 1 ? workspace.repo_links[0].repo_key : null,
   );
@@ -1424,8 +1248,6 @@ function AttachPrDialog({
     setBusy(true);
     setError(null);
     try {
-      // Backend fetches the PR before persisting, so a bad number errors here.
-      // Its `workspace:changed` event repaints the chip row.
       await api.attachPr(workspace.id, repoKey, reference.trim());
       onClose();
     } catch (e) {
@@ -1501,11 +1323,6 @@ function AttachPrDialog({
   );
 }
 
-/**
- * Picks the repo to add, and nothing else. The job it kicks off is owned by
- * `App` and drawn by `AddRepoPopup`, so this dialog is only ever up for as
- * long as the choice takes.
- */
 function AddRepoDialog({
   workspace,
   availableRepos,
@@ -1579,12 +1396,8 @@ function AddRepoDialog({
   );
 }
 
-/**
- * An add-repo job's log, floated over the top-right of the workspace it
- * belongs to. Deliberately not a modal: provisioning can sit in the setup
- * queue for minutes, and the session underneath it is still worth reading
- * and typing into — as are every other workspace's.
- */
+// Not a modal: a job can sit in the setup queue for minutes, and the app has to
+// stay usable meanwhile.
 function AddRepoPopup({
   branch,
   run,
@@ -1622,27 +1435,23 @@ function loadLastRepoSelection(repos: Repo[]): Set<string> {
       }
     }
   } catch {
-    // fall through to default
+    /* unparseable starts fresh */
   }
   return available;
 }
 
 const LAST_FOLDER_KEY = "tethys.createWorkspace.lastFolder";
 
-/** The folder the last workspace was created into, if it's still there.
- *  Falls back to Default — which is also what an unset preference means. */
 function loadLastFolder(folders: Folder[]): FolderId | null {
   try {
     const raw = localStorage.getItem(LAST_FOLDER_KEY);
     if (raw && folders.some((f) => f.id === raw)) return raw;
   } catch {
-    // fall through to Default
+    /* unreadable storage means Default */
   }
   return null;
 }
 
-/** Dialog emits everything *except* the workspace id — App mints that and
- *  merges it in before invoking. */
 type CreateWorkspaceFormArgs = Omit<CreateWorkspaceArgs, "workspace_id">;
 
 function CreateWorkspaceDialog({
@@ -1688,7 +1497,7 @@ function CreateWorkspaceDialog({
       );
       localStorage.setItem(LAST_FOLDER_KEY, folder ?? "");
     } catch {
-      // non-fatal: preference just won't persist
+      /* the preference just won't persist */
     }
     onSubmit({
       branch: branch.trim(),

@@ -1,17 +1,5 @@
-//! iTerm2 `.itermcolors` loader + persisted app theme.
-//!
-//! An `.itermcolors` file is an Apple plist with entries like:
-//!   <key>Ansi 0 Color</key>
-//!   <dict>
-//!     <key>Red Component</key><real>0.27...</real>
-//!     <key>Green Component</key><real>0.27...</real>
-//!     <key>Blue Component</key><real>0.35...</real>
-//!     ...
-//!   </dict>
-//!
-//! We pull the fields we care about, convert sRGB floats to `#rrggbb` hex, and
-//! persist the normalized form as `theme.json` so the original file can move
-//! or disappear without breaking Tethys.
+//! An `.itermcolors` theme, normalized into `theme.json` so the original file
+//! can move or disappear.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -24,9 +12,8 @@ use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Theme {
-    /// Display name — the file stem of the `.itermcolors` file.
     pub name: String,
-    /// Original path the user picked. Informational; we don't re-read it.
+    /// Informational; never re-read.
     pub source_path: PathBuf,
     pub colors: ThemeColors,
 }
@@ -38,7 +25,6 @@ pub struct ThemeColors {
     pub cursor: String,
     pub cursor_text: String,
     pub selection: String,
-    /// 16 ANSI colors (`ansi[0]` = black, `ansi[1]` = red, ...).
     pub ansi: [String; 16],
 }
 
@@ -101,9 +87,6 @@ impl Theme {
     }
 }
 
-/// Parse the given `.itermcolors` file, persist it to `save_path`, and emit
-/// `theme:changed` so the frontend can re-style. Shared by the View menu
-/// handler and any future command/programmatic caller.
 pub fn load_and_emit(
     app: &AppHandle,
     source: &Path,
@@ -125,9 +108,6 @@ pub fn clear_and_emit(app: &AppHandle, save_path: &Path) -> AppResult<()> {
     Ok(())
 }
 
-/// Convert `{ Red Component, Green Component, Blue Component }` (sRGB floats
-/// 0.0–1.0) to `#rrggbb`. Returns `None` if the plist entry isn't a dict or
-/// any of the expected component keys are missing.
 fn plist_color_to_hex(val: &plist::Value) -> Option<String> {
     let dict = val.as_dictionary()?;
     let c = |key: &str| -> Option<f64> {

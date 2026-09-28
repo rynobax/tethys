@@ -10,16 +10,11 @@ use crate::error::{AppError, AppResult};
 use crate::github::GithubPrStatus;
 use crate::state::{AppState, AgentSessionMeta, Folder, Workspace, WorkspaceStatus};
 
-/// Where the `Store` announces that a workspace changed so the UI can refresh.
-///
-/// This exists so `Store` can own "persist and notify" as one operation
-/// without depending on Tauri: the app passes an `AppHandle` adapter, tests
-/// pass a recording one. Two adapters, so it's a real seam.
+/// Lets `Store` persist-and-notify without depending on Tauri.
 pub trait WorkspaceNotifier: Send + Sync + 'static {
     fn workspace_changed(&self, workspace_id: &str);
 }
 
-/// Notifier for contexts with no UI attached.
 #[cfg(test)]
 pub struct NullNotifier;
 
@@ -28,11 +23,6 @@ impl WorkspaceNotifier for NullNotifier {
     fn workspace_changed(&self, _workspace_id: &str) {}
 }
 
-/// The source of truth for Tethys workspace state.
-///
-/// Writes go through `mutate`, which applies the closure under a write lock
-/// and nudges a background flusher. The flusher coalesces bursts of writes
-/// (~250ms debounce) into a single atomic temp-file + rename.
 pub struct Store {
     state: Arc<RwLock<AppState>>,
     dirty: Arc<Notify>,
@@ -44,7 +34,6 @@ pub struct Store {
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
 impl Store {
-    /// Load `state.json` (or initialize an empty state), then start the background flusher.
     pub async fn load(
         state_path: PathBuf,
         tmp_path: PathBuf,
@@ -88,11 +77,8 @@ impl Store {
             );
         }
 
-        // A `Creating` entry means the previous run crashed mid-provision;
-        // a `CreationFailed` entry means the user never dismissed it before
-        // shutdown. Either way the in-memory progress events that drove the
-        // log pane are gone, so the row is dead UI — drop it. The boot-time
-        // reconciler picks up any worktree directories left on disk.
+        // Drafts from a previous run have lost their progress stream; the
+        // reconciler handles anything they left on disk.
         let pruned = initial
             .workspaces
             .iter()
@@ -104,11 +90,7 @@ impl Store {
             initial
                 .workspaces
                 .retain(|w| matches!(w.status, WorkspaceStatus::Ready));
-            // A pruned draft can still be somebody's blocker: an agent handing
-            // off with `blocks_caller` points the caller at a workspace that is
-            // a `Creating` draft for as long as provisioning takes. Once the
-            // draft is gone the id means nothing, so drop the link rather than
-            // leave a pointer nothing can resolve.
+            // `blocks_caller` makes drafts legal blockers.
             for id in &pruned {
                 initial.clear_links_to(id);
             }
@@ -135,13 +117,11 @@ impl Store {
         Ok(store)
     }
 
-    /// Read-only access to the state.
     pub async fn read<R, F: FnOnce(&AppState) -> R>(&self, f: F) -> R {
         let guard = self.state.read().await;
         f(&guard)
     }
 
-    /// Apply a mutation under a write lock and schedule a flush.
     pub async fn mutate<R, F>(&self, f: F) -> AppResult<R>
     where
         F: FnOnce(&mut AppState) -> AppResult<R>,
@@ -154,7 +134,6 @@ impl Store {
         Ok(result)
     }
 
-    /// Read one workspace. `WorkspaceNotFound` when it's gone.
     pub async fn with_workspace<R, F>(&self, id: &str, f: F) -> AppResult<R>
     where
         F: FnOnce(&Workspace) -> R,
@@ -166,16 +145,6 @@ impl Store {
         Ok(f(ws))
     }
 
-    /// Mutate one workspace, persist, and tell the UI.
-    ///
-    /// This is the operation almost every caller actually wants — 21 of the 22
-    /// original `mutate` call sites looked up a single workspace and then had
-    /// to remember three separate unwritten rules: which lookup idiom to use,
-    /// whether a missing workspace is an error or a no-op, and to emit
-    /// `workspace:changed` afterwards. All three now live here.
-    ///
-    /// `WorkspaceNotFound` if the workspace is gone; nothing is persisted and
-    /// no notification is sent in that case.
     pub async fn update_workspace<R, F>(&self, id: &str, f: F) -> AppResult<R>
     where
         F: FnOnce(&mut Workspace) -> AppResult<R>,
@@ -185,21 +154,12 @@ impl Store {
         Ok(result)
     }
 
-    /// Announce a workspace as changed without editing it.
-    ///
-    /// For writes that went through [`Store::mutate`], which spans many
-    /// workspaces and so can't notify per workspace on its own. The poller
-    /// needs it: its `status_changed` event can only update a PR the frontend
-    /// already knows about, so a tick that starts *tracking* a PR has to tell
-    /// the UI the list itself grew.
     pub fn notify_workspace_changed(&self, id: &str) {
         self.notifier.workspace_changed(id);
     }
 
-    /// [`Store::update_workspace`] without the notification.
-    ///
-    /// For edits the UI already shows locally and re-renders on: notes typing,
-    /// where echoing every keystroke back would fight the user's cursor.
+    /// For edits the UI already shows locally, e.g. notes typing, where an
+    /// echo would fight the cursor.
     pub async fn update_workspace_quiet<R, F>(&self, id: &str, f: F) -> AppResult<R>
     where
         F: FnOnce(&mut Workspace) -> AppResult<R>,
@@ -215,9 +175,6 @@ impl Store {
         Ok(result)
     }
 
-    /// Announce a workspace change the store didn't make itself — used where
-    /// the interesting edit lives outside `AppState` (a supervisor's in-memory
-    /// map) but the UI still needs to re-read the workspace.
     pub fn notify_changed(&self, workspace_id: &str) {
         self.notifier.workspace_changed(workspace_id);
     }
@@ -247,7 +204,6 @@ impl Store {
 
         tokio::fs::write(&self.tmp_path, &snapshot).await?;
 
-        // Best-effort fsync on the temp file before rename.
         match tokio::fs::File::options()
             .write(true)
             .open(&self.tmp_path)
@@ -267,16 +223,8 @@ impl Store {
     }
 }
 
-/// Fold the retired `archived_at` marker into an ordinary folder named
-/// "Archived".
-///
-/// Reads the field straight out of the raw JSON rather than off `Workspace`,
-/// so the type carries no trace of a concept that no longer exists. The first
-/// flush after this rewrites the file without the field, which makes every
-/// later boot a no-op — there is nothing to keep, and nothing to undo.
-///
-/// The folder starts collapsed, because that is how the archive drawer it
-/// replaces always looked on launch.
+// The migrations read retired fields off raw JSON so the types carry no trace
+// of them; the first flush drops the fields and ends the migration.
 fn migrate_archived_to_folder(state: &mut AppState, raw: &[u8]) {
     let Ok(json) = serde_json::from_slice::<serde_json::Value>(raw) else {
         return;
@@ -313,17 +261,7 @@ fn migrate_archived_to_folder(state: &mut AppState, raw: &[u8]) {
     info!(count = moved, "migrated archived workspaces into a folder");
 }
 
-/// Fold the retired two-slot PR layout — `github` for the workspace's own
-/// branch, `attached_prs` for everything else — into `RepoLink::prs`.
-///
-/// Same shape as [`migrate_archived_to_folder`], and for the same reason: read
-/// the old fields off the raw JSON so `RepoLink` carries no trace of a split
-/// that no longer exists, and let the first flush end the migration for good.
-///
-/// The branch PR goes first, which is where it has always been drawn. It is
-/// also the one entry that can collide: a PR could sit in `github` and in
-/// `attached_prs` at once if it was hand-attached just before the poller found
-/// it by branch, so `track` is what merges them rather than a plain push.
+/// `track`, not push: a PR could sit in both `github` and `attached_prs`.
 fn migrate_pr_slots(state: &mut AppState, raw: &[u8]) {
     let Ok(json) = serde_json::from_slice::<serde_json::Value>(raw) else {
         return;
@@ -364,8 +302,6 @@ fn migrate_pr_slots(state: &mut AppState, raw: &[u8]) {
             else {
                 continue;
             };
-            // Only ever fills an empty list: a file already carrying `prs` has
-            // been through this, and its old fields are gone.
             if !link.prs.is_empty() {
                 continue;
             }
@@ -384,8 +320,6 @@ fn migrate_pr_slots(state: &mut AppState, raw: &[u8]) {
     }
 }
 
-/// The retired `attached_prs` entry, read only by [`migrate_pr_slots`]. Named
-/// apart from `TrackedPr` because the field it keyed on was `attached_at`.
 #[derive(Deserialize)]
 struct OldAttachedPr {
     number: u32,
@@ -393,19 +327,6 @@ struct OldAttachedPr {
     status: Option<GithubPrStatus>,
 }
 
-/// Fold the retired per-workspace `sessions` list into the one `session`.
-///
-/// Same shape as the two above, for the same reason: the list is read off the
-/// raw JSON so `Workspace` carries no trace of it, and the first flush ends
-/// the migration. Only an empty `session` is filled — a file already carrying
-/// one has been through this.
-///
-/// When the list held several, the survivor is the newest visible session
-/// with a saved conversation, else the newest visible one, else the newest —
-/// the list was append-ordered, so newest is last. The rest lose their tmux
-/// panes at the next orphan reap, which is the point of there being one. A
-/// per-session binary override the survivor carried is lifted onto the
-/// workspace, where that setting now lives.
 fn migrate_sessions(state: &mut AppState, raw: &[u8]) {
     let Ok(json) = serde_json::from_slice::<serde_json::Value>(raw) else {
         return;
@@ -452,7 +373,7 @@ fn migrate_sessions(state: &mut AppState, raw: &[u8]) {
     }
 }
 
-/// See [`migrate_sessions`] for the order of preference.
+/// The list was append-ordered, so newest is last.
 fn pick_surviving_session(list: &[serde_json::Value]) -> Option<&serde_json::Value> {
     let visible = |s: &&serde_json::Value| {
         !s.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false)
@@ -475,8 +396,6 @@ mod tests {
     use chrono::Utc;
     use std::sync::Mutex;
 
-    /// Records the workspace ids the store announced, so tests can assert on
-    /// the notification half of `update_workspace`'s contract.
     #[derive(Default)]
     struct RecordingNotifier(Arc<Mutex<Vec<String>>>);
 
@@ -511,11 +430,11 @@ mod tests {
         _tmp: tempfile::TempDir,
     }
 
-    async fn fixture_with(state: Option<AppState>) -> Fixture {
+    async fn fixture_from(raw: Option<String>) -> Fixture {
         let tmp = tempfile::tempdir().unwrap();
         let state_path = tmp.path().join("state.json");
-        if let Some(state) = state {
-            std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        if let Some(raw) = raw {
+            std::fs::write(&state_path, raw).unwrap();
         }
         let notified = Arc::new(Mutex::new(Vec::new()));
         let store = Store::load(
@@ -533,28 +452,15 @@ mod tests {
     }
 
     async fn fixture() -> Fixture {
-        fixture_with(None).await
+        fixture_from(None).await
     }
 
-    /// Boots from literal file contents, for the migration — whose whole job is
-    /// reading a field `Workspace` no longer has.
+    async fn fixture_with(state: Option<AppState>) -> Fixture {
+        fixture_from(state.map(|s| serde_json::to_string(&s).unwrap())).await
+    }
+
     async fn fixture_with_raw(raw: &str) -> Fixture {
-        let tmp = tempfile::tempdir().unwrap();
-        let state_path = tmp.path().join("state.json");
-        std::fs::write(&state_path, raw).unwrap();
-        let notified = Arc::new(Mutex::new(Vec::new()));
-        let store = Store::load(
-            state_path,
-            tmp.path().join("state.json.tmp"),
-            Box::new(RecordingNotifier(notified.clone())),
-        )
-        .await
-        .unwrap();
-        Fixture {
-            store,
-            notified,
-            _tmp: tmp,
-        }
+        fixture_from(Some(raw.to_string())).await
     }
 
     fn archived_state_json() -> String {
@@ -594,9 +500,6 @@ mod tests {
         assert_eq!(f.store.read(|s| s.workspaces.len()).await, 0);
     }
 
-    /// A `Creating` row means the previous run died mid-provision and a
-    /// `CreationFailed` row was never dismissed. Both are dead UI on the next
-    /// boot — the progress events that drove their log pane are gone.
     #[tokio::test]
     async fn boot_prunes_workspaces_that_never_reached_ready() {
         let state = AppState {
@@ -621,9 +524,6 @@ mod tests {
         assert_eq!(ids, vec!["ready"]);
     }
 
-    /// The whole point of the workspace-scoped interface: lookup, not-found
-    /// policy, persist, and notify are one operation rather than four things
-    /// each caller has to remember.
     #[tokio::test]
     async fn update_workspace_mutates_and_notifies() {
         let state = AppState {
@@ -659,8 +559,6 @@ mod tests {
         assert!(f.notified.lock().unwrap().is_empty(), "no notify on failure");
     }
 
-    /// A closure that fails must leave no trace: no persisted edit, and no
-    /// notification telling the UI to re-read something that didn't change.
     #[tokio::test]
     async fn a_failing_closure_does_not_notify() {
         let state = AppState {
@@ -681,8 +579,6 @@ mod tests {
         assert!(f.notified.lock().unwrap().is_empty());
     }
 
-    /// Notes are typed character by character with the frontend holding the
-    /// authoritative text; echoing every keystroke back would fight the cursor.
     #[tokio::test]
     async fn the_quiet_variant_persists_without_notifying() {
         let state = AppState {
@@ -713,8 +609,6 @@ mod tests {
         assert!(matches!(err, AppError::WorkspaceNotFound(id) if id == "nope"));
     }
 
-    /// state.json is written by temp-file + rename so a crash mid-write can't
-    /// truncate it. Verify the bytes actually land at the real path.
     #[tokio::test]
     async fn writes_land_at_the_real_path_after_the_debounce() {
         let tmp = tempfile::tempdir().unwrap();
@@ -747,26 +641,12 @@ mod tests {
         );
     }
 
-    /// Malformed JSON must not take the app down with it — the user gets an
-    /// empty state and a loud log line rather than a crash loop.
     #[tokio::test]
     async fn unparseable_state_json_starts_empty_instead_of_failing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state_path = tmp.path().join("state.json");
-        std::fs::write(&state_path, b"{ this is not json").unwrap();
-
-        let store = Store::load(
-            state_path,
-            tmp.path().join("state.json.tmp"),
-            Box::new(NullNotifier),
-        )
-        .await
-        .unwrap();
-        assert_eq!(store.read(|s| s.workspaces.len()).await, 0);
+        let f = fixture_with_raw("{ this is not json").await;
+        assert_eq!(f.store.read(|s| s.workspaces.len()).await, 0);
     }
 
-    /// The archive marker retires into an ordinary folder. It starts collapsed
-    /// because that is how the drawer it replaces always looked on launch.
     #[tokio::test]
     async fn boot_migrates_archived_workspaces_into_a_folder() {
         let f = fixture_with_raw(&archived_state_json()).await;
@@ -799,8 +679,6 @@ mod tests {
         );
     }
 
-    /// The migration is driven by the file, so the first flush without the
-    /// field ends it. A second boot must not mint an empty second "Archived".
     #[tokio::test]
     async fn the_migration_does_not_run_twice() {
         let f = fixture_with_raw(&archived_state_json()).await;
@@ -811,9 +689,7 @@ mod tests {
         assert_eq!(folders.len(), 1, "one Archived folder, not two");
     }
 
-    /// A `state.json` from the two-slot era: PR 7 in the branch slot, PR 8
-    /// attached by hand, and PR 7 *also* still sitting in `attached_prs` from
-    /// before the poller caught up.
+    /// PR 7 sits in both the branch slot and `attached_prs`.
     fn two_slot_state_json() -> String {
         let pr = |number: u32, branch: &str| {
             format!(
@@ -873,8 +749,6 @@ mod tests {
             .store
             .read(|s| s.workspaces[0].repo_links[0].clone())
             .await;
-        // The branch PR keeps its place at the front, and the duplicate copy of
-        // it that was in `attached_prs` collapses into the same entry.
         assert_eq!(
             link.prs.iter().map(|p| p.number).collect::<Vec<_>>(),
             vec![7, 8]
@@ -884,8 +758,6 @@ mod tests {
         assert!(link.dismissed.is_empty());
     }
 
-    /// The first flush drops the old fields, so every later boot is a no-op —
-    /// and a file that already carries `prs` is left exactly as it is.
     #[tokio::test]
     async fn a_migrated_file_is_not_migrated_again() {
         let raw = r#"{
@@ -919,9 +791,6 @@ mod tests {
         assert_eq!(link.dismissed, vec![7]);
     }
 
-    /// A `state.json` from the many-sessions era: a hidden session with a
-    /// conversation, a visible one that never got its SessionStart hook, and
-    /// a visible one with a conversation and a per-session binary.
     fn many_sessions_state_json() -> &'static str {
         r#"{
             "workspaces": [
@@ -974,12 +843,9 @@ mod tests {
             session.runtime_state,
             Some(crate::state::SessionRuntimeState::WaitingInput)
         );
-        // The per-session override moves to where the setting now lives.
         assert_eq!(ws.agent_binary.as_deref(), Some("claude-hipaa"));
     }
 
-    /// A file already carrying `session` is left exactly as it is, even if a
-    /// stale `sessions` list is somehow still beside it.
     #[tokio::test]
     async fn a_file_with_one_session_is_not_migrated_again() {
         let raw = r#"{
@@ -1022,8 +888,6 @@ mod tests {
         assert!(f.store.read(|s| s.folders.is_empty()).await);
     }
 
-    /// `state.json` is hand-editable, so a workspace can name a folder that
-    /// isn't there. It lands in Default rather than dropping off the sidebar.
     #[tokio::test]
     async fn boot_sends_workspaces_in_missing_folders_back_to_default() {
         let mut ws = workspace("ws-1", WorkspaceStatus::Ready);

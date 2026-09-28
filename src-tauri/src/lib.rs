@@ -57,8 +57,6 @@ use crate::sessions::SessionSupervisor;
 use crate::store::{Store, WorkspaceNotifier};
 use crate::tmux::TmuxBin;
 
-/// Adapter that turns the `Store`'s workspace-changed notifications into the
-/// `workspace:changed` Tauri event the frontend listens for.
 struct TauriNotifier(AppHandle);
 
 impl WorkspaceNotifier for TauriNotifier {
@@ -101,9 +99,7 @@ pub fn run() {
             match &registry_load {
                 RegistryLoad::Ok { registry, .. } => {
                     info!("registry ok");
-                    // Pages render in an iframe over the asset protocol, whose
-                    // scope is otherwise empty: only files under the worktree
-                    // root — where every workspace lives — are reachable.
+                    // The asset protocol's static scope is empty; Pages need this.
                     if let Err(e) = app
                         .asset_protocol_scope()
                         .allow_directory(&registry.worktree_root, true)
@@ -120,7 +116,6 @@ pub fn run() {
             }
             app.manage::<Arc<RegistryLoad>>(Arc::new(registry_load));
 
-            // --- state store ------------------------------------------------
             let state_path = paths.state_file();
             let tmp_path = paths.state_tmp_file();
             let store: Arc<Store> = tauri::async_runtime::block_on(async {
@@ -137,14 +132,11 @@ pub fn run() {
             })?;
             handle.manage::<Arc<Store>>(store.clone());
 
-            // --- agent binaries (non-fatal if missing; an unresolved agent
-            // holds an empty path so the error surfaces at spawn time, against
-            // the workspace the user tried to start, rather than at boot).
+            // An unresolved agent errors at spawn, against the workspace that
+            // tried to start, not at boot.
             let agent_bins = AgentBins::resolve_all();
             app.manage(agent_bins.clone());
 
-            // --- tmux binary (claude sessions run inside a tmux server so
-            // they survive app restarts until reboot).
             let tmux_bin_path = match tmux::resolve() {
                 Ok(path) => {
                     tmux::ensure_server_init(&path);
@@ -160,7 +152,6 @@ pub fn run() {
                 }
             };
 
-            // --- hook installer (idempotent) --------------------------------
             if let Some(hook_bin) = hook_install::bundled_hook_bin_or_warn() {
                 if let Some(settings) = paths::claude_settings_path() {
                     if let Err(e) = hook_install::install(
@@ -175,7 +166,6 @@ pub fn run() {
                 }
             }
 
-            // --- session supervisor + UDS listener --------------------------
             let artifacts: Arc<ArtifactStore> =
                 Arc::new(ArtifactStore::new(handle.clone(), store.clone()));
             app.manage(artifacts.clone());
@@ -186,10 +176,6 @@ pub fn run() {
             ));
             app.manage(supervisor.clone());
 
-            // Pre-warm live sessions: for every persisted session whose tmux
-            // pane is still alive, spin up a reattach now so the UI can flip
-            // straight to the terminal when the user visits the workspace
-            // (no "Dormant / Resume" flash).
             if let Some(path) = tmux_bin_path.as_ref() {
                 prewarm_live_sessions(&supervisor, path, &store);
             }
@@ -202,20 +188,11 @@ pub fn run() {
                 }
             });
 
-            // Probe-file reconciler: backstop that corrects hook-derived turn
-            // state against Claude Code's own `~/.claude/sessions/*.json`.
             probe::spawn(supervisor.clone());
 
-            // --- handoff MCP server ----------------------------------------
-            // `McpLaunch` is the spawn side (the `--mcp-config` every session
-            // is launched with); the listener is the other end of it. Resolved
-            // once here because both halves are fixed for the run: the registry
-            // only reloads at boot, and the companion binary doesn't move.
             let in_progress = inprogress::InProgressWorkspaces::new();
             app.manage(in_progress.clone());
 
-            // One provisioning job at a time, shared by every path that starts
-            // one: the create dialog, adding a repo, and a handoff.
             let provision_queue = provision_queue::ProvisionQueue::new();
             app.manage(provision_queue.clone());
 
@@ -247,7 +224,6 @@ pub fn run() {
                 }
             });
 
-            // --- github poller ---------------------------------------------
             let registry_for_poller: Arc<RegistryLoad> = app.state::<Arc<RegistryLoad>>().inner().clone();
             let poller = Arc::new(GithubPoller::new(
                 store.clone(),
@@ -264,7 +240,6 @@ pub fn run() {
             });
             tauri::async_runtime::spawn(poller.clone().run());
 
-            // --- soft-delete purger (hourly) -------------------------------
             let registry_for_purger: Arc<RegistryLoad> =
                 app.state::<Arc<RegistryLoad>>().inner().clone();
             let purger = Arc::new(Purger::new(
@@ -276,7 +251,6 @@ pub fn run() {
             app.manage(purger.clone());
             tauri::async_runtime::spawn(purger.clone().run());
 
-            // --- workspace CLAUDE.md refresh -------------------------------
             let registry_for_docs: Arc<RegistryLoad> =
                 app.state::<Arc<RegistryLoad>>().inner().clone();
             let store_for_docs = store.clone();
@@ -287,7 +261,6 @@ pub fn run() {
 
             app.manage(paths);
 
-            // --- menu (append Theme items under the default View submenu) --
             if let Err(e) = install_menu(&handle) {
                 warn!(error = %e, "menu install failed");
             }
@@ -297,7 +270,6 @@ pub fn run() {
                 _ => {}
             });
 
-            // --- window focus → force-tick the github poller ---------------
             if let Some(window) = app.get_webview_window("main") {
                 let poller_for_focus = poller.clone();
                 window.on_window_event(move |event| {
@@ -367,9 +339,7 @@ pub fn run() {
 
 struct LoggingGuard(#[allow(dead_code)] tracing_appender::non_blocking::WorkerGuard);
 
-/// Rewrite the generated `CLAUDE.md` at every live workspace's root. Runs once
-/// per boot, which is how workspaces created before the file existed get one and
-/// how edits to `claude_notes` in `repos.toml` reach workspaces already on disk.
+/// How edits to `repos.toml` reach workspaces already on disk.
 async fn refresh_workspace_docs(store: &Arc<Store>, registry: &RegistryLoad, paths: &Paths) {
     let Ok(reg) = registry.require() else { return };
     let workspaces = store.read(|s| s.workspaces.clone()).await;
@@ -388,11 +358,8 @@ async fn refresh_workspace_docs(store: &Arc<Store>, registry: &RegistryLoad, pat
     }
 }
 
-/// For every persisted `AgentSessionMeta` whose tmux pane is still
-/// alive, spawn a reattach client now. This means `get_session` will
-/// return `running: true` for those sessions by the time the frontend
-/// asks, so switching into a workspace shows the terminal immediately
-/// rather than flashing the "Dormant / Resume" state.
+/// So switching into a workspace shows its live terminal without a
+/// "Dormant / Resume" flash.
 fn prewarm_live_sessions(
     supervisor: &Arc<SessionSupervisor>,
     tmux_bin: &std::path::Path,
@@ -435,9 +402,6 @@ fn prewarm_live_sessions(
         match supervisor.reattach_tmux(c.session_id.clone(), c.workspace_id, &c.cwd, tmux_bin) {
             Ok(_) => {
                 info!(session_id = %c.session_id, "pre-warmed live tmux session");
-                // Restore the last persisted turn state so the dot survives
-                // restarts. `reattach_tmux` seeds Working for a pane that may
-                // be mid-response; override it when we have a better answer.
                 if let Some(state) = c.runtime_state {
                     supervisor.restore_turn(
                         &c.session_id,
@@ -452,11 +416,6 @@ fn prewarm_live_sessions(
     }
 }
 
-/// Kill any tmux session on our private server whose name isn't a known
-/// `AgentSessionMeta.id`. Catches leftovers from app crashes between spawn
-/// and state.json flush, from workspaces that were deleted while their tmux
-/// sessions were still alive, and — once — the extra sessions a workspace
-/// carried before there was one per workspace.
 fn reap_orphan_tmux_sessions(tmux_bin: &std::path::Path, store: &Arc<Store>) {
     let known: std::collections::HashSet<String> = tauri::async_runtime::block_on(async {
         store
@@ -478,9 +437,6 @@ fn reap_orphan_tmux_sessions(tmux_bin: &std::path::Path, store: &Arc<Store>) {
     }
 }
 
-/// Build the default OS menu, then append Theme items under the View submenu.
-/// If the layout of the default menu changes upstream and "View" isn't found,
-/// the items are tucked into the app-name submenu as a fallback.
 fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     let menu = Menu::default(app)?;
     let load = MenuItem::with_id(app, "theme_load", "Load .itermcolors…", true, None::<&str>)?;

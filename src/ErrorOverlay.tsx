@@ -26,11 +26,6 @@ function toMessage(value: unknown): { message: string; stack?: string } {
   }
 }
 
-/**
- * React error boundary — catches errors thrown during render, lifecycle,
- * and constructors in the tree below. Does not catch event handlers or
- * async code; those go through the global listeners in `ErrorOverlay`.
- */
 export class ErrorBoundary extends Component<
   { children: ReactNode },
   { hasError: boolean }
@@ -44,7 +39,7 @@ export class ErrorBoundary extends Component<
   componentDidCatch(error: unknown) {
     const { message, stack } = toMessage(error);
     report({ id: ++nextId, source: "render", message, stack });
-    // Reset so the app keeps rendering once the user dismisses the card.
+    // Keep rendering; the error shows as a card instead.
     this.setState({ hasError: false });
   }
 
@@ -53,18 +48,12 @@ export class ErrorBoundary extends Component<
   }
 }
 
-/**
- * Top-level overlay that collects errors from the boundary above plus any
- * uncaught `error` / `unhandledrejection` events on the window, and renders
- * a dismissible stack of cards.
- */
 export function ErrorOverlay() {
   const [errors, setErrors] = useState<CapturedError[]>([]);
   const recentRef = useRef(new Map<string, number>());
 
   useEffect(() => {
     const sub = (err: CapturedError) => {
-      // Debounce duplicates: same (source+message) within 500ms is noise.
       const key = `${err.source}:${err.message}`;
       const now = Date.now();
       const last = recentRef.current.get(key) ?? 0;

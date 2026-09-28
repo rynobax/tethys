@@ -7,21 +7,12 @@ import { useTheme } from "./theme";
 import type { Artifact, Workspace } from "./types";
 import { useHorizontalScroll } from "./useHorizontalScroll";
 
-/** JSON map of workspace id → panel width in px. A workspace with no entry
- *  opens at half the detail pane (see `DEFAULT_WIDTH`). */
 const WIDTHS_KEY = "tethys.sidePanel.widths";
-/** JSON map of workspace id → collapsed. A workspace with no entry starts
- *  collapsed: the terminal is the point until something asks for the panel. */
 const COLLAPSED_KEY = "tethys.sidePanel.collapsedByWorkspace";
-/** The width until you drag it: an even split with the terminal. A CSS
- *  percentage rather than a measured pixel count, so it stays an even split
- *  as the window resizes and needs no layout pass to compute. */
+// A percentage, so it stays an even split as the window resizes.
 const DEFAULT_WIDTH = "50%";
 const MIN_WIDTH = 280;
 
-/** Read one of the per-workspace maps out of `localStorage`, keeping only the
- *  entries `valid` vouches for. Missing or unparseable starts fresh: nothing
- *  in here is worth recovering. */
 function loadMap<T>(
   key: string,
   valid: (v: unknown) => v is T,
@@ -36,7 +27,7 @@ function loadMap<T>(
       );
     }
   } catch {
-    // fall through
+    /* unparseable starts fresh */
   }
   return {};
 }
@@ -44,16 +35,14 @@ function loadMap<T>(
 const isPanelWidth = (v: unknown): v is number =>
   typeof v === "number" && v >= MIN_WIDTH;
 const isBoolean = (v: unknown): v is boolean => typeof v === "boolean";
-/** How far the PR webview's left edge pulls back from the panel's while the
- *  panel is being resized. At a fast drag the native view trails the DOM by a
- *  frame or two — tens of pixels — and this keeps the cursor off it. */
+// The native PR webview trails the DOM by a frame or two during a fast drag;
+// pulling its edge back this far keeps the cursor off it.
 const DRAG_GUARD_PX = 64;
 
-// "notes", an artifact id, or a `pr:<url>` id for an embedded PR tab.
+// "notes", an artifact id, or a `pr:<url>`.
 type TabId = "notes" | string;
 
 interface PrTab {
-  /** `pr:<url>` — unique per PR, and distinct from any artifact id. */
   id: string;
   number: number;
   url: string;
@@ -62,30 +51,11 @@ interface PrTab {
 
 interface Props {
   workspace: Workspace;
-  /** Live notes text — App's draft when there is one, else the persisted
-   *  `workspace.notes`. */
   notes: string;
   onNotesChange: (notes: string) => void;
 }
 
-/**
- * The Side Panel: a workspace's Notes and its Artifacts, one tab each, on the
- * right of the detail pane.
- *
- * Collapses to a thin rail; the rail is the whole affordance for expanding it
- * again. Collapsed state and width are both per workspace — one that's mostly
- * a PR page wants half the screen open, one that's just a terminal wants the
- * rail — and both live in `localStorage` as id-keyed maps. A workspace you've
- * never touched starts collapsed at an even split. Two things override your
- * choice: a fresh artifact for the workspace you're looking at, because a
- * `/show-me` turn is one where you want the screen taken; and the first tab
- * other than Notes appearing at all, such as a PR being linked. Either
- * expands the panel and selects the new tab. With no remembered pick, empty
- * Notes give way to the other tabs.
- */
 export function SidePanel({ workspace, notes, onNotesChange }: Props) {
-  // True for the length of a resize drag; the PR webview keeps a guard strip
-  // clear of the cursor meanwhile (see `PrView`).
   const [resizing, setResizing] = useState(false);
   const [collapsedMap, setCollapsedMap] = useState(() =>
     loadMap(COLLAPSED_KEY, isBoolean),
@@ -104,7 +74,6 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
   const [widths, setWidths] = useState(() =>
     loadMap(WIDTHS_KEY, isPanelWidth),
   );
-  // Pixels once this workspace's panel has been dragged, else the default split.
   const width: number | string = widths[workspace.id] ?? DEFAULT_WIDTH;
   const setWorkspaceWidth = (w: number) => {
     setWidths((prev) => {
@@ -113,8 +82,8 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
       return next;
     });
   };
-  // Tagged with the workspace it was fetched for, so a list still in flight
-  // from the previous workspace reads as "not loaded" rather than as empty.
+  // Tagged so a list still in flight for the previous workspace reads as
+  // "not loaded" rather than empty.
   const [artifactState, setArtifactState] = useState<{
     workspaceId: string;
     list: Artifact[];
@@ -124,7 +93,6 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
     () => (artifactsLoaded ? artifactState.list : []),
     [artifactsLoaded, artifactState],
   );
-  // Remembered per workspace so switching back paints the tab you left.
   const [selectedByWorkspace, setSelectedByWorkspace] = useState<
     Map<string, TabId>
   >(new Map());
@@ -161,9 +129,7 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
     }
   });
 
-  // One tab per linked PR that has been fetched at least once (a `null`
-  // status has no URL to load). Deduped by URL so a PR tracked twice is one
-  // tab, and labelled by repo so two repos' `#123`s are told apart.
+  // A never-fetched PR has no URL to load, so it gets no tab.
   const prTabs = useMemo<PrTab[]>(() => {
     const seen = new Set<string>();
     const tabs: PrTab[] = [];
@@ -183,13 +149,9 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
     return tabs;
   }, [workspace.repo_links]);
 
-  // The tab to show when nothing better is known: the newest artifact (last
-  // in the list), else the first PR, else Notes.
   const newestTab: TabId =
     artifacts[artifacts.length - 1]?.id ?? prTabs[0]?.id ?? "notes";
 
-  // Effective tab: the remembered pick when it still exists; else Notes if
-  // there's anything written in them; else whatever else the panel has.
   const remembered = selectedByWorkspace.get(workspace.id);
   const selected: TabId =
     remembered !== undefined &&
@@ -201,13 +163,10 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
         ? "notes"
         : newestTab;
 
-  // A panel that had nothing but Notes and just gained a tab — a PR linked
-  // and fetched, an artifact — opens onto it, whatever you last left it at:
-  // the panel was empty when you collapsed it, so that choice wasn't about
-  // this. Counts are remembered per workspace for the life of the app, and
-  // only compared once the artifact list is loaded, so switching workspaces
-  // or booting never reads as a tab appearing. A workspace first seen with
-  // tabs already there keeps its collapsed state.
+  // A panel that had only Notes and just gained a tab opens onto it: a
+  // collapse chosen while it was empty wasn't a choice about this tab.
+  // Compared only once artifacts load, so booting or switching workspaces
+  // never reads as a tab appearing.
   const tabCount = artifactsLoaded ? artifacts.length + prTabs.length : null;
   const seenTabCounts = useRef(new Map<string, number>());
   useEffect(() => {
@@ -222,9 +181,6 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
   const selectedArtifact = artifacts.find((a) => a.id === selected) ?? null;
   const selectedPr = prTabs.find((t) => t.id === selected) ?? null;
 
-  // The tab strip scrolls sideways once it fills, and the active tab is kept
-  // in view — a fresh artifact selects itself, and it's appended at the far
-  // end, exactly where an overflowing strip has scrolled away from.
   const strip = useRef<HTMLDivElement | null>(null);
   const wheelRef = useHorizontalScroll<HTMLDivElement>();
   const tabsRef = useCallback(
@@ -241,7 +197,6 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
   }, [selected, collapsed]);
 
   const dismiss = (id: string) => {
-    // Pick the neighbour before the list shrinks: right, else left, else Notes.
     if (selected === id) {
       const i = artifacts.findIndex((a) => a.id === id);
       const next = artifacts[i + 1] ?? artifacts[i - 1];
@@ -365,20 +320,9 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
   );
 }
 
-/** Drag the panel's left edge to resize it. */
-/**
- * The drag handle on the panel's left edge.
- *
- * Uses pointer capture so every move and the final release come to the handle
- * itself, wherever the cursor has wandered — over the terminal, off the window.
- * The one thing capture can't cross is the native PR webview, which sits above
- * the whole DOM and swallows events at the OS level: a drag that ended over it
- * never saw its mouseup and kept resizing forever. Two defences: the drag is
- * bracketed by `onDragStart`/`onDragEnd` so the panel can keep that webview
- * clear of the cursor, and a move that arrives with no button held means the
- * release happened where we couldn't see it, so the drag ends there. A window
- * blur (Cmd-Tab mid-drag) ends it too, since no release is coming.
- */
+// Pointer capture can't cross the native PR webview, which swallows events at
+// the OS level, so a release over it is never seen: a move with no button held
+// ends the drag, and so does a window blur.
 function ResizeHandle({
   onResize,
   onDragStart,
@@ -393,8 +337,7 @@ function ResizeHandle({
     e.preventDefault();
     const handle = e.currentTarget;
     const startX = e.clientX;
-    // Measured, not passed in: until it's been dragged the panel's width is a
-    // percentage, and the drag has to start from the pixels that resolves to.
+    // Measured: an undragged panel's width is a percentage.
     const startWidth =
       handle.parentElement?.getBoundingClientRect().width ?? MIN_WIDTH;
     const max = Math.floor(window.innerWidth * 0.7);
@@ -430,13 +373,6 @@ function ResizeHandle({
   return <div className="side-resize" onPointerDown={onPointerDown} />;
 }
 
-/**
- * Freeform notes editor. Edits are debounced to `set_workspace_notes` and
- * flushed on unmount so nothing is lost when switching tabs or workspaces.
- * Keyed by workspace id at the call site so each workspace gets a fresh
- * editor; the text itself lives in App's `noteDrafts` so it survives that
- * remount.
- */
 function NotesTab({
   workspaceId,
   notes,
@@ -447,16 +383,12 @@ function NotesTab({
   onNotesChange: (notes: string) => void;
 }) {
   const saveTimer = useRef<number | null>(null);
-  // Latest unsaved value, or null once it's been persisted. Lets the flush on
-  // unmount write the final keystrokes the debounce hasn't sent yet.
   const pending = useRef<string | null>(null);
 
   const save = useCallback(
     (notes: string) => {
       pending.current = null;
-      api.setWorkspaceNotes(workspaceId, notes).catch(() => {
-        // Best-effort persistence; the text stays in the editor regardless.
-      });
+      api.setWorkspaceNotes(workspaceId, notes).catch(() => {});
     },
     [workspaceId],
   );
@@ -491,13 +423,6 @@ function NotesTab({
   );
 }
 
-/**
- * A mermaid diagram, rendered fit-to-width and left to scroll vertically.
- * `mermaid` is a couple of megabytes, so it's imported on first use rather
- * than at boot. A diagram that doesn't parse — Claude emits those fairly
- * often — shows its source and the parser's complaint, which is still more
- * readable than the terminal and tells you what to ask for.
- */
 function DiagramView({ source }: { source: string }) {
   const theme = useTheme();
   const dark = theme ? isDark(theme.colors.background) : prefersDark();
@@ -559,6 +484,7 @@ function DiagramView({ source }: { source: string }) {
 let mermaidCounter = 0;
 
 async function renderMermaid(source: string, dark: boolean): Promise<string> {
+  // A couple of megabytes; loaded on first use.
   const mermaid = (await import("mermaid")).default;
   mermaid.initialize({
     startOnLoad: false,
@@ -576,13 +502,6 @@ async function renderMermaid(source: string, dark: boolean): Promise<string> {
   }
 }
 
-/**
- * An HTML page the session wrote, loaded over the asset protocol so a
- * stylesheet or image beside it resolves too. The iframe is keyed on the
- * artifact's revision, so every re-edit reloads it. Sandboxed without
- * `allow-same-origin`, so whatever the page runs can't reach Tethys's own
- * window.
- */
 function PageView({
   workspaceId,
   artifact,
@@ -620,18 +539,8 @@ function PageView({
   );
 }
 
-/**
- * The live GitHub PR page for one linked PR. The page can't be shown in an
- * iframe — GitHub forbids being framed — so it renders in a native child
- * webview (`pr_view.rs`) that floats over this component's host `<div>`. This
- * component owns only the geometry and the show/hide lifecycle: it measures
- * the host rect and hands it to Rust, re-measuring whenever the panel or
- * window resizes, and hides the webview when it unmounts (a switch to Notes,
- * an artifact, another workspace, or a collapsed panel).
- *
- * Login lives in the webview's own persistent cookie store, shared across
- * workspaces and restarts — you sign in to GitHub once, inside Tethys.
- */
+// GitHub refuses to be framed, so the page is a native child webview
+// (`pr_view.rs`) floated over the host `<div>`; this owns only its geometry.
 function PrView({
   url,
   number,
@@ -641,28 +550,15 @@ function PrView({
   url: string;
   number: number;
   repoKey: string;
-  /** True while the panel's edge is being dragged. The webview stays on
-   *  screen and follows the host, but with its left edge inset by
-   *  `DRAG_GUARD_PX`: it's a native view above the DOM, so if the cursor ever
-   *  lands on it the page stops hearing the drag. The webview tracks the host
-   *  a frame or so behind, and a quick pull to the right can put the cursor
-   *  inside that stale rectangle; the guard strip is where it lands instead. */
   resizing: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const modalOpen = useModalOpen();
 
-  // Position/show the webview to match the host, and keep it matched as the
-  // layout changes. Re-runs on `url` so switching PR tabs swaps webviews in
-  // place, on `resizing` so the guard strip appears when a drag starts and
-  // closes up the moment it ends, and on `modalOpen` so a dialog can take the
-  // screen and give it back.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    // A native view sits above every DOM layer, so a dialog's backdrop can't
-    // dim it and the dialog itself would render underneath. Hide it for as
-    // long as one is up.
+    // A native view sits above every DOM layer, dialogs included.
     if (modalOpen) {
       api.hidePrView().catch(() => {});
       return;
@@ -670,8 +566,6 @@ function PrView({
     const inset = resizing ? DRAG_GUARD_PX : 0;
     const sync = () => {
       const r = host.getBoundingClientRect();
-      // A zero-size or off-screen host means the panel is mid-collapse or
-      // hidden; don't paint a webview into nothing.
       if (r.width - inset < 2 || r.height < 2) {
         api.hidePrView().catch(() => {});
         return;
@@ -699,8 +593,7 @@ function PrView({
     };
   }, [url, resizing, modalOpen]);
 
-  // Hide only when the PR view actually leaves the screen — kept separate from
-  // the sync effect so switching between two PR tabs never flashes to hidden.
+  // Separate from the sync effect so switching PR tabs never flashes hidden.
   useEffect(() => {
     return () => {
       api.hidePrView().catch(() => {});
@@ -730,13 +623,6 @@ function PrView({
   );
 }
 
-/**
- * Whether any modal dialog is currently in the document. Every dialog in the
- * app renders a `.modal-backdrop` over the whole window, and they're owned by
- * several components (the create dialog by `App`, Info / Add repo / Attach PR
- * by the detail pane), so watching the DOM is simpler and more complete than
- * threading a flag down from each owner.
- */
 function useModalOpen(): boolean {
   const query = () => document.querySelector(".modal-backdrop") !== null;
   const [open, setOpen] = useState(query);
@@ -757,7 +643,6 @@ function prefersDark(): boolean {
   return window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
 
-/** Relative luminance of a `#rrggbb` colour is below the midpoint. */
 function isDark(hex: string): boolean {
   const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(hex);
   if (!m) return prefersDark();

@@ -23,27 +23,20 @@ use crate::store::Store;
 use crate::turn::{TurnChanged, TurnSignal, TurnState, TurnTracker};
 use crate::tmux;
 
-const RING_CAPACITY: usize = 2 * 1024 * 1024; // 2 MB scrollback per session
+const RING_CAPACITY: usize = 2 * 1024 * 1024;
 
-/// Inputs to `SessionSupervisor::spawn_agent`.
 pub struct SpawnAgent<'a> {
     pub agent: Agent,
     pub workspace_id: String,
     pub cwd: &'a Path,
     pub tmux_bin: &'a Path,
-    /// The already-resolved binary — the workspace's override, or the agent's
-    /// default from `AgentBins`.
     pub agent_bin: &'a Path,
-    /// Directories outside the cwd the session must be able to write.
     pub extra_writable: &'a [PathBuf],
-    /// The agent's own id for a conversation to pick up where it left off.
     pub resume_session_id: Option<&'a str>,
     pub mcp: Option<&'a McpLaunch>,
     pub brief: Option<&'a str>,
 }
 
-/// Inputs to `SessionSupervisor::spawn_with_id`. Bundled in a struct so the
-/// inner function doesn't trip clippy's `too_many_arguments` lint.
 struct SpawnRequest<'a> {
     id: SessionId,
     workspace_id: String,
@@ -52,16 +45,11 @@ struct SpawnRequest<'a> {
     args: &'a [String],
     tmux_bin: PathBuf,
     seed_bytes: &'a [u8],
-    /// Why this session is starting — `Spawned` for a fresh prompt,
-    /// `Reattached` for a pane that may be mid-response. The turn state each
-    /// implies is `TurnTracker`'s business, not the caller's.
     seed: TurnSignal,
 }
 
 pub type SessionId = String;
 
-/// Snapshot of a workspace's session for the frontend. Does not include the
-/// live byte stream — that flows over a `Channel` via `attach`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionInfo {
     pub id: SessionId,
@@ -69,27 +57,11 @@ pub struct SessionInfo {
     pub cwd: PathBuf,
     pub running: bool,
     pub runtime_state: SessionRuntimeState,
-    /// Populated by the last Notification hook (e.g. `permission_prompt`).
-    /// Set to `None` when state transitions away from `WaitingInput`.
     pub notification_type: Option<String>,
-    /// User dismissed the "your turn" dot for this session. Reset on the
-    /// next runtime_state transition.
     pub turn_acknowledged: bool,
-    /// Whether this session wants the user's attention.
-    ///
-    /// Derived here rather than in the frontend, which used to recompute it in
-    /// four places from `running` / `runtime_state` / `turn_acknowledged` —
-    /// and two of those four disagreed about whether `running` mattered, so
-    /// the sidebar row and the detail pane could light differently for the
-    /// same session.
+    /// Derived here so every view of a session agrees on it.
     pub needs_turn: bool,
-    /// Whether Claude is actively working in this session. Derived alongside
-    /// `needs_turn` for the same reason.
     pub working: bool,
-    /// Whether the agent's TUI is up and will take a paste — the program has
-    /// turned bracketed paste on (`PtyProcess::tui_ready`). This is what the
-    /// frontend waits for before pasting a draft prompt. Not the SessionStart
-    /// hook: codex fires that at its first turn, not at startup.
     pub tui_ready: bool,
 }
 
@@ -98,8 +70,6 @@ struct SessionHandle {
     pty: PtyProcess,
 }
 
-/// One entry per in-flight Claude spawn awaiting its `SessionStart` hook.
-/// Cleaned up when the hook arrives or when the entry expires.
 struct PendingSpawn {
     workspace_id: String,
     session_id: SessionId,
@@ -110,16 +80,10 @@ const PENDING_TTL: Duration = Duration::from_secs(30);
 
 pub struct SessionSupervisor {
     sessions: Mutex<HashMap<SessionId, SessionHandle>>,
-    /// Maps the `TETHYS_SPAWN_TOKEN` we set on the PTY env to the
-    /// session metadata we need to update once Claude's SessionStart hook
-    /// tells us the agent_session_id.
+    /// Keyed by `TETHYS_SPAWN_TOKEN`, until SessionStart reports the
+    /// agent's session id.
     pending: Mutex<HashMap<String, PendingSpawn>>,
-    /// Owns every rule about what a session's turn indicator shows.
-    /// `Arc` so the PTY exit hook can report a child exit without holding a
-    /// reference back to the supervisor.
     turn: Arc<TurnTracker>,
-    /// Diagrams and pages sessions produce, fed from the same hooks that
-    /// drive the turn indicator.
     artifacts: Arc<ArtifactStore>,
     store: Arc<Store>,
     app: AppHandle,
@@ -137,11 +101,8 @@ impl SessionSupervisor {
         }
     }
 
-    /// Restore a session's turn state from its persisted snapshot at boot.
-    ///
-    /// Must run after `reattach_tmux`, which seeds `Working` for a pane that
-    /// may be mid-response; the persisted value is the better answer when we
-    /// have one.
+    /// Must run after `reattach_tmux`, whose `Working` seed is a guess the
+    /// persisted state beats.
     pub fn restore_turn(
         &self,
         session_id: &str,
@@ -149,8 +110,6 @@ impl SessionSupervisor {
         notification_type: Option<String>,
         acknowledged: bool,
     ) {
-        // Seeds publish nothing: the frontend isn't subscribed yet and
-        // `get_session` reads straight out of the tracker.
         self.turn.observe(
             session_id,
             "",
@@ -162,13 +121,8 @@ impl SessionSupervisor {
         );
     }
 
-    /// Feed a signal to the turn tracker and, if it changed anything the user
-    /// can see, tell the UI and write it through to `state.json`.
-    ///
-    /// The single place turn state becomes visible. Every source — hooks, the
-    /// probe loop, the exit watcher, the user's acknowledgement — goes through
-    /// here, so "what happens when two of them disagree" is answered by
-    /// `TurnTracker::observe` rather than by whichever call site ran last.
+    /// Every turn-state source goes through here, so disagreements between
+    /// them are settled by `TurnTracker::observe`, not by call order.
     async fn apply_signal(
         &self,
         session_id: &str,
@@ -190,15 +144,6 @@ impl SessionSupervisor {
         }
     }
 
-    /// Reconcile hook-derived turn state against Claude's own status probe
-    /// files. For each probe correlated to a running Tethys session
-    /// (`sessionId` == `agent_session_id`), compare the probe-derived state
-    /// to what we're currently showing; on a mismatch, log it (the reason
-    /// this exists — instrumentation to judge whether probes beat hooks) and
-    /// apply the probe state as authoritative. The probe survives subagent
-    /// activity and dropped hooks, so it corrects drift the hook stream
-    /// can't see. Dormant sessions are left alone — a dead PTY is the exit
-    /// hook's job, and a lingering probe file must not resurrect one.
     pub async fn reconcile_probes(&self, probes: &[crate::probe::Probe]) {
         let parsed: Vec<ProbeView> = probes
             .iter()
@@ -217,8 +162,7 @@ impl SessionSupervisor {
             return;
         }
 
-        // Only running sessions are eligible; a lingering probe file must not
-        // resurrect a dead one, and Dormant is the exit hook's job.
+        // A lingering probe file must not resurrect a dead session.
         let running: HashSet<SessionId> = {
             let sessions = self.sessions.lock().unwrap();
             sessions
@@ -235,12 +179,8 @@ impl SessionSupervisor {
                 let tracked: Vec<TrackedSession> = s
                     .workspaces
                     .iter()
-                    // Probes are Claude's own status files, so only Claude
-                    // sessions may be reconciled against them. A codex session
-                    // left out here can't be matched by cwd and have a Claude
-                    // session id healed onto it — which a workspace switched
-                    // from Claude to codex would otherwise invite, since the
-                    // cwd is the same and the dead Claude probe outlives it.
+                    // Else a dead Claude probe could heal onto a codex session
+                    // in the same cwd.
                     .filter(|ws| ws.agent == Agent::Claude)
                     .flat_map(|ws| {
                         ws.session.iter().map(move |se| TrackedSession {
@@ -301,17 +241,12 @@ impl SessionSupervisor {
         }
     }
 
-    /// The user dismissed the "your turn" indicator. Cleared again by the
-    /// next fresh signal — see `TurnTracker`.
     pub async fn acknowledge_turn(&self, session_id: &str, workspace_id: &str) {
         self.apply_signal(session_id, workspace_id, TurnSignal::Acknowledged)
             .await;
     }
 
-    /// Inner spawn: opens a PTY, runs `program args`, wires up reader/
-    /// subscribers/watcher, and stores a `SessionHandle` under `id`. The
-    /// caller provides `id` so it can match an existing tmux session name
-    /// (the tmux session name == Tethys SessionId by convention).
+    /// `id` doubles as the tmux session name.
     fn spawn_with_id(&self, req: SpawnRequest<'_>) -> AppResult<SessionInfo> {
         let SpawnRequest {
             id,
@@ -366,8 +301,6 @@ impl SessionSupervisor {
         };
 
         self.sessions.lock().unwrap().insert(id.clone(), handle);
-        // Seeds publish nothing — hooks refine the state moments later, and
-        // the frontend reads the seed out of `get_session`.
         self.turn.observe(&id, &workspace_id, seed);
         let _ = self.app.emit(
             "session:changed",
@@ -376,18 +309,6 @@ impl SessionSupervisor {
         Ok(info)
     }
 
-    /// Spawn an agent CLI inside a fresh tmux session. The tmux server (socket
-    /// label `tethys`) keeps the agent process alive across Tethys restarts —
-    /// it only dies on reboot, explicit kill, or the agent itself exiting.
-    /// Pass `resume_session_id` to resume an existing conversation.
-    ///
-    /// The `TETHYS_SPAWN_TOKEN` correlation var reaches the agent via tmux's
-    /// `-e` flag (per-session env), so the session-start hook still maps back
-    /// to the right Tethys session.
-    ///
-    /// `mcp` puts the handoff tool in this session's hands; `brief` is the
-    /// first message it starts with, set only for the session a handoff
-    /// creates. The argv itself is per-agent — see `agent_cmd`.
     pub fn spawn_agent(&self, req: SpawnAgent<'_>) -> AppResult<(SessionInfo, String)> {
         let token = Uuid::new_v4().to_string();
         let id = new_session_id();
@@ -427,7 +348,6 @@ impl SessionSupervisor {
             seed: TurnSignal::Spawned,
         })?;
 
-        // Prune any expired pending correlations while we're here.
         let mut pending = self.pending.lock().unwrap();
         let now = Instant::now();
         pending.retain(|_, p| p.expires_at > now);
@@ -443,11 +363,6 @@ impl SessionSupervisor {
         Ok((info, token))
     }
 
-    /// Attach a fresh tmux client to an existing session. Used when the
-    /// app restarts and finds the tmux session still alive — claude keeps
-    /// running in the tmux server, we just reconnect a new PTY to it.
-    /// Returns `AppError` if the tmux session doesn't exist (caller should
-    /// fall back to `spawn_claude(..., Some(agent_session_id))`).
     pub fn reattach_tmux(
         &self,
         session_id: SessionId,
@@ -460,9 +375,7 @@ impl SessionSupervisor {
                 "tmux session {session_id} no longer exists"
             )));
         }
-        // Dump the pane's scrollback before the new client attaches —
-        // once the client is attached, tmux will repaint the visible
-        // area and we'd lose the historical context in xterm.js.
+        // Before attaching: the attach repaints only the visible area.
         let seed = tmux::capture_pane(tmux_bin, &session_id).unwrap_or_default();
 
         let args = tmux::attach_session_args(&session_id);
@@ -478,7 +391,6 @@ impl SessionSupervisor {
         })
     }
 
-    /// Dispatch a hook event from `tethys-hook`.
     pub async fn handle_hook_event(&self, msg: HookMessage) {
         match msg.event.as_str() {
             "session-start" => self.handle_session_start(msg).await,
@@ -487,8 +399,7 @@ impl SessionSupervisor {
                 self.record_page_if_written(&msg).await;
                 self.handle_resume_working(msg).await
             }
-            // `interrupt` is codex-only: the user pressed escape, which ends
-            // the turn as surely as a Stop does.
+            // `interrupt` is codex's escape.
             "stop" | "stop-failure" | "interrupt" => self.handle_stop(msg).await,
             "notify" => self.handle_notify(msg).await,
             "permission-request" => self.handle_permission_request(msg).await,
@@ -497,13 +408,8 @@ impl SessionSupervisor {
         }
     }
 
-    /// UserPromptSubmit / PreToolUse / PostToolUse → the agent is (re)starting
-    /// work. PostToolUse is what clears WaitingInput after a permission
-    /// prompt is accepted: neither CLI emits a hook at the moment of
-    /// acceptance, so we wait for the gated tool to finish and treat that
-    /// as the "prompt was answered" signal. Yellow lingers for the tool's
-    /// runtime — there's no way to do better without an optimistic clear
-    /// off the user's keystroke.
+    /// No hook fires when a permission prompt is accepted, so PostToolUse of
+    /// the gated tool is what clears `WaitingInput`.
     async fn handle_resume_working(&self, msg: HookMessage) {
         self.set_turn_from_hook(&msg, SessionRuntimeState::Working, None)
             .await;
@@ -512,17 +418,11 @@ impl SessionSupervisor {
     async fn handle_stop(&self, msg: HookMessage) {
         self.set_turn_from_hook(&msg, SessionRuntimeState::Idle, None)
             .await;
-        // The reply is only on `Stop`, and only its final text block — a
-        // diagram drawn before a tool call in the same turn is missed. The
-        // debug line in `record_diagrams` is how we'd find out that matters.
         let Some(message) = msg.last_assistant_message.as_deref() else { return };
         let Some((ws_id, _)) = self.resolve_session(&msg).await else { return };
         self.artifacts.record_diagrams(&ws_id, message).await;
     }
 
-    /// PostToolUse for a file tool on an `.html` path, or a Bash `open` of
-    /// one → a Page. Only files under the workspace root count, so a stray
-    /// write to `/tmp` or another checkout can't put a tab in this workspace.
     async fn record_page_if_written(&self, msg: &HookMessage) {
         let call = artifacts::ToolCall {
             tool_name: msg.tool_name.as_deref(),
@@ -541,10 +441,6 @@ impl SessionSupervisor {
     }
 
     async fn handle_notify(&self, msg: HookMessage) {
-        // auth_success / elicitation_dialog don't represent a turn flip —
-        // just log and bail. permission_prompt / idle_prompt both put the
-        // session into WaitingInput; the notification_type is carried on
-        // so the UI can render permission prompts more urgently.
         let state = match msg.notification_type.as_deref() {
             Some("permission_prompt") | Some("idle_prompt") => {
                 SessionRuntimeState::WaitingInput
@@ -561,9 +457,7 @@ impl SessionSupervisor {
         self.set_turn_from_hook(&msg, state, nt).await;
     }
 
-    /// PermissionRequest fires whenever Claude Code shows a permission
-    /// dialog, including sandbox-escape prompts (network / filesystem) that
-    /// Notification doesn't cover.
+    /// Covers sandbox-escape prompts that Notification doesn't.
     async fn handle_permission_request(&self, msg: HookMessage) {
         self.set_turn_from_hook(
             &msg,
@@ -573,8 +467,6 @@ impl SessionSupervisor {
         .await;
     }
 
-    /// Elicitation fires when an MCP server requests user input during a
-    /// tool call — same turn semantics as a permission prompt.
     async fn handle_elicitation(&self, msg: HookMessage) {
         self.set_turn_from_hook(
             &msg,
@@ -584,7 +476,6 @@ impl SessionSupervisor {
         .await;
     }
 
-    /// Feed the turn tracker for the session a hook belongs to.
     async fn set_turn_from_hook(
         &self,
         msg: &HookMessage,
@@ -603,18 +494,8 @@ impl SessionSupervisor {
         .await;
     }
 
-    /// Find the Tethys session this hook belongs to.
-    ///
-    /// Matches first on `agent_session_id`. Falls back to the parent session
-    /// when the hook comes from a subagent — subagent transcripts live at
-    /// `.../<parent-uuid>/subagents/agent-*.jsonl`, so the parent's id is
-    /// recoverable from `transcript_path`. Falls back last to `cwd`, which is
-    /// stable across the id rotation Claude does on compaction/resume; without
-    /// it a rotated id means every hook silently misses until the 2s probe
-    /// loop heals the id.
-    ///
-    /// Returns the workspace and its session's id: one implies the other, but
-    /// the turn tracker is keyed by session id, so both are handed back.
+    /// By `agent_session_id`, then a subagent's parent id, then `cwd`, which
+    /// survives the id rotation on compaction/resume.
     async fn resolve_session(&self, msg: &HookMessage) -> Option<(WorkspaceId, SessionId)> {
         let Some(csid) = msg.session_id.as_deref() else {
             debug!(
@@ -642,8 +523,7 @@ impl SessionSupervisor {
                     {
                         return Some((ws.id.clone(), sess.id.clone()));
                     }
-                    // Remember a cwd match but keep looking for an id
-                    // match, which is always the better answer.
+                    // An id match elsewhere still wins.
                     if by_cwd.is_none() && cwd.is_some() && sess.cwd.to_str() == cwd {
                         by_cwd = Some((ws.id.clone(), sess.id.clone()));
                     }
@@ -713,9 +593,6 @@ impl SessionSupervisor {
         }
     }
 
-    /// Register a new output subscriber and return the current scrollback.
-    /// The frontend writes the scrollback into xterm first, then drains the
-    /// channel for live bytes — zero gap.
     pub fn attach(
         &self,
         session_id: &str,
@@ -728,9 +605,6 @@ impl SessionSupervisor {
         Ok(handle.pty.attach(channel))
     }
 
-    /// Best-effort: drop a subscriber (by its channel id) when its pane
-    /// unmounts. Silently ignores an unknown session — it may already be gone,
-    /// and the only goal is to stop streaming to a dead terminal.
     pub fn detach(&self, session_id: &str, channel_id: u32) {
         if let Some(handle) = self.sessions.lock().unwrap().get(session_id) {
             handle.pty.detach(channel_id);
@@ -755,8 +629,7 @@ impl SessionSupervisor {
             .resize(cols, rows)
     }
 
-    /// The live snapshot of a session, if this supervisor has a handle for it.
-    /// `None` means dormant: nothing has been spawned or reattached this run.
+    /// `None` means dormant: nothing spawned or reattached this run.
     pub fn info(&self, session_id: &str) -> Option<SessionInfo> {
         let sessions = self.sessions.lock().unwrap();
         let h = sessions.get(session_id)?;
@@ -772,10 +645,6 @@ impl SessionSupervisor {
         Some(info)
     }
 
-    /// Drop the handle for a session that is no longer a workspace's session
-    /// — replaced by a fresh spawn. The PTY client it held is already dead or
-    /// about to be; what this removes is the exited scrollback nobody can
-    /// reach any more.
     pub fn forget(&self, session_id: &str) {
         self.sessions.lock().unwrap().remove(session_id);
     }
@@ -785,10 +654,7 @@ fn new_session_id() -> SessionId {
     Uuid::new_v4().to_string()
 }
 
-/// If `transcript_path` looks like a subagent transcript
-/// (`.../<parent-uuid>/subagents/agent-*.jsonl`), return the parent uuid so
-/// subagent hooks can be routed to the parent session. Returns `None` for
-/// parent-level transcripts or any other shape.
+/// `.../<parent-uuid>/subagents/agent-*.jsonl` → `<parent-uuid>`.
 fn parent_session_from_subagent_path(transcript_path: &str) -> Option<String> {
     let path = Path::new(transcript_path);
     let file = path.file_name()?.to_str()?;
@@ -802,10 +668,6 @@ fn parent_session_from_subagent_path(transcript_path: &str) -> Option<String> {
     Some(subagents_dir.parent()?.file_name()?.to_str()?.to_string())
 }
 
-/// Emit a turn change to the frontend. One shape, one place — the payload
-/// used to be hand-built as `serde_json::json!` at three call sites, and the
-/// third had already drifted, omitting `turn_acknowledged` while the
-/// TypeScript type declared it non-optional.
 fn publish_turn(app: &AppHandle, changed: &TurnChanged, running: bool) {
     let snapshot = TurnState {
         state: changed.runtime_state,
@@ -823,11 +685,7 @@ fn publish_turn(app: &AppHandle, changed: &TurnChanged, running: bool) {
     );
 }
 
-/// What goes over the wire on `session:turn_changed`.
-///
-/// The tracker is pure and can't know whether the PTY is still alive, so the
-/// two liveness-dependent predicates are added here — the one place with
-/// access to both. The frontend gets the answer rather than the ingredients.
+/// Adds the liveness-dependent predicates the pure tracker can't compute.
 #[derive(Clone, Serialize)]
 struct TurnChangedEvent<'a> {
     #[serde(flatten)]
@@ -837,9 +695,7 @@ struct TurnChangedEvent<'a> {
     working: bool,
 }
 
-/// Write a turn change through to `state.json` so the indicator survives a
-/// restart. Quiet: the caller already emitted the more specific
-/// `session:turn_changed`, so there's no need for a `workspace:changed` too.
+/// Quiet: callers have already emitted `session:turn_changed`.
 async fn persist_turn(store: &Arc<Store>, changed: &TurnChanged) -> AppResult<()> {
     let session_id = changed.session_id.clone();
     let runtime_state = changed.runtime_state;
@@ -857,10 +713,6 @@ async fn persist_turn(store: &Arc<Store>, changed: &TurnChanged) -> AppResult<()
         .await
 }
 
-/// Build the ready hook handed to [`PtyProcess::spawn`]: the frontend learns
-/// the TUI is up the same way it learns everything else about a session —
-/// a `session:changed` and a `get_session` round-trip, which now reports
-/// `tui_ready`.
 fn session_ready_hook(app: AppHandle, workspace_id: String) -> crate::pty::OnReady {
     Box::new(move || {
         let _ = app.emit(
@@ -870,16 +722,6 @@ fn session_ready_hook(app: AppHandle, workspace_id: String) -> crate::pty::OnRea
     })
 }
 
-/// Build the exit hook handed to [`PtyProcess::spawn`]. It runs only on a
-/// true child exit (the watcher already filtered out client detaches): scrub
-/// tmux's detach epilogue from the ring, announce the exit, and record the
-/// session as `Dormant`.
-///
-/// Recording it is the part that used to be missing. The hook emitted a
-/// `Dormant` event but never wrote it anywhere, so `get_session` kept
-/// returning the pre-exit state — and the frontend's own refresh, racing the
-/// event, put the stale state straight back and re-lit the sidebar dot for a
-/// session that had already died.
 fn session_exit_hook(
     app: AppHandle,
     store: Arc<Store>,
@@ -888,10 +730,6 @@ fn session_exit_hook(
     session_id: SessionId,
 ) -> OnExit {
     Box::new(move |code, ring| {
-        // Session truly gone — tmux client printed `[detached (from
-        // session …)]` to the pty just before exiting. Strip that trailing
-        // line from the ring so it doesn't surface when the user revisits
-        // the workspace.
         trim_detach_epilogue(ring);
 
         info!(%session_id, ?code, "session child exited");
@@ -909,10 +747,7 @@ fn session_exit_hook(
             &workspace_id,
             TurnSignal::ChildExited,
         ) {
-            // The child just exited, so it is definitively not running.
             publish_turn(&app, &changed, false);
-            // The exit hook is a sync callback on the watcher thread, so the
-            // write-through goes on the runtime.
             let store = store.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = persist_turn(&store, &changed).await {
@@ -923,14 +758,10 @@ fn session_exit_hook(
     })
 }
 
-/// Scan the tail of the ring for tmux's detach epilogue
-/// (`[detached (from session …)]` + surrounding CR/LFs) and remove it.
-/// Tmux emits this line to the client's terminal right before the client
-/// exits, so it lands in our buffer via the reader thread. Called from
-/// the exit hook once we've confirmed the session itself is gone.
+/// Drop the `[detached (from session …)]` line the tmux client prints as it
+/// exits, so it doesn't greet the user on revisit.
 fn trim_detach_epilogue(ring: &Ring) {
     const NEEDLE: &[u8] = b"[detached ";
-    // Search back at most ~256 bytes — the message is short.
     const SCAN_WINDOW: usize = 256;
 
     let mut ring = ring.lock().unwrap();
@@ -938,7 +769,6 @@ fn trim_detach_epilogue(ring: &Ring) {
         return;
     }
     let tail_start = ring.len().saturating_sub(SCAN_WINDOW);
-    // make_contiguous so we can call windows() on a single &[u8] slice.
     let bytes = ring.make_contiguous();
     let Some(rel) = bytes[tail_start..]
         .windows(NEEDLE.len())
@@ -946,8 +776,6 @@ fn trim_detach_epilogue(ring: &Ring) {
     else {
         return;
     };
-    // Truncate from the byte preceding the pattern, walking back over
-    // any trailing CR/LF so we don't leave a blank line either.
     let mut cut_from = tail_start + rel;
     while cut_from > 0 && matches!(bytes[cut_from - 1], b'\r' | b'\n') {
         cut_from -= 1;
@@ -955,7 +783,6 @@ fn trim_detach_epilogue(ring: &Ring) {
     ring.truncate(cut_from);
 }
 
-/// A probe reduced to the fields the reconciler correlates on.
 struct ProbeView<'a> {
     sid: &'a str,
     cwd: Option<&'a str>,
@@ -963,7 +790,6 @@ struct ProbeView<'a> {
     status_updated_at: Option<i64>,
 }
 
-/// A tracked Tethys session a probe can be correlated to.
 struct TrackedSession<'a> {
     workspace_id: &'a str,
     session_id: &'a SessionId,
@@ -972,8 +798,6 @@ struct TrackedSession<'a> {
     running: bool,
 }
 
-/// One reconciliation decision: apply `state` to `session_id`, first
-/// rewriting its stored `agent_session_id` when `heal_to` is set.
 #[derive(Debug, PartialEq)]
 struct ProbeAction {
     workspace_id: String,
@@ -982,16 +806,8 @@ struct ProbeAction {
     heal_to: Option<String>,
 }
 
-/// Keep, per cwd, only the probe with the newest `status_updated_at`.
-///
-/// Claude leaves a session's old probe file behind when it rotates its
-/// session id (compaction/resume), so one cwd can show several probes at
-/// once — but Tethys runs a single live Claude per worktree cwd, so only the
-/// freshest is current. Dropping the stale ones up front stops a ghost probe
-/// from winning primary correlation *and* from keeping a rotated-away id in
-/// `live_sids`, which would otherwise suppress the very heal meant to repair
-/// it. A missing timestamp sorts oldest so a stamped live probe always wins;
-/// probes without a cwd can't be deduped this way and pass through untouched.
+/// A rotated session id leaves a ghost probe behind in the same cwd. Left in,
+/// it would win correlation and keep the stale id "live", blocking the heal.
 fn freshest_probe_per_cwd<'a>(probes: &'a [ProbeView<'a>]) -> Vec<&'a ProbeView<'a>> {
     let mut freshest: HashMap<&str, &ProbeView> = HashMap::new();
     let mut out: Vec<&ProbeView> = Vec::new();
@@ -1013,19 +829,13 @@ fn freshest_probe_per_cwd<'a>(probes: &'a [ProbeView<'a>]) -> Vec<&'a ProbeView<
     out
 }
 
-/// Pure correlation core of `reconcile_probes`, extracted so the drift/heal
-/// decisions are unit-testable without a live supervisor. Correlates each
-/// probe to a running tracked session: first by session id, then — when that
-/// misses because Claude rotated the id (compaction/resume) — by a *single*
-/// running session in the same cwd whose stored id has gone stale, carrying
-/// the fresh id in `heal_to` so hook correlation is repaired too.
+/// Correlates by session id, else by the one running session in the probe's
+/// cwd whose stored id has rotated away, healing it to the probe's.
 fn plan_probe_reconciliation(
     probes: &[ProbeView],
     sessions: &[TrackedSession],
 ) -> Vec<ProbeAction> {
     let probes = freshest_probe_per_cwd(probes);
-    // Every session id Claude currently reports. A stored `agent_session_id`
-    // absent from this set has rotated away — the trigger for cwd healing.
     let live_sids: HashSet<&str> = probes.iter().map(|p| p.sid).collect();
     let mut out = Vec::new();
     for p in probes {
@@ -1062,42 +872,21 @@ fn plan_probe_reconciliation(
     out
 }
 
-/// One request to put a workspace's Claude session on screen, whatever state
-/// it is in. Every caller — the Start/Resume/Reconnect button, the auto-start
-/// after provisioning, a binary switch, a handoff — goes through here.
 pub struct OpenSession<'a> {
     pub supervisor: &'a Arc<SessionSupervisor>,
     pub store: &'a Arc<Store>,
     pub workspace_id: &'a str,
-    /// Each agent's default binary, resolved at boot. The fallback when the
-    /// workspace doesn't override it; which one is used depends on the
-    /// workspace's agent.
     pub agent_bins: &'a AgentBins,
     pub tmux_bin: &'a Path,
-    /// Where Tethys keeps its data, for the per-repo git dirs a sandboxed
-    /// session has to be granted.
     pub paths: &'a Paths,
-    /// Handoff tool config. Attached to every session Tethys spawns — whether
-    /// an agent can hand off shouldn't depend on which workspace it landed in.
     pub mcp: Option<&'a McpLaunch>,
-    /// The Brief, for the session a handoff creates. `None` everywhere else —
-    /// a session the user started is one they're about to type into.
+    /// Only for the session a handoff creates.
     pub brief: Option<&'a str>,
 }
 
-/// Make the workspace's session live, doing the least that gets there.
-///
-/// In order: a handle that is already running is returned as is; a tmux pane
-/// that outlived the app is reattached; a conversation on disk is resumed;
-/// otherwise a fresh session starts. Each step is what the
-/// user would have had to pick between when there were three buttons for it
-/// and a chip bar to pick them from — Start, Resume and Reconnect were all
-/// this function with the decision made by hand.
-///
-/// A fresh start or a resume replaces the persisted `AgentSessionMeta`: a new
-/// tmux session means a new id, and the old id's handle is dropped so its dead
-/// scrollback doesn't linger. The cwd is the one thing that carries over — see
-/// `Workspace::session_cwd`.
+/// Does the least that works: the running handle, a reattached tmux pane, a
+/// resumed conversation, else a fresh start. The last two mint a new session
+/// id, since the id is the tmux session name.
 pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
     if req.tmux_bin.as_os_str().is_empty() {
         return Err(AppError::Other(
@@ -1145,10 +934,8 @@ pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
         }
     }
 
-    // Resume only when the conversation is actually on disk. Both CLIs report
-    // a session id at startup but write the transcript only once there's been
-    // an exchange, so resuming an empty session fails with "No conversation
-    // found" — a fresh start is the right answer there.
+    // Both CLIs report a session id before writing any transcript, and
+    // resuming that fails with "No conversation found".
     let resume_sid = existing.as_ref().and_then(|prev| {
         prev.agent_session_id
             .as_deref()
@@ -1160,17 +947,11 @@ pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
         None => req.agent_bins.get(agent).to_path_buf(),
     };
 
-    // Codex asks "do you trust this directory?" on the first run in any new
-    // one, and every workspace is a new one. It's the single thing about a
-    // codex session that can't be said on the command line, so it goes in the
-    // user's config — see `codex_trust`.
     if agent == Agent::Codex {
         crate::codex_trust::trust_or_warn(req.paths, &cwd);
     }
 
-    // A worktree's real git dir lives under Tethys's data dir, outside the
-    // workspace root — so a sandboxed session can read the checkout but
-    // couldn't run a single git command without being granted these.
+    // A worktree's git dir lives outside the workspace root.
     let extra_writable: Vec<PathBuf> = repo_keys
         .iter()
         .map(|key| req.paths.repo_git_dir(key))
@@ -1188,8 +969,6 @@ pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
         brief: req.brief,
     })?;
 
-    // Persist the meta that makes this resumable across restarts. The
-    // agent_session_id is filled in by the SessionStart hook once it arrives.
     let meta = AgentSessionMeta {
         id: info.id.clone(),
         cwd,
@@ -1212,8 +991,6 @@ pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
     Ok(info)
 }
 
-/// Whether a conversation can be resumed: a non-empty transcript file on disk
-/// is the reliable signal, for either agent.
 fn transcript_is_resumable(path: Option<&Path>) -> bool {
     path.and_then(|p| std::fs::metadata(p).ok())
         .map(|m| m.is_file() && m.len() > 0)
@@ -1240,8 +1017,6 @@ mod tests {
         assert!(!transcript_is_resumable(Some(&path)));
     }
 
-    /// A fresh chat: claude reports a session id at startup but hasn't
-    /// written any conversation yet — `--resume` would fail.
     #[test]
     fn empty_transcript_is_not_resumable() {
         let dir = tempfile::tempdir().unwrap();
@@ -1259,11 +1034,6 @@ mod tests {
         assert!(transcript_is_resumable(Some(&path)));
     }
 
-    /// Claude rotated its session id and left the old probe file behind, so
-    /// the cwd shows two probes: a stale one still bearing the id Tethys
-    /// stored, and the fresh live one. The reconciler must ignore the ghost,
-    /// heal the stored id to the live one, and apply the live probe's state —
-    /// not freeze on the stale probe forever.
     #[test]
     fn stale_ghost_probe_does_not_block_healing() {
         let stored_id = "b6a26662".to_string();
@@ -1271,14 +1041,12 @@ mod tests {
         let ws_id = "ws".to_string();
         let cwd = "/wt/custom-fill-in-field/nl-ai";
         let probes = [
-            // Ghost: old id (== stored), stale timestamp, still "working".
             ProbeView {
                 sid: "b6a26662",
                 cwd: Some(cwd),
                 state: SessionRuntimeState::Working,
                 status_updated_at: Some(1_784_158_540_640),
             },
-            // Live: rotated id, fresh timestamp, now idle.
             ProbeView {
                 sid: "14a3fff4",
                 cwd: Some(cwd),
@@ -1307,8 +1075,6 @@ mod tests {
         );
     }
 
-    /// A single live probe whose id already matches the stored id needs no
-    /// healing — apply its state straight through.
     #[test]
     fn matching_probe_applies_state_without_healing() {
         let stored_id = "sid-1".to_string();
@@ -1339,8 +1105,6 @@ mod tests {
         );
     }
 
-    /// A probe for a non-running session must never produce an action — a
-    /// lingering probe file can't resurrect a dead PTY.
     #[test]
     fn probe_never_resurrects_a_dead_session() {
         let stored_id = "sid-1".to_string();
