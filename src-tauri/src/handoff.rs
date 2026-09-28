@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use crate::agent_bin::AgentBins;
 use crate::branch_name;
 use crate::error::{AppError, AppResult};
-use crate::inprogress::InProgressWorkspaces;
+use crate::inprogress::{InProgressGuard, InProgressWorkspaces};
 use crate::job::JobTx;
 use crate::mcp::{CreateWorkspace, McpLaunch};
 use crate::paths::Paths;
@@ -113,6 +113,7 @@ impl Handoff {
         let branch_name::Reserved {
             branch,
             workspace_dir,
+            claim,
         } = branch_name::reserve(&reg.worktree_root, &self.in_progress, &requested)?;
 
         let id = uuid::Uuid::new_v4().to_string();
@@ -159,7 +160,7 @@ impl Handoff {
         let task_branch = branch.clone();
         let task_id = id.clone();
         tauri::async_runtime::spawn(async move {
-            this.provision_and_start(task_id, task_branch, workspace_dir, selected, brief)
+            this.provision_and_start(task_id, task_branch, workspace_dir, claim, selected, brief)
                 .await;
         });
 
@@ -174,6 +175,7 @@ impl Handoff {
         workspace_id: String,
         branch: String,
         workspace_dir: String,
+        claim: InProgressGuard,
         repos: Vec<Repo>,
         brief: String,
     ) {
@@ -190,7 +192,7 @@ impl Handoff {
             registry: reg,
             paths: &self.paths,
             store: &self.store,
-            in_progress: &self.in_progress,
+            claim,
             queue: &self.queue,
             tx: &tx,
         })

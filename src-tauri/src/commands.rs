@@ -304,6 +304,7 @@ pub async fn create_workspace(
     let branch_name::Reserved {
         branch,
         workspace_dir,
+        claim,
     } = branch_name::reserve(&reg.worktree_root, &in_progress, requested)?;
 
     let draft = Workspace::draft(
@@ -346,7 +347,7 @@ pub async fn create_workspace(
         registry: reg,
         paths: &paths,
         store: &store,
-        in_progress: &in_progress,
+        claim,
         queue: &queue,
         tx: &tx,
     })

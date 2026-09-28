@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use crate::claude_local;
 use crate::error::{AppError, AppResult};
 use crate::git;
-use crate::inprogress::InProgressWorkspaces;
+use crate::inprogress::InProgressGuard;
 use crate::job::{JobEvent, JobTx};
 use crate::paths::Paths;
 use crate::provision_queue::ProvisionQueue;
@@ -202,16 +202,15 @@ pub struct WorkspaceProvision<'a> {
     pub registry: &'a RepoRegistry,
     pub paths: &'a Paths,
     pub store: &'a Arc<Store>,
-    pub in_progress: &'a InProgressWorkspaces,
+    /// Keeps the reconciler and other creates off `workspace_dir` until this
+    /// returns.
+    pub claim: InProgressGuard,
     pub queue: &'a ProvisionQueue,
     pub tx: &'a JobTx,
 }
 
 pub async fn provision_workspace(ctx: WorkspaceProvision<'_>) -> AppResult<Workspace> {
-    // Keeps the reconciler off our dirs. Taken before queueing so a handoff
-    // landing meanwhile can't claim the same directory name.
-    let _in_progress_guard = ctx.in_progress.insert(ctx.workspace_dir.to_string());
-
+    let _claim = ctx.claim;
     let mut waited = false;
     let _slot = match ctx.queue.try_acquire() {
         Some(slot) => slot,
@@ -465,7 +464,7 @@ mod tests {
         store: Arc<Store>,
         registry: RepoRegistry,
         queue: crate::provision_queue::ProvisionQueue,
-        in_progress: InProgressWorkspaces,
+        in_progress: crate::inprogress::InProgressWorkspaces,
     }
 
     impl TestCtx {
@@ -502,20 +501,25 @@ mod tests {
                     workspace_doc: None,
                 },
                 queue: crate::provision_queue::ProvisionQueue::new(),
-                in_progress: InProgressWorkspaces::new(),
+                in_progress: crate::inprogress::InProgressWorkspaces::new(),
             }
         }
 
         async fn provision(&self, f: &Fixture, id: &str, branch: &str) -> AppResult<Workspace> {
+            let workspace_dir = crate::registry::sanitize_branch_for_dir(branch);
+            let (claim, ()) = self
+                .in_progress
+                .claim(|_| Ok::<_, AppError>((workspace_dir.clone(), ())))
+                .unwrap();
             provision_workspace(WorkspaceProvision {
                 workspace_id: id,
                 branch,
-                workspace_dir: &crate::registry::sanitize_branch_for_dir(branch),
+                workspace_dir: &workspace_dir,
                 repos: &self.registry.repos,
                 registry: &self.registry,
                 paths: &f.paths,
                 store: &self.store,
-                in_progress: &self.in_progress,
+                claim,
                 queue: &self.queue,
                 tx: &JobTx::silent(),
             })

@@ -1,5 +1,6 @@
-//! Workspaces mid-create have directories but no state entry yet, so
-//! `reconcile::scan` skips these ids instead of flagging them as orphans.
+//! Workspace directory names claimed by a create that hasn't finished. They
+//! may not exist on disk yet, and aren't in state yet, so both
+//! `branch_name::reserve` and `reconcile::scan` have to consult this set.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -14,12 +15,20 @@ impl InProgressWorkspaces {
         Self::default()
     }
 
-    pub fn insert(&self, id: String) -> InProgressGuard {
-        self.inner.lock().unwrap().insert(id.clone());
-        InProgressGuard {
+    /// `choose` runs under the lock and names the entry to claim, so two
+    /// callers can't both pick the same free name.
+    pub fn claim<T, E>(
+        &self,
+        choose: impl FnOnce(&HashSet<String>) -> Result<(String, T), E>,
+    ) -> Result<(InProgressGuard, T), E> {
+        let mut set = self.inner.lock().unwrap();
+        let (id, value) = choose(&set)?;
+        set.insert(id.clone());
+        let guard = InProgressGuard {
             inner: self.inner.clone(),
             id,
-        }
+        };
+        Ok((guard, value))
     }
 
     pub fn snapshot(&self) -> HashSet<String> {

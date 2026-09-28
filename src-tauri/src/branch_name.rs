@@ -10,7 +10,7 @@ use std::path::Path;
 use chrono::NaiveDate;
 
 use crate::error::{AppError, AppResult};
-use crate::inprogress::InProgressWorkspaces;
+use crate::inprogress::{InProgressGuard, InProgressWorkspaces};
 use crate::registry;
 
 const MAX_COUNTER: u32 = 50;
@@ -18,30 +18,44 @@ const MAX_COUNTER: u32 = 50;
 pub struct Reserved {
     pub branch: String,
     pub workspace_dir: String,
+    /// Holds the directory name until the create finishes, whether it
+    /// succeeds or not.
+    pub claim: InProgressGuard,
 }
 
-/// A queued or provisioning workspace has no directory yet, so the in-progress
-/// set is checked too. Provisioning still re-checks disk to close the gap
-/// before it registers.
+struct Picked {
+    branch: String,
+    workspace_dir: String,
+}
+
+/// A queued or provisioning workspace has no directory yet, so claimed names
+/// count as taken too.
 pub fn reserve(
     worktree_root: &Path,
     in_progress: &InProgressWorkspaces,
     requested: &str,
 ) -> AppResult<Reserved> {
-    let provisioning = in_progress.snapshot();
     let today = chrono::Local::now().date_naive();
-    pick(requested, today, |dir| {
-        provisioning.contains(dir) || worktree_root.join(dir).exists()
+    let (claim, picked) = in_progress.claim(|claimed| {
+        let picked = pick(requested, today, |dir| {
+            claimed.contains(dir) || worktree_root.join(dir).exists()
+        })?;
+        Ok::<_, AppError>((picked.workspace_dir.clone(), picked))
+    })?;
+    Ok(Reserved {
+        branch: picked.branch,
+        workspace_dir: picked.workspace_dir,
+        claim,
     })
 }
 
-fn pick(requested: &str, today: NaiveDate, taken: impl Fn(&str) -> bool) -> AppResult<Reserved> {
+fn pick(requested: &str, today: NaiveDate, taken: impl Fn(&str) -> bool) -> AppResult<Picked> {
     candidates(requested, today)
-        .map(|branch| Reserved {
+        .map(|branch| Picked {
             workspace_dir: registry::sanitize_branch_for_dir(&branch),
             branch,
         })
-        .find(|r| !taken(&r.workspace_dir))
+        .find(|p| !taken(&p.workspace_dir))
         .ok_or_else(|| {
             AppError::Other(format!(
                 "no free workspace directory for `{requested}` after {MAX_COUNTER} attempts"
@@ -123,5 +137,22 @@ mod tests {
     #[test]
     fn gives_up_eventually() {
         assert!(pick("x", sep_28(), |_| true).is_err());
+    }
+
+    #[test]
+    fn a_held_claim_takes_the_name_until_dropped() {
+        let root = tempfile::tempdir().unwrap();
+        let in_progress = InProgressWorkspaces::new();
+
+        let first = reserve(root.path(), &in_progress, "my-foo").unwrap();
+        let second = reserve(root.path(), &in_progress, "my-foo").unwrap();
+        assert_eq!(first.workspace_dir, "my-foo");
+        assert_ne!(second.workspace_dir, "my-foo");
+
+        drop(first);
+        assert_eq!(
+            reserve(root.path(), &in_progress, "my-foo").unwrap().workspace_dir,
+            "my-foo"
+        );
     }
 }
