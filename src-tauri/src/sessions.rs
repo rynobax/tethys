@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
@@ -83,6 +84,9 @@ pub struct SessionSupervisor {
     /// Keyed by `TETHYS_SPAWN_TOKEN`, until SessionStart reports the
     /// agent's session id.
     pending: Mutex<HashMap<String, PendingSpawn>>,
+    /// Kept off the store because every keystroke lands here; `idle` drains
+    /// it into `last_active_at` on each sweep.
+    activity: Mutex<HashMap<SessionId, DateTime<Utc>>>,
     turn: Arc<TurnTracker>,
     artifacts: Arc<ArtifactStore>,
     store: Arc<Store>,
@@ -94,6 +98,7 @@ impl SessionSupervisor {
         Self {
             sessions: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
+            activity: Mutex::new(HashMap::new()),
             turn: Arc::new(TurnTracker::new()),
             artifacts,
             store,
@@ -483,6 +488,7 @@ impl SessionSupervisor {
         notification_type: Option<String>,
     ) {
         let Some((ws_id, sess_id)) = self.resolve_session(msg).await else { return };
+        self.touch(&sess_id);
         self.apply_signal(
             &sess_id,
             &ws_id,
@@ -612,6 +618,7 @@ impl SessionSupervisor {
     }
 
     pub fn send_input(&self, session_id: &str, data: &[u8]) -> AppResult<()> {
+        self.touch(session_id);
         let sessions = self.sessions.lock().unwrap();
         sessions
             .get(session_id)
@@ -643,6 +650,17 @@ impl SessionSupervisor {
         info.turn_acknowledged = turn.acknowledged;
         info.tui_ready = h.pty.tui_ready();
         Some(info)
+    }
+
+    fn touch(&self, session_id: &str) {
+        self.activity
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), Utc::now());
+    }
+
+    pub fn take_activity(&self) -> HashMap<SessionId, DateTime<Utc>> {
+        std::mem::take(&mut self.activity.lock().unwrap())
     }
 
     pub fn forget(&self, session_id: &str) {
@@ -977,6 +995,7 @@ pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
         runtime_state: None,
         notification_type: None,
         turn_acknowledged: false,
+        last_active_at: Some(Utc::now()),
     };
     req.store
         .update_workspace(req.workspace_id, |ws| {
