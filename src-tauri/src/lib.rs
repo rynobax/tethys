@@ -36,6 +36,7 @@ mod setup;
 mod shell;
 mod state;
 mod store;
+mod strays;
 mod theme;
 mod tmux;
 mod turn;
@@ -180,6 +181,7 @@ pub fn run() {
             if let Some(path) = tmux_bin_path.as_ref() {
                 prewarm_live_sessions(&supervisor, path, &store);
                 idle::spawn(supervisor.clone(), store.clone(), path.clone());
+                strays::spawn(path.clone());
             }
 
             let socket_path = paths.hook_socket();

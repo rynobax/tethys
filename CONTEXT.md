@@ -56,6 +56,10 @@ The background teardown that runs after the grace window: worktrees removed, Tet
 The line workspaces wait in to be provisioned, because Tethys sets up one at a time. First asked for, first built — and a workspace waiting its turn is **Queued**: asked for, nothing on disk yet, nothing running.
 _Avoid_: Job queue, build queue
 
+**Stray**:
+A process a session started that outlived the session — a backgrounded dev server, an orphaned test run. Tethys finds strays by the session tag they inherited and kills them.
+_Avoid_: Orphan, zombie, leak
+
 **Pending Permissions**:
 Workspace-local Claude permission grants captured at purge (Claude only — codex has no equivalent to capture) for the user to later fold into the shared per-repo settings or discard.
 

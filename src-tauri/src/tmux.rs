@@ -133,6 +133,12 @@ pub fn capture_pane(tmux_bin: &Path, session_id: &str) -> Option<Vec<u8>> {
 }
 
 pub fn list_sessions(tmux_bin: &Path) -> Vec<String> {
+    try_list_sessions(tmux_bin).unwrap_or_default()
+}
+
+/// `None` when tmux can't answer, which callers acting on *absence* from the
+/// list must not mistake for "no sessions".
+pub fn try_list_sessions(tmux_bin: &Path) -> Option<Vec<String>> {
     let output = Command::new(tmux_bin)
         .args([
             "-L",
@@ -141,18 +147,36 @@ pub fn list_sessions(tmux_bin: &Path) -> Vec<String> {
             "-F",
             "#{session_name}",
         ])
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
+        .output()
+        .ok()?;
     if !output.status.success() {
-        return Vec::new();
+        return None;
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect()
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+    )
+}
+
+/// The session's own environment — what `new-session -e` set — as `KEY=value`
+/// lines. `None` when tmux can't answer.
+pub fn session_environment(tmux_bin: &Path, session_id: &str) -> Option<Vec<String>> {
+    let output = Command::new(tmux_bin)
+        .args(["-L", SOCKET_LABEL, "show-environment", "-t", session_id])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 pub fn kill_session(tmux_bin: &Path, session_id: &str) {

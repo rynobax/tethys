@@ -336,7 +336,10 @@ impl SessionSupervisor {
 
         let args = tmux::new_session_args(
             &id,
-            &[("TETHYS_SPAWN_TOKEN", token.clone())],
+            &[
+                ("TETHYS_SPAWN_TOKEN", token.clone()),
+                (crate::strays::SESSION_ID_VAR, id.clone()),
+            ],
             &command,
         );
 
