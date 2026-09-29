@@ -38,8 +38,8 @@ pub enum TurnSignal {
         state: SessionRuntimeState,
         notification_type: Option<String>,
     },
-    /// A *poll* every 2s: corrects drift, but never re-lights a dismissed
-    /// indicator.
+    /// A *poll* every 2s, or a hook that only restates what's known: corrects
+    /// drift, but never re-lights a dismissed indicator.
     Probe { state: SessionRuntimeState },
     Spawned,
     /// May be mid-response.
@@ -87,9 +87,10 @@ impl TurnTracker {
 
         let changed = match signal {
             // Seeds tell nobody: `get_session` reads this map directly.
+            // Idle, as the probe will report it: a fresh TUI is at its prompt.
             TurnSignal::Spawned => {
                 *current = TurnState {
-                    state: SessionRuntimeState::WaitingInput,
+                    state: SessionRuntimeState::Idle,
                     notification_type: None,
                     acknowledged: false,
                 };
@@ -222,10 +223,11 @@ mod tests {
 
 
     #[test]
-    fn a_spawned_session_waits_for_input_and_emits_nothing() {
+    fn a_spawned_session_is_idle_at_its_prompt_and_emits_nothing() {
         let t = TurnTracker::new();
         assert_eq!(t.observe(S, WS, TurnSignal::Spawned), None);
-        assert_eq!(t.get(S).state, WaitingInput);
+        assert_eq!(t.get(S).state, Idle);
+        assert!(t.get(S).needs_turn(true));
     }
 
     #[test]

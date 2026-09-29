@@ -265,7 +265,7 @@ impl SessionSupervisor {
         } = req;
         let seed_state = match seed {
             TurnSignal::Reattached => SessionRuntimeState::Working,
-            _ => SessionRuntimeState::WaitingInput,
+            _ => SessionRuntimeState::Idle,
         };
         let info = SessionInfo {
             id: id.clone(),
@@ -449,20 +449,33 @@ impl SessionSupervisor {
     }
 
     async fn handle_notify(&self, msg: HookMessage) {
-        let state = match msg.notification_type.as_deref() {
-            Some("permission_prompt") | Some("idle_prompt") => {
-                SessionRuntimeState::WaitingInput
+        match msg.notification_type.as_deref() {
+            Some("permission_prompt") => {
+                let nt = msg.notification_type.clone();
+                self.set_turn_from_hook(&msg, SessionRuntimeState::WaitingInput, nt)
+                    .await;
             }
-            other => {
-                debug!(
-                    notification_type = ?other,
-                    "ignoring Notification hook (non-turn event)"
-                );
-                return;
+            // Claude's reminder a minute after a turn ends. It says nothing
+            // Stop didn't, and the probe calls the same moment `idle` — taken
+            // as `WaitingInput` it flip-flopped against the probe and re-lit
+            // any dot cleared inside that minute. Still worth a correction for
+            // a missed Stop.
+            Some("idle_prompt") => {
+                let Some((ws_id, sess_id)) = self.resolve_session(&msg).await else { return };
+                self.apply_signal(
+                    &sess_id,
+                    &ws_id,
+                    TurnSignal::Probe {
+                        state: SessionRuntimeState::Idle,
+                    },
+                )
+                .await;
             }
-        };
-        let nt = msg.notification_type.clone();
-        self.set_turn_from_hook(&msg, state, nt).await;
+            other => debug!(
+                notification_type = ?other,
+                "ignoring Notification hook (non-turn event)"
+            ),
+        }
     }
 
     /// Covers sandbox-escape prompts that Notification doesn't.
