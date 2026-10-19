@@ -221,7 +221,7 @@ export const jobs = {
     args,
   }),
   addRepoToWorkspace: (args: {
-    args: { workspace_id: string; repo_key: string };
+    args: { workspace_id: string; repo_keys: string[] };
   }) => ({
     command: "add_repo_to_workspace" as const,
     args,

@@ -357,10 +357,11 @@ pub async fn create_workspace(
 #[derive(Debug, Deserialize)]
 pub struct AddRepoArgs {
     pub workspace_id: WorkspaceId,
-    pub repo_key: String,
+    pub repo_keys: Vec<String>,
 }
 
-/// On failure, tears down only the new worktree.
+/// Repos are added in order, each committed as it lands, so a failure keeps
+/// the ones before it and tears down only its own worktree.
 #[tauri::command]
 pub async fn add_repo_to_workspace(
     store: State<'_, Arc<Store>>,
@@ -371,18 +372,19 @@ pub async fn add_repo_to_workspace(
     on_event: Channel<JobEvent>,
 ) -> AppResult<Workspace> {
     let reg = registry.require()?;
-    let repo = reg
-        .find_repo(&args.repo_key)
-        .cloned()
-        .ok_or_else(|| AppError::Other(format!("unknown repo key: {}", args.repo_key)))?;
+    if args.repo_keys.is_empty() {
+        return Err(AppError::Other("no repos to add".into()));
+    }
 
-    let (branch, already_present, is_deleted) = store
+    let (branch, present, is_deleted) = store
         .with_workspace(&args.workspace_id, |w| {
-            (
-                w.branch.clone(),
-                w.has_link(&args.repo_key),
-                w.deleted_at.is_some(),
-            )
+            let present: Vec<String> = args
+                .repo_keys
+                .iter()
+                .filter(|k| w.has_link(k))
+                .cloned()
+                .collect();
+            (w.branch.clone(), present, w.deleted_at.is_some())
         })
         .await?;
 
@@ -391,42 +393,94 @@ pub async fn add_repo_to_workspace(
             "workspace is soft-deleted; cancel deletion before adding repos".into(),
         ));
     }
-    if already_present {
+    if let Some(key) = present.first() {
         return Err(AppError::Other(format!(
-            "repo '{}' is already in this workspace",
-            args.repo_key
+            "repo '{key}' is already in this workspace"
         )));
     }
 
     let workspace_dir = registry::sanitize_branch_for_dir(&branch);
-    let worktree_path = reg.plan_worktree_path(&workspace_dir, &repo.key);
-
-    if worktree_path.exists() {
-        return Err(AppError::Other(format!(
-            "a worktree directory already exists at {}. Remove it first or \
-             pick a different repo.",
-            worktree_path.display()
-        )));
+    let mut planned: Vec<(Repo, PathBuf)> = Vec::with_capacity(args.repo_keys.len());
+    for key in &args.repo_keys {
+        if planned.iter().any(|(r, _)| &r.key == key) {
+            return Err(AppError::Other(format!("repo '{key}' was asked for twice")));
+        }
+        let repo = reg
+            .find_repo(key)
+            .cloned()
+            .ok_or_else(|| AppError::Other(format!("unknown repo key: {key}")))?;
+        let worktree_path = reg.plan_worktree_path(&workspace_dir, &repo.key);
+        if worktree_path.exists() {
+            return Err(AppError::Other(format!(
+                "a worktree directory already exists at {}. Remove it first or \
+                 pick a different repo.",
+                worktree_path.display()
+            )));
+        }
+        planned.push((repo, worktree_path));
     }
 
     let tx = spawn_event_forwarder(on_event);
 
-    // Runs the setup script, the expensive part of a create.
-    let _slot = queue.acquire_announcing(&tx, Some(&args.repo_key)).await;
+    // Runs the setup scripts, the expensive part of a create.
+    let first_key = (planned.len() == 1).then(|| planned[0].0.key.as_str());
+    let _slot = queue.acquire_announcing(&tx, first_key).await;
 
+    let mut updated: Option<Workspace> = None;
+    for (repo, worktree_path) in &planned {
+        let added = add_one_repo(
+            &store,
+            &args.workspace_id,
+            repo,
+            worktree_path,
+            &branch,
+            &paths,
+            &tx,
+        )
+        .await;
+        match added {
+            Ok(ws) => updated = Some(ws),
+            Err(e) => {
+                if let Some(ws) = &updated {
+                    regen_workspace_claude_md(ws, reg, &paths, &tx).await;
+                }
+                let _ = tx.0.send(JobEvent::Failed {
+                    error: e.to_string(),
+                });
+                return Err(e);
+            }
+        }
+    }
+
+    let updated = updated.expect("repo_keys is non-empty");
+    regen_workspace_claude_md(&updated, reg, &paths, &tx).await;
+    let _ = tx.0.send(JobEvent::Success);
+    Ok(updated)
+}
+
+/// On failure, tears down only this repo's new worktree.
+async fn add_one_repo(
+    store: &Store,
+    workspace_id: &WorkspaceId,
+    repo: &Repo,
+    worktree_path: &Path,
+    branch: &str,
+    paths: &Paths,
+    tx: &JobTx,
+) -> AppResult<Workspace> {
     let provision = provision_repo_worktree(RepoProvision {
-        repo: &repo,
-        worktree_path: &worktree_path,
-        branch: &branch,
-        paths: &paths,
-        tx: &tx,
+        repo,
+        worktree_path,
+        branch,
+        paths,
+        tx,
     })
     .await;
 
-    match provision {
+    let committed = match provision {
         Ok(link) => {
-            let updated = store
-                .update_workspace(&args.workspace_id, |ws| {
+            store
+                .update_workspace(workspace_id, |ws| {
                     // Re-checked: provisioning took minutes. A link on a deleted
                     // workspace hands the purger a worktree it doesn't know of.
                     if ws.deleted_at.is_some() {
@@ -444,42 +498,37 @@ pub async fn add_repo_to_workspace(
                     ws.repo_links.push(link.clone());
                     Ok(ws.clone())
                 })
-                .await?;
+                .await
+        }
+        Err(e) => Err(e),
+    };
 
-            append_repo_to_workspace_root_settings(
-                &updated,
-                &args.repo_key,
-                &paths,
-                &tx,
-            )
-            .await;
-            regen_workspace_claude_md(&updated, reg, &paths, &tx).await;
-
+    match committed {
+        Ok(updated) => {
+            append_repo_to_workspace_root_settings(&updated, &repo.key, paths, tx).await;
             info!(
-                id = %args.workspace_id,
-                repo = %args.repo_key,
+                id = %workspace_id,
+                repo = %repo.key,
                 branch = %branch,
                 "added repo to workspace"
             );
-            let _ = tx.0.send(JobEvent::Success);
             Ok(updated)
         }
         Err(e) => {
             let msg = e.to_string();
-            warn!(error = %msg, "add_repo_to_workspace failed; rolling back worktree");
-            tx.status(format!("rolling back: {msg}"), None);
+            warn!(error = %msg, repo = %repo.key, "add_repo_to_workspace failed; rolling back worktree");
+            tx.status(format!("rolling back: {msg}"), Some(&repo.key));
             // Backstop: `provision_repo_worktree` already cleans up, including
             // any branch it created.
             teardown_repo_worktree(RepoTeardown {
                 repo_key: &repo.key,
-                worktree_path: &worktree_path,
-                branch: &branch,
+                worktree_path,
+                branch,
                 created_branch: false,
-                paths: &paths,
-                tx: &tx,
+                paths,
+                tx,
             })
             .await;
-            let _ = tx.0.send(JobEvent::Failed { error: msg });
             Err(e)
         }
     }

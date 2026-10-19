@@ -66,7 +66,7 @@ const DRAFT_PROMPT_SETTLE_MS = 500;
 interface AddRepoRun {
   // Per invocation, so a dismissed job's late events can't land on its successor.
   key: string;
-  repoKey: string;
+  repoKeys: string[];
   events: JobEvent[];
   state: JobState;
 }
@@ -345,7 +345,7 @@ function App() {
   );
 
   const startAddRepo = useCallback(
-    (workspaceId: WorkspaceId, repoKey: string) => {
+    (workspaceId: WorkspaceId, repoKeys: string[]) => {
       const runKey = crypto.randomUUID();
       const patch = (update: (run: AddRepoRun) => AddRepoRun) =>
         setAddRepoRuns((prev) => {
@@ -360,7 +360,7 @@ function App() {
         const next = new Map(prev);
         next.set(workspaceId, {
           key: runKey,
-          repoKey,
+          repoKeys,
           events: [],
           state: "running",
         });
@@ -382,7 +382,7 @@ function App() {
       };
 
       const { command, args } = api.jobs.addRepoToWorkspace({
-        args: { workspace_id: workspaceId, repo_key: repoKey },
+        args: { workspace_id: workspaceId, repo_keys: repoKeys },
       });
       api
         .runJob(command, args, channel)
@@ -643,7 +643,7 @@ function App() {
               }
               onRequestDelete={() => handleDelete(selected)}
               addRepoRun={addRepoRuns.get(selected.id) ?? null}
-              onStartAddRepo={(repoKey) => startAddRepo(selected.id, repoKey)}
+              onStartAddRepo={(repoKeys) => startAddRepo(selected.id, repoKeys)}
               onDismissAddRepo={() => dismissAddRepo(selected.id)}
             />
           )}
@@ -799,7 +799,7 @@ function WorkspaceDetail({
   onNotesChange: (notes: string) => void;
   onRequestDelete: () => void;
   addRepoRun: AddRepoRun | null;
-  onStartAddRepo: (repoKey: string) => void;
+  onStartAddRepo: (repoKeys: string[]) => void;
   onDismissAddRepo: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -950,9 +950,9 @@ function WorkspaceDetail({
             workspace={workspace}
             availableRepos={availableRepos}
             onClose={() => setAddingRepo(false)}
-            onPick={(repoKey) => {
+            onPick={(repoKeys) => {
               setAddingRepo(false);
-              onStartAddRepo(repoKey);
+              onStartAddRepo(repoKeys);
             }}
           />
         )}
@@ -1332,14 +1332,24 @@ function AddRepoDialog({
   workspace: Workspace;
   availableRepos: Repo[];
   onClose: () => void;
-  onPick: (repoKey: string) => void;
+  onPick: (repoKeys: string[]) => void;
 }) {
-  const [picked, setPicked] = useState<string | null>(null);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+
+  const toggle = (key: string) => {
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!picked) return;
-    onPick(picked);
+    if (picked.size === 0) return;
+    // Registry order, not click order, so the log reads like the list.
+    onPick(availableRepos.map((r) => r.key).filter((k) => picked.has(k)));
   };
 
   return (
@@ -1360,16 +1370,15 @@ function AddRepoDialog({
             </p>
           ) : (
             <div className="repo-select">
-              <div className="repo-select-label">Repo</div>
+              <div className="repo-select-label">Repos</div>
               <ul>
                 {availableRepos.map((r) => (
                   <li key={r.key}>
                     <label className="repo-row">
                       <input
-                        type="radio"
-                        name="add-repo-pick"
-                        checked={picked === r.key}
-                        onChange={() => setPicked(r.key)}
+                        type="checkbox"
+                        checked={picked.has(r.key)}
+                        onChange={() => toggle(r.key)}
                       />
                       <span className="repo-display">{r.key}</span>
                     </label>
@@ -1385,9 +1394,9 @@ function AddRepoDialog({
             <button
               type="submit"
               className="primary"
-              disabled={!picked || availableRepos.length === 0}
+              disabled={picked.size === 0}
             >
-              Add
+              {picked.size > 1 ? `Add ${picked.size} repos` : "Add"}
             </button>
           </div>
         </form>
@@ -1410,7 +1419,7 @@ function AddRepoPopup({
   return (
     <div className="add-repo-popup" role="status" aria-live="polite">
       <JobLogPane
-        title={`Adding ${run.repoKey} to ${branch}`}
+        title={`Adding ${run.repoKeys.join(", ")} to ${branch}`}
         events={run.events}
         state={run.state}
         onDismiss={onDismiss}
