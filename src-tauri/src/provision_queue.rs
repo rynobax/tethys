@@ -1,8 +1,6 @@
-//! One-at-a-time gate for provisioning. Concurrent setup scripts contend for
-//! disk and CPU until they overrun `setup_timeout_secs`, which rolls the
-//! workspace back. The semaphore is FIFO, so the first workspace asked for is
-//! the first ready. In-memory only: queued jobs die with the app, like a
-//! workspace caught mid-provision.
+//! One at a time: concurrent setup scripts contend for disk and CPU until they
+//! overrun `setup_timeout_secs`, which rolls the workspace back. FIFO, so the
+//! first workspace asked for is the first ready.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -61,7 +59,7 @@ impl ProvisionQueue {
         }
     }
 
-    pub fn ahead(&self) -> usize {
+    fn ahead(&self) -> usize {
         SLOTS.saturating_sub(self.slots.available_permits()) + self.waiting.load(Ordering::SeqCst)
     }
 

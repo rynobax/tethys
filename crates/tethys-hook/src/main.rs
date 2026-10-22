@@ -1,5 +1,4 @@
-//! Forwards an agent hook's payload to Tethys over `hook.sock`, for both
-//! Claude and codex. Always exits 0: a hook must never disrupt the session.
+//! Always exits 0: a hook must never disrupt the session.
 
 use std::env;
 use std::io::{self, Read, Write};
@@ -17,11 +16,8 @@ struct HookInput {
     session_id: Option<String>,
     cwd: Option<String>,
     transcript_path: Option<String>,
-    hook_event_name: Option<String>,
     source: Option<String>,
-    message: Option<String>,
     notification_type: Option<String>,
-    stop_hook_active: Option<bool>,
     last_assistant_message: Option<String>,
     tool_name: Option<String>,
     tool_input: Option<ToolInput>,
@@ -52,11 +48,8 @@ fn run() -> io::Result<()> {
         session_id: input.session_id,
         cwd: input.cwd,
         transcript_path: input.transcript_path,
-        hook_event_name: input.hook_event_name,
         source: input.source,
-        message: input.message,
         notification_type: input.notification_type,
-        stop_hook_active: input.stop_hook_active,
         last_assistant_message: input.last_assistant_message,
         tool_name: input.tool_name,
         tool_file_path: input.tool_input.as_ref().and_then(|t| t.file_path.clone()),

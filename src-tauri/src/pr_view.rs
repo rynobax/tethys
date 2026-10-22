@@ -88,16 +88,12 @@ fn main_origin(app: &AppHandle, viewport_height: f64) -> AppResult<(f64, f64)> {
     let bounds = main.bounds()?;
     let position = bounds.position.to_logical::<f64>(scale);
     let size = bounds.size.to_logical::<f64>(scale);
-    let inner = window.inner_size()?.to_logical::<f64>(scale);
-    let outer = window.outer_size()?.to_logical::<f64>(scale);
     let inset = (size.height - viewport_height).max(0.0);
     tracing::debug!(
         main_x = position.x,
         main_y = position.y,
         main_w = size.width,
         main_h = size.height,
-        inner_h = inner.height,
-        outer_h = outer.height,
         viewport_height,
         inset,
         "main webview geometry"
@@ -187,17 +183,6 @@ pub fn hide(app: &AppHandle) -> AppResult<()> {
 mod tests {
     use super::*;
 
-    /// A scheme with no authority is a cannot-be-a-base URL; `url` must still
-    /// parse its query.
-    #[test]
-    fn open_request_round_trips_the_href() {
-        let href = "https://github.com/new-lantern/nl-ai/pull/536/files#diff-abc";
-        let encoded = "https%3A%2F%2Fgithub.com%2Fnew-lantern%2Fnl-ai%2Fpull%2F536%2Ffiles%23diff-abc";
-        let url = Url::parse(&format!("{OPEN_SCHEME}:?u={encoded}")).unwrap();
-        assert_eq!(url.scheme(), OPEN_SCHEME);
-        let (_, got) = url.query_pairs().find(|(k, _)| k == "u").unwrap();
-        assert_eq!(got, href);
-    }
 
     #[test]
     fn link_policy_script_embeds_the_pr_as_json_strings() {

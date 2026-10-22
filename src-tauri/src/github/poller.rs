@@ -255,7 +255,7 @@ impl GithubPoller {
             // `status_changed` can't add a PR to the list. Announce even if the
             // fetch failed, so the chip still appears.
             for id in dedup(applied.discovered.iter().map(|d| &d.workspace_id)) {
-                self.store.notify_workspace_changed(id);
+                self.store.notify_changed(id);
             }
             count += result?.changed.len();
         }
@@ -426,14 +426,6 @@ mod tests {
         }
     }
 
-    struct RecordingNotifier(Arc<StdMutex<Vec<String>>>);
-
-    impl crate::store::WorkspaceNotifier for RecordingNotifier {
-        fn workspace_changed(&self, workspace_id: &str) {
-            self.0.lock().unwrap().push(workspace_id.to_string());
-        }
-    }
-
     #[derive(Default)]
     struct EventLog {
         auth: Arc<StdMutex<Vec<AuthState>>>,
@@ -448,13 +440,9 @@ mod tests {
 
     async fn store(notifier: Box<dyn crate::store::WorkspaceNotifier>) -> Arc<Store> {
         let tmp = tempfile::tempdir().unwrap();
-        let store = Store::load(
-            tmp.path().join("state.json"),
-            tmp.path().join("state.json.tmp"),
-            notifier,
-        )
-        .await
-        .unwrap();
+        let store = Store::load(tmp.path().join("state.json"), notifier)
+            .await
+            .unwrap();
         // The store's flusher outlives this helper.
         std::mem::forget(tmp);
         store
@@ -546,7 +534,7 @@ mod tests {
     #[tokio::test]
     async fn a_discovered_pr_gets_its_status_in_the_same_tick() {
         let announced = Arc::new(StdMutex::new(Vec::new()));
-        let store = store(Box::new(RecordingNotifier(announced.clone()))).await;
+        let store = store(Box::new(crate::store::RecordingNotifier(announced.clone()))).await;
 
         store
             .mutate(|s| {

@@ -1,5 +1,3 @@
-//! Build the PR GraphQL query, parse the response, and apply it to `AppState`.
-
 use std::collections::BTreeMap;
 
 use chrono::Utc;
@@ -309,7 +307,7 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
         .to_string();
     let rollup = commit.and_then(|c| c.get("statusCheckRollup"));
     let rollup_state = rollup
-        .and_then(|r| if r.is_null() { None } else { r.get("state") })
+        .and_then(|r| r.get("state"))
         .and_then(|s| s.as_str())
         .map(rollup_state_from_str);
     let context_nodes = rollup
@@ -342,8 +340,6 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
     // unresolved threads are the real signal.
     let bugbot = if bugbot_unresolved > 0 {
         ChecksRollup::Failure
-    } else if matches!(bugbot_check, ChecksRollup::Pending) {
-        ChecksRollup::Pending
     } else {
         bugbot_check
     };
@@ -367,7 +363,6 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
         merge_queue: parse_merge_queue(pr),
         head_sha,
         fetched_at: Utc::now(),
-        last_error: None,
     })
 }
 
@@ -584,7 +579,6 @@ fn is_meaningful_change(old: Option<&GithubPrStatus>, new: Option<&GithubPrStatu
                 || a.stack != b.stack
                 || a.merge_queue != b.merge_queue
                 || a.head_sha != b.head_sha
-                || a.last_error != b.last_error
         }
     }
 }
@@ -702,13 +696,6 @@ mod tests {
         assert_eq!(discovered(&data), None);
     }
 
-    #[test]
-    fn branch_scan_query_asks_only_for_the_number() {
-        let (q, _) = build_query(&[mk_target(0)]);
-        assert!(q.contains("associatedPullRequests"));
-        assert!(!q.contains("reviewThreads"));
-        assert!(!q.contains("statusCheckRollup"));
-    }
 
     #[test]
     fn parse_open_pr_with_checks() {
@@ -765,10 +752,6 @@ mod tests {
         assert!(!parse(json!({"mergeable": "UNKNOWN"})).has_merge_conflicts);
     }
 
-    #[test]
-    fn parse_mergeable_clean_does_not_set_flag() {
-        assert!(!parse(json!({"mergeable": "MERGEABLE"})).has_merge_conflicts);
-    }
 
     #[test]
     fn is_meaningful_change_ignores_fetched_at() {

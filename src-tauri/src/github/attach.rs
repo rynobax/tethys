@@ -1,5 +1,3 @@
-//! Shared by the attach dialog and the `link_pr` MCP tool.
-
 use crate::error::{AppError, AppResult};
 use crate::github::poller::fetch_pr_status;
 use crate::github::{parse_pr_reference, resolve_attach_target, GithubPrStatus, GithubSlug};

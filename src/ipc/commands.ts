@@ -22,11 +22,8 @@ import type {
   WorkspaceId,
 } from "../types";
 
-/**
- * The seam over the Tauri command layer. Each wrapper fixes its command's
- * calling convention — flat camelCased arguments or a wrapped snake_case
- * `args` struct — which TypeScript can't check at the call site.
- */
+/** Each wrapper fixes its command's calling convention (flat camelCase or a
+ *  snake_case `args` struct), which TypeScript can't check at call sites. */
 
 export const listWorkspaces = () => invoke<Workspace[]>("list_workspaces");
 
@@ -56,8 +53,7 @@ export const dismissArtifact = (workspaceId: WorkspaceId, artifactId: string) =>
 export const openArtifact = (workspaceId: WorkspaceId, artifactId: string) =>
   invoke<void>("open_artifact", { workspaceId, artifactId });
 
-/** `rect` is in viewport coordinates; Rust needs `viewportHeight` to map them
- *  into the window's content view. */
+/** `rect` is in viewport coordinates; Rust maps it via `viewportHeight`. */
 export const showPrView = (
   url: string,
   rect: { x: number; y: number; width: number; height: number },
@@ -66,7 +62,6 @@ export const showPrView = (
 
 export const hidePrView = () => invoke<void>("hide_pr_view");
 
-/** `blockerId: null` clears the link. Rejects on a cycle. */
 export const setWorkspaceBlocker = (
   workspaceId: WorkspaceId,
   blockerId: WorkspaceId | null,
@@ -86,7 +81,6 @@ export const createFolder = (name: string) =>
 export const renameFolder = (folderId: FolderId, name: string) =>
   invoke<void>("rename_folder", { args: { folder_id: folderId, name } });
 
-/** Contents fall back to the Default folder. */
 export const deleteFolder = (id: FolderId) =>
   invoke<void>("delete_folder", { id });
 
@@ -98,7 +92,6 @@ export const setFolderCollapsed = (folderId: FolderId, collapsed: boolean) =>
 export const reorderFolders = (ids: FolderId[]) =>
   invoke<void>("reorder_folders", { ids });
 
-/** `folder: null` is Default. */
 export const moveWorkspacesToFolder = (
   workspaceIds: WorkspaceId[],
   folder: FolderId | null,
@@ -110,12 +103,9 @@ export const moveWorkspacesToFolder = (
 export const getSession = (workspaceId: WorkspaceId) =>
   invoke<SessionInfo | null>("get_session", { workspaceId });
 
-/** Reattach, resume, or start fresh — whichever the session's state calls for. */
 export const startAgentSession = (workspaceId: WorkspaceId) =>
   invoke<SessionInfo>("start_agent_session", { workspaceId });
 
-/** Switching across agents starts a fresh conversation; neither CLI can read
- *  the other's transcript. */
 export const switchAgent = (
   workspaceId: WorkspaceId,
   agent: Agent,
@@ -213,23 +203,17 @@ export const getTheme = () => invoke<Theme | null>("get_theme");
 export const readClipboardFilePaths = () =>
   invoke<string[]>("read_clipboard_file_paths");
 
-/** Descriptors rather than calls: `useBackendJob` needs the command name and
- *  args as data. */
-export const jobs = {
-  createWorkspace: (args: { args: CreateWorkspaceArgs }) => ({
-    command: "create_workspace" as const,
-    args,
-  }),
-  addRepoToWorkspace: (args: {
-    args: { workspace_id: string; repo_keys: string[] };
-  }) => ({
-    command: "add_repo_to_workspace" as const,
-    args,
-  }),
-};
-
-export const runJob = (
-  command: string,
-  args: Record<string, unknown>,
+export const createWorkspace = (
+  args: CreateWorkspaceArgs,
   onEvent: Channel<JobEvent>,
-) => invoke<unknown>(command, { ...args, onEvent });
+) => invoke<Workspace>("create_workspace", { args, onEvent });
+
+export const addRepoToWorkspace = (
+  workspaceId: WorkspaceId,
+  repoKeys: string[],
+  onEvent: Channel<JobEvent>,
+) =>
+  invoke<void>("add_repo_to_workspace", {
+    args: { workspace_id: workspaceId, repo_keys: repoKeys },
+    onEvent,
+  });

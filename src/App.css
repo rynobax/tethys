@@ -641,7 +641,6 @@ html,
   flex-direction: column;
 }
 
-/* The native PR webview floats over this host. */
 .pr-view-host {
   flex: 1;
   min-height: 0;

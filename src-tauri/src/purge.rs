@@ -23,7 +23,7 @@ const PURGE_GRACE: chrono::Duration = chrono::Duration::hours(1);
 
 const TICK_INTERVAL: Duration = Duration::from_secs(3600);
 
-pub async fn purge_workspace(
+async fn purge_workspace(
     store: &Arc<Store>,
     paths: &Paths,
     registry: &Arc<RegistryLoad>,
@@ -58,10 +58,9 @@ pub async fn purge_workspace(
             continue;
         }
 
-        git::worktree_remove(&clone_path, &link.worktree_path, true, &tx, &link.repo_key)
+        git::worktree_remove(&clone_path, &link.worktree_path, &tx, &link.repo_key)
             .await?;
         git::worktree_prune_best_effort(&clone_path, &tx, &link.repo_key).await;
-        // A pre-existing branch (e.g. someone's PR) must survive the purge.
         if link.created_branch {
             git::branch_delete_best_effort(&clone_path, &workspace.branch, &tx, &link.repo_key)
                 .await;
@@ -79,7 +78,7 @@ pub async fn purge_workspace(
     }
 
     if workspace.agent == Agent::Codex {
-        if let Some(root) = workspace.session_cwd().or_else(|| workspace.root_buf()) {
+        if let Some(root) = workspace.session_cwd() {
             crate::codex_trust::untrust_or_warn(paths, &root);
         }
     }
@@ -151,12 +150,10 @@ impl Purger {
         }
 
         info!(n = candidates.len(), "purger tick: candidates");
-        let mut any_change = false;
         for ws in candidates {
             match purge_workspace(&self.store, &self.paths, &self.registry, &ws).await {
                 Ok(_) => {
                     info!(id = %ws.id, branch = %ws.branch, "purged workspace");
-                    any_change = true;
                     self.store.notify_changed(&ws.id);
                 }
                 Err(e) => {
@@ -174,19 +171,16 @@ impl Purger {
                         },
                     )
                     .await;
-                    any_change = true;
                 }
             }
         }
 
-        if any_change {
-            let _ = self.app.emit("system_status:changed", &());
-            let _ = self.app.emit("pending_permissions:changed", &());
-        }
+        let _ = self.app.emit("system_status:changed", &());
+        let _ = self.app.emit("pending_permissions:changed", &());
     }
 }
 
-pub async fn record_system_error(store: &Arc<Store>, entry: SystemErrorEntry) {
+async fn record_system_error(store: &Arc<Store>, entry: SystemErrorEntry) {
     let _ = store
         .mutate(|s| {
             s.system_errors.push(entry);

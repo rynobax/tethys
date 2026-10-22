@@ -18,8 +18,7 @@ use crate::paths::Paths;
 
 const SEEDED_MARKER: &str = "tethys (seeded on workspace create; safe to edit)";
 
-/// A real file already at the link path (one the repo tracks) is left alone:
-/// replacing it would discard committed content.
+/// A real file at the link path is one the repo tracks, so it's left alone.
 pub async fn install_symlink(
     worktree_path: &Path,
     paths: &Paths,
@@ -251,8 +250,7 @@ mod tests {
         };
         let worktree = tmp.path().join("wt");
         fs::create_dir_all(&worktree).await.unwrap();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let job_tx = JobTx(tx);
+        let job_tx = JobTx::silent();
 
         install_symlink(&worktree, &paths, &job_tx, "backend")
             .await
@@ -288,8 +286,7 @@ mod tests {
 
         let worktree = tmp.path().join("wt");
         fs::create_dir_all(&worktree).await.unwrap();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        install_symlink(&worktree, &paths, &JobTx(tx), "backend")
+        install_symlink(&worktree, &paths, &JobTx::silent(), "backend")
             .await
             .unwrap();
 

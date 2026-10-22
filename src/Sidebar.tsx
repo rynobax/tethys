@@ -28,7 +28,7 @@ import { GithubChip } from "./GithubChip";
 import {
   blockerCandidates,
   folderSections,
-  linkPrs,
+  linkPrEntries,
   type WorkspaceRow as TreeRow,
 } from "./workspaceDerived";
 
@@ -63,8 +63,7 @@ const isHeaderId = (id: string) => id.startsWith(HEADER_PREFIX);
 const folderFromHeaderId = (id: string): FolderId | null =>
   id === DEFAULT_HEADER ? null : id.slice(HEADER_PREFIX.length);
 
-// A blocker stack moves as one, so a drag can't split it across folders where
-// the nesting could no longer be drawn.
+// A blocker stack drags as one so it can't be split across folders.
 type Block = { rows: TreeRow[]; ids: WorkspaceId[] };
 
 type Section = { folder: Folder | null; blocks: Block[] };
@@ -458,11 +457,9 @@ function SortableFolderHeader({
 function FolderNameInput({
   initial,
   onCommit,
-  onCancel,
 }: {
   initial: string;
   onCommit: (name: string) => void;
-  onCancel?: () => void;
 }) {
   const [value, setValue] = useState(initial);
   const done = useRef(false);
@@ -485,7 +482,7 @@ function FolderNameInput({
         if (e.key === "Enter") commit();
         if (e.key === "Escape") {
           done.current = true;
-          (onCancel ?? (() => onCommit("")))();
+          onCommit("");
         }
       }}
     />
@@ -503,7 +500,6 @@ function NewFolderRow({ onCreate }: { onCreate: (name: string) => void }) {
             setNaming(false);
             if (name) onCreate(name);
           }}
-          onCancel={() => setNaming(false)}
         />
       ) : (
         <button type="button" onClick={() => setNaming(true)}>
@@ -616,7 +612,7 @@ function WorkspaceRow({
   selected,
   needsTurn,
   working,
-  isDragging = false,
+  isDragging,
   depth = 0,
   onSelect,
   onContextMenu,
@@ -626,7 +622,7 @@ function WorkspaceRow({
   selected: boolean;
   needsTurn: boolean;
   working: boolean;
-  isDragging?: boolean;
+  isDragging: boolean;
   depth?: number;
   onSelect: () => void;
   onContextMenu: (x: number, y: number) => void;
@@ -653,7 +649,7 @@ function WorkspaceRow({
     .join(" ");
 
   const prs = workspace.repo_links.flatMap((r) =>
-    linkPrs(r).map((status) => ({ repoKey: r.repo_key, status })),
+    linkPrEntries(r).map(({ status }) => ({ repoKey: r.repo_key, status })),
   );
 
   return (

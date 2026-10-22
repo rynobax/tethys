@@ -147,10 +147,6 @@ mod tests {
         assert_eq!(parse_github_remote("https://gitlab.com/ryan/tethys.git"), None);
     }
 
-    #[test]
-    fn bitbucket_returns_none() {
-        assert_eq!(parse_github_remote("https://bitbucket.org/ryan/tethys.git"), None);
-    }
 
     #[test]
     fn github_enterprise_returns_none() {

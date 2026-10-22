@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use crate::agent::Agent;
-use crate::error::AppResult;
 use crate::mcp::McpLaunch;
 
 /// Codex has no `Notification`; `PermissionRequest` covers the same ground.
@@ -33,9 +32,9 @@ pub struct Spawn<'a> {
     pub brief: Option<&'a str>,
 }
 
-pub fn build(spawn: Spawn<'_>) -> AppResult<Vec<String>> {
+pub fn build(spawn: Spawn<'_>) -> Vec<String> {
     match spawn.agent {
-        Agent::Claude => Ok(claude(spawn)),
+        Agent::Claude => claude(spawn),
         Agent::Codex => codex(spawn),
     }
 }
@@ -60,7 +59,7 @@ fn claude(spawn: Spawn<'_>) -> Vec<String> {
 ///
 /// `-c` outranks every config file, so the user's `~/.codex/config.toml` is
 /// never written.
-fn codex(spawn: Spawn<'_>) -> AppResult<Vec<String>> {
+fn codex(spawn: Spawn<'_>) -> Vec<String> {
     let mut command = vec![spawn.agent_bin.to_string_lossy().into_owned()];
 
     // A command-line hook starts untrusted and silently doesn't run.
@@ -96,7 +95,7 @@ fn codex(spawn: Spawn<'_>) -> AppResult<Vec<String>> {
     if let Some(brief) = spawn.brief {
         command.push(brief.to_string());
     }
-    Ok(command)
+    command
 }
 
 /// The token is an argument, not an env var, because `shell_environment_policy`
@@ -153,20 +152,20 @@ mod tests {
 
     #[test]
     fn a_fresh_claude_is_just_the_binary() {
-        let cmd = build(spawn(Agent::Claude, None, None)).unwrap();
+        let cmd = build(spawn(Agent::Claude, None, None));
         assert_eq!(cmd, vec![PathBuf::from("/usr/local/bin/claude").to_string_lossy()]);
     }
 
     #[test]
     fn the_brief_goes_last() {
-        let cmd = build(spawn(Agent::Claude, Some("csid-9"), Some("do the thing"))).unwrap();
+        let cmd = build(spawn(Agent::Claude, Some("csid-9"), Some("do the thing")));
         assert_eq!(&cmd[1..3], &["--resume".to_string(), "csid-9".to_string()]);
         assert_eq!(cmd.last().unwrap(), "do the thing");
     }
 
     #[test]
     fn codex_resume_is_a_subcommand_between_the_flags_and_the_brief() {
-        let cmd = build(spawn(Agent::Codex, Some("uuid-7"), Some("do the thing"))).unwrap();
+        let cmd = build(spawn(Agent::Codex, Some("uuid-7"), Some("do the thing")));
         let resume = cmd.iter().position(|a| a == "resume").expect("resume");
 
         assert_eq!(cmd[resume + 1], "uuid-7");
@@ -177,7 +176,7 @@ mod tests {
     /// A bare `resume` opens codex's interactive session picker.
     #[test]
     fn a_fresh_codex_never_says_resume() {
-        let cmd = build(spawn(Agent::Codex, None, None)).unwrap();
+        let cmd = build(spawn(Agent::Codex, None, None));
         assert!(!cmd.iter().any(|a| a == "resume"));
     }
 
@@ -186,7 +185,7 @@ mod tests {
         let mut s = spawn(Agent::Codex, None, None);
         let hook_bin = PathBuf::from("/Applications/Tethys.app/tethys-hook");
         s.hook_bin = Some(&hook_bin);
-        let cmd = build(s).unwrap();
+        let cmd = build(s);
 
         for (event, subcommand) in CODEX_HOOK_EVENTS {
             let rendered = cmd
@@ -202,7 +201,7 @@ mod tests {
 
     #[test]
     fn no_hook_binary_means_no_hook_overrides() {
-        let cmd = build(spawn(Agent::Codex, None, None)).unwrap();
+        let cmd = build(spawn(Agent::Codex, None, None));
         assert!(!cmd.iter().any(|a| a.starts_with("hooks.")));
     }
 
@@ -211,7 +210,7 @@ mod tests {
         let mut s = spawn(Agent::Codex, None, None);
         let dirs = vec![PathBuf::from("/data/repos/frontend.git")];
         s.extra_writable = &dirs;
-        let cmd = build(s).unwrap();
+        let cmd = build(s);
         let i = cmd.iter().position(|a| a == "--add-dir").expect("--add-dir");
         assert_eq!(cmd[i + 1], "/data/repos/frontend.git");
     }
@@ -221,7 +220,7 @@ mod tests {
         let mut s = spawn(Agent::Codex, None, None);
         let hook_bin = PathBuf::from("/Applications/My Tethys.app/tethys-hook");
         s.hook_bin = Some(&hook_bin);
-        let cmd = build(s).unwrap();
+        let cmd = build(s);
         let rendered = cmd
             .iter()
             .find(|a| a.starts_with("hooks.Stop="))

@@ -1,6 +1,3 @@
-//! The MCP server each session spawns, forwarding tool calls to Tethys over
-//! `mcp.sock`.
-//!
 //! stdout belongs to the protocol; diagnostics go to stderr. Unlike
 //! `tethys-hook`, failures are loud: an agent that wrongly believes it handed
 //! work off carries on as though the work is covered.

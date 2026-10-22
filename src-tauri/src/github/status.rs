@@ -70,8 +70,6 @@ pub struct GithubPrStatus {
     pub merge_queue: Option<MergeQueueState>,
     pub head_sha: String,
     pub fetched_at: DateTime<Utc>,
-    #[serde(default)]
-    pub last_error: Option<String>,
 }
 
 /// GraphQL's `stack` + `stackEntry`, flattened.

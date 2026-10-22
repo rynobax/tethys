@@ -31,7 +31,7 @@ This directory is a **Tethys workspace**: one unit of work spanning the git work
 - Each worktree keeps its git metadata in Tethys's base clone rather than beside the checkout, so `git` commands work normally from inside a worktree but the `.git` entry there is a file, not a directory.
 "#;
 
-pub const PLACEHOLDERS: [&str; 5] = [
+const PLACEHOLDERS: [&str; 5] = [
     "{branch}",
     "{repo_list}",
     "{available_repos}",

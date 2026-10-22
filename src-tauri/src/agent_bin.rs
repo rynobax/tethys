@@ -4,7 +4,7 @@ use crate::agent::Agent;
 use crate::error::AppResult;
 use crate::shell;
 
-pub fn resolve(agent: Agent) -> AppResult<PathBuf> {
+fn resolve(agent: Agent) -> AppResult<PathBuf> {
     resolve_named(agent.default_binary())
 }
 

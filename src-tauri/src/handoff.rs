@@ -1,8 +1,3 @@
-//! A workspace created from inside a running session. The caller hears only
-//! that it was accepted, never how provisioning went. The new workspace
-//! inherits the caller's binary so work can't leave a `claude-hipaa` workspace
-//! by accident.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -28,44 +23,19 @@ pub struct Accepted {
 }
 
 pub struct Handoff {
-    store: Arc<Store>,
-    registry: Arc<RegistryLoad>,
-    paths: Paths,
-    in_progress: InProgressWorkspaces,
-    queue: ProvisionQueue,
-    supervisor: Arc<SessionSupervisor>,
+    pub(crate) store: Arc<Store>,
+    pub(crate) registry: Arc<RegistryLoad>,
+    pub(crate) paths: Paths,
+    pub(crate) in_progress: InProgressWorkspaces,
+    pub(crate) queue: ProvisionQueue,
+    pub(crate) supervisor: Arc<SessionSupervisor>,
     /// Empty when tmux didn't resolve at boot.
-    tmux_bin: PathBuf,
-    agent_bins: AgentBins,
-    mcp: Option<McpLaunch>,
+    pub(crate) tmux_bin: PathBuf,
+    pub(crate) agent_bins: AgentBins,
+    pub(crate) mcp: Option<McpLaunch>,
 }
 
 impl Handoff {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        store: Arc<Store>,
-        registry: Arc<RegistryLoad>,
-        paths: Paths,
-        in_progress: InProgressWorkspaces,
-        queue: ProvisionQueue,
-        supervisor: Arc<SessionSupervisor>,
-        tmux_bin: PathBuf,
-        agent_bins: AgentBins,
-        mcp: Option<McpLaunch>,
-    ) -> Self {
-        Self {
-            store,
-            registry,
-            paths,
-            in_progress,
-            queue,
-            supervisor,
-            tmux_bin,
-            agent_bins,
-            mcp,
-        }
-    }
-
     /// Everything refusable is refused here: after `Ok`, the only failure
     /// channel left is a `CreationFailed` row.
     pub async fn accept(self: &Arc<Self>, req: CreateWorkspace) -> AppResult<Accepted> {
@@ -117,6 +87,7 @@ impl Handoff {
         } = branch_name::reserve(&reg.worktree_root, &self.in_progress, &requested)?;
 
         let id = uuid::Uuid::new_v4().to_string();
+        // The caller's binary, so work can't leave a `claude-hipaa` workspace.
         let draft = Workspace::draft(
             id.clone(),
             branch.clone(),
@@ -129,7 +100,7 @@ impl Handoff {
             caller.folder.clone(),
         );
         // Same mutation as the insert, so the caller never points at a missing
-        // row. Overwrites any existing blocker.
+        // row.
         let blocks_caller = req.blocks_caller;
         let caller_id = caller.id.clone();
         self.store
@@ -179,9 +150,10 @@ impl Handoff {
         repos: Vec<Repo>,
         brief: String,
     ) {
-        let Ok(reg) = self.registry.require() else {
-            return;
-        };
+        let reg = self
+            .registry
+            .require()
+            .expect("accept checked the registry");
 
         let tx = JobTx::silent();
         let provisioned = provision_workspace(WorkspaceProvision {

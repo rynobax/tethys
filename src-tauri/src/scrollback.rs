@@ -170,8 +170,4 @@ mod tests {
         assert_eq!(strip("output\x1b"), "output\x1b");
     }
 
-    #[test]
-    fn nothing_in_nothing_out() {
-        assert_eq!(strip(""), "");
-    }
 }

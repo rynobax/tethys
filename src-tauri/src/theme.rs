@@ -2,7 +2,7 @@
 //! can move or disappear.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
@@ -13,8 +13,6 @@ use crate::error::{AppError, AppResult};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Theme {
     pub name: String,
-    /// Informational; never re-read.
-    pub source_path: PathBuf,
     pub colors: ThemeColors,
 }
 
@@ -56,7 +54,6 @@ impl Theme {
 
         Ok(Theme {
             name,
-            source_path: path.to_path_buf(),
             colors: ThemeColors {
                 background: get("Background Color")?,
                 foreground: get("Foreground Color")?,

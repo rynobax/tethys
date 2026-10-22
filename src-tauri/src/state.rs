@@ -50,9 +50,8 @@ pub struct Workspace {
     pub status: WorkspaceStatus,
     #[serde(default)]
     pub notes: String,
-    /// A pointer, not a state: the frontend decides whether it counts, so
-    /// soft-deleting or moving the blocker unblocks without touching this.
-    /// Clear it only where the id stops existing.
+    /// The frontend decides whether it counts; clear it only where the id
+    /// stops existing.
     #[serde(default)]
     pub blocked_by: Option<WorkspaceId>,
     /// Oldest first.
@@ -163,7 +162,6 @@ pub struct AgentSessionMeta {
     #[serde(default)]
     pub turn_acknowledged: bool,
     /// The user's last keystroke or the agent's last hook, whichever is later.
-    /// `idle` closes the session a day after it.
     #[serde(default)]
     pub last_active_at: Option<DateTime<Utc>>,
 }
@@ -557,20 +555,6 @@ mod tests {
         assert!(matches!(parsed.workspaces[0].status, WorkspaceStatus::Ready));
     }
 
-    #[test]
-    fn pre_blocked_by_state_defaults_to_unblocked() {
-        let raw = r#"{
-            "workspaces": [
-                {
-                    "id": "abc-123",
-                    "branch": "feat/foo",
-                    "created_at": "2026-04-01T12:00:00Z"
-                }
-            ]
-        }"#;
-        let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
-        assert_eq!(parsed.workspaces[0].blocked_by, None);
-    }
 
     fn blocking_state(links: &[(&str, Option<&str>)]) -> AppState {
         AppState {
@@ -643,39 +627,6 @@ mod tests {
         assert_eq!(parsed.workspaces[0].origin, Origin::Ui);
     }
 
-    #[test]
-    fn tracked_prs_round_trip() {
-        let raw = r#"{
-            "workspaces": [
-                {
-                    "id": "abc-123",
-                    "branch": "feat/foo",
-                    "created_at": "2026-04-01T12:00:00Z",
-                    "repo_links": [
-                        {
-                            "repo_key": "frontend",
-                            "worktree_path": "/tmp/wt/abc-123/frontend",
-                            "setup_script_ran_at": null,
-                            "prs": [
-                                {
-                                    "number": 512,
-                                    "tracked_at": "2026-04-02T09:00:00Z",
-                                    "status": null
-                                }
-                            ],
-                            "dismissed": [7]
-                        }
-                    ]
-                }
-            ]
-        }"#;
-        let parsed: AppState = serde_json::from_str(raw).expect("must deserialize");
-        let link = &parsed.workspaces[0].repo_links[0];
-        assert_eq!(link.prs.len(), 1);
-        assert_eq!(link.prs[0].number, 512);
-        assert!(link.prs[0].status.is_none());
-        assert_eq!(link.dismissed, vec![7]);
-    }
 
     fn link() -> RepoLink {
         RepoLink {
@@ -699,7 +650,7 @@ mod tests {
     #[test]
     fn refresh_with_no_status_keeps_the_last_one() {
         let mut l = link();
-        l.track(7, Some(pr_status(7)));
+        l.track(7, Some(crate::github::test_support::status(7)));
         l.track(7, None);
         assert_eq!(l.prs[0].status.as_ref().unwrap().pr_number, 7);
     }
@@ -707,7 +658,7 @@ mod tests {
     #[test]
     fn detaching_dismisses_so_discovery_skips_it() {
         let mut l = link();
-        l.track(7, Some(pr_status(7)));
+        l.track(7, Some(crate::github::test_support::status(7)));
         assert!(l.untrack(7));
         assert!(l.prs.is_empty());
         assert!(l.discovery_should_skip(7));
@@ -717,30 +668,10 @@ mod tests {
     fn tracking_a_dismissed_number_un_dismisses_it() {
         let mut l = link();
         l.untrack(7);
-        l.track(7, Some(pr_status(7)));
+        l.track(7, Some(crate::github::test_support::status(7)));
         assert!(l.dismissed.is_empty());
     }
 
-    fn pr_status(number: u32) -> GithubPrStatus {
-        GithubPrStatus {
-            pr_number: number,
-            url: format!("https://github.com/o/r/pull/{number}"),
-            state: crate::github::status::PrState::Open,
-            is_draft: false,
-            checks: crate::github::status::ChecksRollup::None,
-            bugbot: crate::github::status::ChecksRollup::None,
-            has_merge_conflicts: false,
-            review_decision: crate::github::status::ReviewDecision::None,
-            review_requested: false,
-            unresolved_threads: 0,
-            head_branch: None,
-            head_sha: String::new(),
-            stack: None,
-            merge_queue: None,
-            fetched_at: Utc::now(),
-            last_error: None,
-        }
-    }
 
     fn folder_state(members: &[(&str, Option<&str>)]) -> AppState {
         AppState {

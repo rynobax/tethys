@@ -1,11 +1,6 @@
-//! Closes a session nobody has touched in a day. Closing kills the tmux
-//! session and nothing else: the conversation stays on disk, and Resume picks
-//! it back up.
-//!
-//! "Touched" is the user typing into it or the agent firing a hook, so a
-//! session still working through a long turn isn't idle. A session sitting in
-//! `Working` is never closed either — a tool call can run for hours without a
-//! hook, and killing one mid-flight loses more than it frees.
+//! Closing kills only the tmux session; the conversation stays on disk for
+//! Resume. A `Working` session is never closed: a tool call can run for hours
+//! without a hook.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

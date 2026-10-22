@@ -21,11 +21,8 @@ const EDIT_BINDS: EditBind[] = [
   { key: "Delete", mod: "alt", bytes: [0x1b, 0x64] }, // Esc-d: kill-word forward
 ];
 
-/**
- * Subscribed once for the app's lifetime and routed to the mounted pane:
- * unlistening soon after `listen()` resolves races Tauri's own registration,
- * throws, and leaks the listener.
- */
+/** Subscribed once for the app's lifetime: unlistening soon after `listen()`
+ *  resolves races Tauri's registration and leaks the listener. */
 type DropTarget = { sessionId: string; term: Terminal };
 let dropTarget: DropTarget | null = null;
 let dropSubscribed = false;
@@ -57,9 +54,9 @@ interface Props {
 }
 
 export function SessionTerminal({ sessionId }: Props) {
-  const { containerRef } = usePtyTerminal(sessionId, {
-    onReady: (term, container) => wireClaudeExtras(term, container, sessionId),
-  });
+  const containerRef = usePtyTerminal(sessionId, (term, container) =>
+    wireClaudeExtras(term, container, sessionId),
+  );
 
   return <div className="session-terminal" ref={containerRef} />;
 }

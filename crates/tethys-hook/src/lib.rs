@@ -13,11 +13,8 @@ pub struct HookMessage {
     /// Survives the id rotation, so it's the fallback correlation key.
     pub cwd: Option<String>,
     pub transcript_path: Option<String>,
-    pub hook_event_name: Option<String>,
     pub source: Option<String>,
-    pub message: Option<String>,
     pub notification_type: Option<String>,
-    pub stop_hook_active: Option<bool>,
     pub last_assistant_message: Option<String>,
     pub tool_name: Option<String>,
     /// The only fields of `tool_input` Tethys reads; the rest never crosses

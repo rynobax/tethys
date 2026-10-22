@@ -5,7 +5,7 @@ use crate::error::AppResult;
 use crate::shell;
 
 /// A server of our own, so the user's `~/.tmux.conf` and sessions stay out of it.
-pub const SOCKET_LABEL: &str = "tethys";
+const SOCKET_LABEL: &str = "tethys";
 
 pub struct TmuxBin(pub PathBuf);
 
@@ -69,7 +69,7 @@ pub fn has_session(tmux_bin: &Path, session_id: &str) -> bool {
 }
 
 /// Server-global options as a `;`-chained command prefix.
-pub fn server_init_args() -> Vec<String> {
+fn server_init_args() -> Vec<String> {
     let commands: &[&[&str]] = &[
         &["set-option", "-g", "window-size", "latest"],
         &["set-option", "-g", "status", "off"],
@@ -80,8 +80,8 @@ pub fn server_init_args() -> Vec<String> {
         &["set-option", "-g", "history-limit", "50000"],
         // Keep the client out of xterm.js's alternate buffer, which has no
         // scrollback for panes that don't handle the mouse themselves.
-        // `-g` with the default `linux*:AX@` spelled out, since `-ga` on
-        // every spawn grew the array without bound on a long-lived server.
+        // tmux's default `linux*:AX@` is restated: `-ga` per spawn would grow
+        // the array without bound.
         &[
             "set-option",
             "-g",

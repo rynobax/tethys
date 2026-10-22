@@ -30,11 +30,7 @@ import { SidePanel } from "./SidePanel";
 import { Sidebar } from "./Sidebar";
 import { SystemStatus } from "./SystemStatus";
 import { applyTheme, ThemeContext } from "./theme";
-import {
-  useBackendJob,
-  type JobDescriptor,
-  type JobState,
-} from "./useBackendJob";
+import { useBackendJob, type JobState } from "./useBackendJob";
 import { useHorizontalScroll } from "./useHorizontalScroll";
 import { useAppEvent } from "./ipc/events";
 import {
@@ -45,7 +41,7 @@ import {
 } from "./workspaceDerived";
 import "./App.css";
 
-// First entry is the default. The agent is stated, never derived from the name.
+// The agent is stated, never derived from the binary name.
 const AGENT_CHOICES = [
   { binary: "claude", agent: "claude" },
   { binary: "claude-hipaa", agent: "claude" },
@@ -57,9 +53,9 @@ const AGENT_CHOICES = [
 const agentFor = (binary: string): Agent =>
   AGENT_CHOICES.find((c) => c.binary === binary)?.agent ?? "claude";
 
-// Bracketed paste lands the draft in the composer without submitting it.
-const PASTE_START = "\x1b[200~";
-const PASTE_END = "\x1b[201~";
+// Lands the draft in the composer without submitting it.
+const BRACKETED_PASTE_START = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
 // So the draft isn't swallowed by the TUI's startup redraw.
 const DRAFT_PROMPT_SETTLE_MS = 500;
 
@@ -84,26 +80,22 @@ function App() {
   const [creationRuns, setCreationRuns] = useState<
     Map<WorkspaceId, CreateWorkspaceArgs>
   >(new Map());
-  // Driven from here, not the detail pane, because the pane unmounts when you
-  // select another workspace and the log has to keep accumulating.
+  // Here because the detail pane unmounts on workspace switch.
   const [addRepoRuns, setAddRepoRuns] = useState<Map<WorkspaceId, AddRepoRun>>(
     new Map(),
   );
-  // The backend's derived answers, never re-derived here: doing so let the
-  // sidebar and the detail pane drift apart.
   const [turnStates, setTurnStates] = useState<
     Map<WorkspaceId, { needsTurn: boolean; working: boolean }>
   >(new Map());
-  // Cached so switching in doesn't flash "Dormant" during get_session. `null`
-  // is a real answer: dormant.
+  // Cached so switching in doesn't flash "Dormant"; `null` means dormant.
   const [sessionByWorkspace, setSessionByWorkspace] = useState<
     Map<WorkspaceId, SessionInfo | null>
   >(new Map());
   const [draftPrompts, setDraftPrompts] = useState<Map<WorkspaceId, string>>(
     new Map(),
   );
-  // Authoritative while running: `set_workspace_notes` emits no
-  // `workspace:changed`, so `workspaces[].notes` goes stale as you type.
+  // Authoritative: `set_workspace_notes` emits nothing, so
+  // `workspaces[].notes` goes stale as you type.
   const [noteDrafts, setNoteDrafts] = useState<Map<WorkspaceId, string>>(
     new Map(),
   );
@@ -120,8 +112,7 @@ function App() {
       .catch((e) => console.error("get_theme failed:", e));
   }, []);
 
-  useAppEvent("theme:changed", (payload) => {
-    const t = payload ?? null;
+  useAppEvent("theme:changed", (t) => {
     setTheme(t);
     applyTheme(t);
   });
@@ -142,7 +133,7 @@ function App() {
       next.set(workspace_id, { needsTurn: needs_turn, working });
       return next;
     });
-    // A signal for a session a binary switch has replaced is skipped.
+    // The session may have been replaced by a binary switch.
     setSessionByWorkspace((prev) => {
       const s = prev.get(workspace_id);
       if (!s || s.id !== session_id) return prev;
@@ -150,7 +141,7 @@ function App() {
       next.set(workspace_id, {
         ...s,
         runtime_state,
-        notification_type: notification_type ?? null,
+        notification_type,
         turn_acknowledged,
         running,
         needs_turn,
@@ -205,8 +196,7 @@ function App() {
         next.set(workspaceId, session);
         return next;
       });
-      // The backend restores turn state at boot without emitting, since
-      // nothing is subscribed yet; this is what lights the dot after a restart.
+      // Turn state restored at boot is never emitted.
       setTurnStates((prev) => {
         const needsTurn = session?.needs_turn ?? false;
         const working = session?.working ?? false;
@@ -264,7 +254,7 @@ function App() {
       flushedDraftsRef.current.add(workspaceId);
       const sessionId = session.id;
       const bytes = Array.from(
-        new TextEncoder().encode(`${PASTE_START}${prompt}${PASTE_END}`),
+        new TextEncoder().encode(`${BRACKETED_PASTE_START}${prompt}${BRACKETED_PASTE_END}`),
       );
       const flush = async () => {
         await new Promise((resolve) =>
@@ -300,8 +290,7 @@ function App() {
   }, [workspaces, selectedId]);
 
   const handleCreateSuccess = useCallback(
-    async (workspaceId: WorkspaceId, result: unknown) => {
-      const ws = result as Workspace;
+    async (workspaceId: WorkspaceId) => {
       setCreationRuns((prev) => {
         if (!prev.has(workspaceId)) return prev;
         const next = new Map(prev);
@@ -309,7 +298,7 @@ function App() {
         return next;
       });
       try {
-        await api.startAgentSession(ws.id);
+        await api.startAgentSession(workspaceId);
       } catch (e) {
         setError(`auto-start failed: ${String(e)}`);
       }
@@ -381,11 +370,8 @@ function App() {
         }));
       };
 
-      const { command, args } = api.jobs.addRepoToWorkspace({
-        args: { workspace_id: workspaceId, repo_keys: repoKeys },
-      });
       api
-        .runJob(command, args, channel)
+        .addRepoToWorkspace(workspaceId, repoKeys, channel)
         .then(() => {
           patch((run) => ({
             ...run,
@@ -428,8 +414,7 @@ function App() {
     }
   }, []);
 
-  // Folders are only written from here, so local state is mirrored by hand
-  // and the backend emits nothing.
+  // Folder writes emit nothing; local state is mirrored by hand.
   const handleCreateFolder = useCallback(async (name: string) => {
     try {
       const folder = await api.createFolder(name);
@@ -500,8 +485,7 @@ function App() {
   );
 
   const handleReorder = useCallback(async (ids: WorkspaceId[]) => {
-    // The only repaint: the backend emits nothing, since a round-trip would
-    // flicker the row just dropped.
+    // The only repaint: reorders emit nothing.
     setWorkspaces((prev) => {
       const byId = new Map(prev.map((w) => [w.id, w]));
       const moved: Workspace[] = [];
@@ -695,19 +679,14 @@ function CreationRunner({
   isShown: boolean;
   draftPrompt: string;
   onPromptChange: (value: string) => void;
-  onSuccess: (workspaceId: WorkspaceId, result: unknown) => void;
+  onSuccess: (workspaceId: WorkspaceId) => void;
   onDismiss: () => void;
 }) {
-  const descriptor = useMemo<JobDescriptor>(
-    () => ({
-      key: workspaceId,
-      ...api.jobs.createWorkspace({ args }),
-    }),
-    [workspaceId, args],
+  const { events, state } = useBackendJob(
+    workspaceId,
+    (onEvent) => api.createWorkspace(args, onEvent),
+    () => onSuccess(workspaceId),
   );
-  const { events, state } = useBackendJob(descriptor, {
-    onSuccess: (_key, result) => onSuccess(workspaceId, result),
-  });
   if (!isShown) return null;
   return (
     <div className="creation-pane">
@@ -964,7 +943,7 @@ function WorkspaceDetail({
         )}
 
         <div className="session-pane">
-          {/* Floated, so its arrival can't resize the terminal. */}
+          {/* Floated so it can't resize the terminal. */}
           {addRepoRun && (
             <AddRepoPopup
               branch={workspace.branch}
@@ -1208,8 +1187,6 @@ function RepoPrChips({
       {link.prs
         .filter((pr) => !pr.status)
         .map((pr) => (
-          // Every path fetches before recording, so this means the PR became
-          // unreachable.
           <span
             key={pr.number}
             className="gh-chip gh-chip-missing"
@@ -1405,8 +1382,7 @@ function AddRepoDialog({
   );
 }
 
-// Not a modal: a job can sit in the setup queue for minutes, and the app has to
-// stay usable meanwhile.
+// Not a modal: a queued job can wait for minutes.
 function AddRepoPopup({
   branch,
   run,

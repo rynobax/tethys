@@ -209,20 +209,6 @@ function reviewTone(
   }
 }
 
-function bugbotTone(bugbot: ChecksRollup): SquareTone {
-  switch (bugbot) {
-    case "success":
-    case "neutral":
-      return "green";
-    case "failure":
-      return "red";
-    case "pending":
-      return "yellow";
-    case "none":
-      return "gray";
-  }
-}
-
 function ciTitle(checks: ChecksRollup, hasMergeConflicts: boolean): string {
   if (hasMergeConflicts) return "Merge conflict with base branch";
   switch (checks) {
@@ -313,7 +299,6 @@ export function GithubChip({
     status.head_branch,
     `state: ${status.state}${status.is_draft ? " (draft)" : ""}`,
     status.merge_queue ? mergeQueueTitle(status.merge_queue) : null,
-    status.last_error ? `error: ${status.last_error}` : null,
     stale ? `stale since ${new Date(status.fetched_at).toLocaleTimeString()}` : null,
   ]
     .filter(Boolean)
@@ -348,7 +333,7 @@ export function GithubChip({
           )}
           <Square
             kind="bugbot"
-            tone={bugbotTone(status.bugbot)}
+            tone={ciTone(status.bugbot, false)}
             title={bugbotTitle(status.bugbot)}
           />
         </span>

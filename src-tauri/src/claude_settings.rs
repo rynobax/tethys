@@ -155,9 +155,7 @@ impl SettingsDoc {
     /// Returns whether the document changed.
     pub fn add_permission(&mut self, category: PermissionCategory, entry: &PermissionEntry) -> bool {
         let text = entry.to_string();
-        let arr = object_at(&mut self.0, "permissions")
-            .and_then(|perms| array_at(perms, category.as_field()));
-        let Some(arr) = arr else { return false };
+        let arr = array_at(object_at(&mut self.0, "permissions"), category.as_field());
         if arr.iter().any(|v| v.as_str() == Some(text.as_str())) {
             return false;
         }
@@ -182,12 +180,8 @@ impl SettingsDoc {
     /// this entry.
     pub fn allow_write(&mut self, path: &Path) {
         let text = path.to_string_lossy().into_owned();
-        let Some(arr) = object_at(&mut self.0, "sandbox")
-            .and_then(|sandbox| object_at(sandbox, "filesystem"))
-            .and_then(|fs_map| array_at(fs_map, "allowWrite"))
-        else {
-            return;
-        };
+        let sandbox = object_at(&mut self.0, "sandbox");
+        let arr = array_at(object_at(sandbox, "filesystem"), "allowWrite");
         if !arr.iter().any(|v| v.as_str() == Some(text.as_str())) {
             arr.push(Value::String(text));
         }
@@ -225,25 +219,25 @@ impl SettingsDoc {
 }
 
 /// Replaces a non-object value.
-fn object_at<'a>(map: &'a mut Map<String, Value>, key: &str) -> Option<&'a mut Map<String, Value>> {
+fn object_at<'a>(map: &'a mut Map<String, Value>, key: &str) -> &'a mut Map<String, Value> {
     let entry = map
         .entry(key.to_string())
         .or_insert_with(|| Value::Object(Map::new()));
     if !entry.is_object() {
         *entry = Value::Object(Map::new());
     }
-    entry.as_object_mut()
+    entry.as_object_mut().expect("just made an object")
 }
 
 /// Replaces a non-array value.
-fn array_at<'a>(map: &'a mut Map<String, Value>, key: &str) -> Option<&'a mut Vec<Value>> {
+fn array_at<'a>(map: &'a mut Map<String, Value>, key: &str) -> &'a mut Vec<Value> {
     let entry = map
         .entry(key.to_string())
         .or_insert_with(|| Value::Array(Vec::new()));
     if !entry.is_array() {
         *entry = Value::Array(Vec::new());
     }
-    entry.as_array_mut()
+    entry.as_array_mut().expect("just made an array")
 }
 
 #[cfg(test)]

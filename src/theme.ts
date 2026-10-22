@@ -1,7 +1,7 @@
 import { createContext, useContext } from "react";
 import type { Theme } from "./types";
 
-export interface XtermTheme {
+interface XtermTheme {
   background: string;
   foreground: string;
   cursor: string;
@@ -52,7 +52,7 @@ export function themeToXterm(theme: Theme): XtermTheme {
   };
 }
 
-export function themeToCssVars(theme: Theme): Record<string, string> {
+function themeToCssVars(theme: Theme): Record<string, string> {
   const c = theme.colors;
   const a = c.ansi;
   return {

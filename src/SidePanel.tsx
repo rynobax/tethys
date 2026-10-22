@@ -129,7 +129,6 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
     }
   });
 
-  // A never-fetched PR has no URL to load, so it gets no tab.
   const prTabs = useMemo<PrTab[]>(() => {
     const seen = new Set<string>();
     const tabs: PrTab[] = [];
@@ -163,10 +162,8 @@ export function SidePanel({ workspace, notes, onNotesChange }: Props) {
         ? "notes"
         : newestTab;
 
-  // A panel that had only Notes and just gained a tab opens onto it: a
-  // collapse chosen while it was empty wasn't a choice about this tab.
-  // Compared only once artifacts load, so booting or switching workspaces
-  // never reads as a tab appearing.
+  // A first tab overrides a collapse chosen while there was none. `null`
+  // until loaded, so boot or a workspace switch isn't a tab appearing.
   const tabCount = artifactsLoaded ? artifacts.length + prTabs.length : null;
   const seenTabCounts = useRef(new Map<string, number>());
   useEffect(() => {
@@ -539,8 +536,8 @@ function PageView({
   );
 }
 
-// GitHub refuses to be framed, so the page is a native child webview
-// (`pr_view.rs`) floated over the host `<div>`; this owns only its geometry.
+// GitHub refuses to be framed, so this positions a native webview
+// (`pr_view.rs`) over the host `<div>`.
 function PrView({
   url,
   number,

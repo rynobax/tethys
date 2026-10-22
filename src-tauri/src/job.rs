@@ -12,8 +12,7 @@ pub enum JobEvent {
     Log {
         stream: LogStream,
         line: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        repo: Option<String>,
+        repo: String,
     },
     Success,
     Failed { error: String },
@@ -30,8 +29,7 @@ pub enum LogStream {
 pub struct JobTx(pub UnboundedSender<JobEvent>);
 
 impl JobTx {
-    /// For background jobs with no UI channel. Sends ignore errors, so the
-    /// dropped receiver is harmless.
+    /// Sends ignore errors, so the dropped receiver is harmless.
     pub fn silent() -> Self {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         JobTx(tx)
@@ -44,11 +42,11 @@ impl JobTx {
         });
     }
 
-    pub fn log(&self, stream: LogStream, line: String, repo: Option<&str>) {
+    pub fn log(&self, stream: LogStream, line: String, repo: &str) {
         let _ = self.0.send(JobEvent::Log {
             stream,
             line,
-            repo: repo.map(String::from),
+            repo: repo.to_string(),
         });
     }
 }

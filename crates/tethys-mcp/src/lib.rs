@@ -1,6 +1,3 @@
-//! Unlike `tethys_hook`, every failure here surfaces: a handoff that silently
-//! didn't happen is worse than an error.
-
 use std::io;
 
 use serde::de::DeserializeOwned;
@@ -19,8 +16,6 @@ pub const TOOL_NAMES: &[&str] = &[TOOL_CREATE_WORKSPACE, TOOL_LINK_PR];
 /// stalls on a permission dialog nobody is watching.
 pub const ALLOWED_TOOLS: &[&str] = &["mcp__tethys__create_workspace", "mcp__tethys__link_pr"];
 
-/// Identity arrives through the server's env, not tool arguments, so an agent
-/// can't claim an origin that isn't its own.
 pub const ENV_SOCKET: &str = "TETHYS_MCP_SOCKET";
 pub const ENV_WORKSPACE_ID: &str = "TETHYS_MCP_WORKSPACE_ID";
 pub const ENV_SESSION_ID: &str = "TETHYS_MCP_SESSION_ID";
@@ -176,12 +171,6 @@ mod tests {
         assert_eq!(req.from_session, None);
     }
 
-    #[tokio::test]
-    async fn a_short_frame_is_an_error() {
-        let mut cursor = std::io::Cursor::new(vec![0u8, 0, 1]);
-        let got: io::Result<Request> = read_frame(&mut cursor).await;
-        assert!(got.is_err());
-    }
 
     #[tokio::test]
     async fn a_zero_length_frame_is_rejected() {

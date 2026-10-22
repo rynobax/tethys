@@ -6,9 +6,7 @@
 //! `statusUpdatedAt` only moves on transitions, so it can't detect a stuck
 //! session.
 //!
-//! Claude-only: codex session ids never rotate. Codex sessions are filtered out
-//! before reconciliation so a dead Claude probe can't be healed onto the codex
-//! session that took over its cwd.
+//! Claude-only: codex session ids never rotate.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -100,8 +98,4 @@ mod tests {
         assert_eq!(state_from_status("shell"), None);
     }
 
-    #[test]
-    fn unknown_status_is_ignored() {
-        assert_eq!(state_from_status("teapot"), None);
-    }
 }

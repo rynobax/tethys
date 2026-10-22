@@ -38,7 +38,7 @@ pub async fn run_setup_script(
     let stdout_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = reader.next_line().await {
-            tx_out.log(LogStream::Stdout, line, Some(&repo_out));
+            tx_out.log(LogStream::Stdout, line, &repo_out);
         }
     });
 
@@ -47,7 +47,7 @@ pub async fn run_setup_script(
     let stderr_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = reader.next_line().await {
-            tx_err.log(LogStream::Stderr, line, Some(&repo_err));
+            tx_err.log(LogStream::Stderr, line, &repo_err);
         }
     });
 

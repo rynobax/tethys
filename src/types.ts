@@ -50,7 +50,6 @@ export interface GithubPrStatus {
   merge_queue: MergeQueueState | null;
   head_sha: string;
   fetched_at: string;
-  last_error: string | null;
 }
 
 export interface PrStack {
@@ -75,7 +74,6 @@ export interface RepoLink {
   prs: TrackedPr[];
   /** Detached PRs, so the branch scan doesn't re-add them. */
   dismissed: number[];
-  docs?: { branch: string; checkout_path: string; linked_paths: string[] } | null;
 }
 
 export type Agent = "claude" | "codex";
@@ -108,7 +106,6 @@ export interface Workspace {
   agent: Agent;
   /** `null` falls back to the agent's own default binary. */
   agent_binary: string | null;
-  /** Soft delete; purged once older than an hour. */
   deleted_at: string | null;
   /** `null` is the Default folder. */
   folder: FolderId | null;
@@ -146,10 +143,9 @@ export interface CreateWorkspaceArgs {
   workspace_id: WorkspaceId;
   branch: string;
   repo_selections: string[];
-  /** `null`/absent is Claude. */
-  agent?: Agent | null;
-  agent_binary?: string | null;
-  folder?: FolderId | null;
+  agent: Agent;
+  agent_binary: string | null;
+  folder: FolderId | null;
 }
 
 export interface Repo {
@@ -168,7 +164,7 @@ export type RegistryStatus =
 
 export type JobEvent =
   | { kind: "status"; message: string; repo?: string }
-  | { kind: "log"; stream: "stdout" | "stderr"; line: string; repo?: string }
+  | { kind: "log"; stream: "stdout" | "stderr"; line: string; repo: string }
   | { kind: "success" }
   | { kind: "failed"; error: string };
 
@@ -195,7 +191,6 @@ export interface SessionInfo {
   running: boolean;
   runtime_state: SessionRuntimeState;
   notification_type: string | null;
-  /** Reset on the next state transition. */
   turn_acknowledged: boolean;
   /** Derived in Rust so every consumer agrees. */
   needs_turn: boolean;
@@ -245,7 +240,6 @@ export interface ThemeColors {
 
 export interface Theme {
   name: string;
-  source_path: string;
   colors: ThemeColors;
 }
 

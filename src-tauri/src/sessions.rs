@@ -24,8 +24,6 @@ use crate::store::Store;
 use crate::turn::{TurnChanged, TurnSignal, TurnState, TurnTracker};
 use crate::tmux;
 
-const RING_CAPACITY: usize = 2 * 1024 * 1024;
-
 pub struct SpawnAgent<'a> {
     pub agent: Agent,
     pub workspace_id: String,
@@ -42,9 +40,8 @@ struct SpawnRequest<'a> {
     id: SessionId,
     workspace_id: String,
     cwd: &'a Path,
-    program: &'a Path,
     args: &'a [String],
-    tmux_bin: PathBuf,
+    tmux_bin: &'a Path,
     seed_bytes: &'a [u8],
     seed: TurnSignal,
 }
@@ -84,8 +81,8 @@ pub struct SessionSupervisor {
     /// Keyed by `TETHYS_SPAWN_TOKEN`, until SessionStart reports the
     /// agent's session id.
     pending: Mutex<HashMap<String, PendingSpawn>>,
-    /// Kept off the store because every keystroke lands here; `idle` drains
-    /// it into `last_active_at` on each sweep.
+    /// Every keystroke lands here, so it's kept off the store until the idle
+    /// sweep folds it in.
     activity: Mutex<HashMap<SessionId, DateTime<Utc>>>,
     turn: Arc<TurnTracker>,
     artifacts: Arc<ArtifactStore>,
@@ -257,7 +254,6 @@ impl SessionSupervisor {
             id,
             workspace_id,
             cwd,
-            program,
             args,
             tmux_bin,
             seed_bytes,
@@ -282,13 +278,11 @@ impl SessionSupervisor {
 
         let pty = PtyProcess::spawn(
             PtySpawn {
-                program,
                 args,
                 cwd,
                 seed_bytes,
-                ring_capacity: RING_CAPACITY,
                 tmux_session_name: id.clone(),
-                tmux_bin,
+                tmux_bin: tmux_bin.to_path_buf(),
             },
             session_ready_hook(self.app.clone(), workspace_id.clone()),
             session_exit_hook(
@@ -314,7 +308,7 @@ impl SessionSupervisor {
         Ok(info)
     }
 
-    pub fn spawn_agent(&self, req: SpawnAgent<'_>) -> AppResult<(SessionInfo, String)> {
+    pub fn spawn_agent(&self, req: SpawnAgent<'_>) -> AppResult<SessionInfo> {
         let token = Uuid::new_v4().to_string();
         let id = new_session_id();
 
@@ -332,7 +326,7 @@ impl SessionSupervisor {
             resume_session_id: req.resume_session_id,
             mcp: req.mcp,
             brief: req.brief,
-        })?;
+        });
 
         let args = tmux::new_session_args(
             &id,
@@ -349,9 +343,8 @@ impl SessionSupervisor {
             id,
             workspace_id: workspace_id.clone(),
             cwd: req.cwd,
-            program: tmux_bin,
             args: &args,
-            tmux_bin: tmux_bin.to_path_buf(),
+            tmux_bin,
             seed_bytes: &[],
             seed: TurnSignal::Spawned,
         })?;
@@ -360,7 +353,7 @@ impl SessionSupervisor {
         let now = Instant::now();
         pending.retain(|_, p| p.expires_at > now);
         pending.insert(
-            token.clone(),
+            token,
             PendingSpawn {
                 workspace_id,
                 session_id: info.id.clone(),
@@ -368,7 +361,7 @@ impl SessionSupervisor {
             },
         );
 
-        Ok((info, token))
+        Ok(info)
     }
 
     pub fn reattach_tmux(
@@ -378,11 +371,6 @@ impl SessionSupervisor {
         cwd: &Path,
         tmux_bin: &Path,
     ) -> AppResult<SessionInfo> {
-        if !tmux::has_session(tmux_bin, &session_id) {
-            return Err(AppError::Other(format!(
-                "tmux session {session_id} no longer exists"
-            )));
-        }
         // Before attaching: the attach repaints only the visible area.
         let seed = tmux::capture_pane(tmux_bin, &session_id).unwrap_or_default();
 
@@ -391,9 +379,8 @@ impl SessionSupervisor {
             id: session_id,
             workspace_id,
             cwd,
-            program: tmux_bin,
             args: &args,
-            tmux_bin: tmux_bin.to_path_buf(),
+            tmux_bin,
             seed_bytes: &seed,
             seed: TurnSignal::Reattached,
         })
@@ -455,11 +442,9 @@ impl SessionSupervisor {
                 self.set_turn_from_hook(&msg, SessionRuntimeState::WaitingInput, nt)
                     .await;
             }
-            // Claude's reminder a minute after a turn ends. It says nothing
-            // Stop didn't, and the probe calls the same moment `idle` — taken
-            // as `WaitingInput` it flip-flopped against the probe and re-lit
-            // any dot cleared inside that minute. Still worth a correction for
-            // a missed Stop.
+            // Claude's reminder a minute after a turn ends. The probe calls
+            // that moment `idle`, so agree with it rather than relight the dot;
+            // it still corrects a missed Stop.
             Some("idle_prompt") => {
                 let Some((ws_id, sess_id)) = self.resolve_session(&msg).await else { return };
                 self.apply_signal(
@@ -792,8 +777,7 @@ fn session_exit_hook(
     })
 }
 
-/// Drop the `[detached (from session …)]` line the tmux client prints as it
-/// exits, so it doesn't greet the user on revisit.
+/// The tmux client prints `[detached (from session …)]` as it exits.
 fn trim_detach_epilogue(ring: &Ring) {
     const NEEDLE: &[u8] = b"[detached ";
     const SCAN_WINDOW: usize = 256;
@@ -840,8 +824,8 @@ struct ProbeAction {
     heal_to: Option<String>,
 }
 
-/// A rotated session id leaves a ghost probe behind in the same cwd. Left in,
-/// it would win correlation and keep the stale id "live", blocking the heal.
+/// A rotated session id leaves a ghost probe in the same cwd that would
+/// otherwise win correlation and block the heal.
 fn freshest_probe_per_cwd<'a>(probes: &'a [ProbeView<'a>]) -> Vec<&'a ProbeView<'a>> {
     let mut freshest: HashMap<&str, &ProbeView> = HashMap::new();
     let mut out: Vec<&ProbeView> = Vec::new();
@@ -991,7 +975,7 @@ pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
         .map(|key| req.paths.repo_git_dir(key))
         .collect();
 
-    let (info, _token) = req.supervisor.spawn_agent(SpawnAgent {
+    let info = req.supervisor.spawn_agent(SpawnAgent {
         agent,
         workspace_id: req.workspace_id.to_string(),
         cwd: &cwd,

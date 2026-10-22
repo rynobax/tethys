@@ -6,14 +6,13 @@ import type {
   WorkspaceId,
 } from "./types";
 
-/** Several missed ticks at the poller's 45s interval: polling is wedged or
- *  backed off far enough that it may as well be. */
+/** Several missed 45s poller ticks: polling is wedged or backed off. */
 const STALE_MS = 5 * 60 * 1000;
 
-export function isStale(fetchedAt: string, nowMs: number = Date.now()): boolean {
+export function isStale(fetchedAt: string): boolean {
   const t = new Date(fetchedAt).getTime();
   if (Number.isNaN(t)) return false;
-  return nowMs - t > STALE_MS;
+  return Date.now() - t > STALE_MS;
 }
 
 export type LinkPr = {
@@ -29,20 +28,13 @@ export function linkPrEntries(link: RepoLink): LinkPr[] {
   return out;
 }
 
-export function linkPrs(link: RepoLink): GithubPrStatus[] {
-  return linkPrEntries(link).map((e) => e.status);
-}
-
 export type PrGroup = {
   stack: { number: number; size: number } | null;
   /** Base-first. */
   prs: LinkPr[];
 };
 
-/**
- * One group per `gh stack`, plus a group of one for each unstacked PR. A group
- * can be smaller than `stack.size` when this workspace tracks only part of it.
- */
+/** A group can be smaller than `stack.size`: only part may be tracked here. */
 export function prGroups(entries: LinkPr[]): PrGroup[] {
   const groups: PrGroup[] = [];
   // A group lands where its first member appeared, so chips don't jump when
@@ -77,12 +69,10 @@ export function prGroups(entries: LinkPr[]): PrGroup[] {
 
 export type WorkspaceRow = { workspace: Workspace; depth: number };
 
-/**
- * A workspace counts as blocked only if its blocker is among `workspaces`, so
- * soft-deleting a blocker or moving it to another folder un-nests its
- * dependents without touching `blocked_by`. Hence one call per folder.
- */
-export function workspaceTree(workspaces: Workspace[]): WorkspaceRow[] {
+/** Blocked only if the blocker is among `workspaces`, so deleting or moving a
+ *  blocker un-nests its dependents without touching `blocked_by`. Hence one
+ *  call per folder. */
+function workspaceTree(workspaces: Workspace[]): WorkspaceRow[] {
   const present = new Set(workspaces.map((w) => w.id));
   const childrenOf = new Map<string, Workspace[]>();
   const roots: Workspace[] = [];
@@ -117,11 +107,9 @@ export function workspaceTree(workspaces: Workspace[]): WorkspaceRow[] {
   return out;
 }
 
-/** `folder: null` is the Default folder. */
-export type FolderSection = { folder: Folder | null; rows: WorkspaceRow[] };
+type FolderSection = { folder: Folder | null; rows: WorkspaceRow[] };
 
-/** Empty sections are kept: an empty folder still needs a header to drop onto.
- *  An unknown folder falls back to Default, mirroring Rust's boot-time prune. */
+/** Empty sections are kept: an empty folder still needs a header to drop onto. */
 export function folderSections(
   workspaces: Workspace[],
   folders: Folder[],
@@ -140,8 +128,8 @@ export function folderSections(
   ];
 }
 
-/** Same folder only, since nesting is only drawn within one. The walk is
- *  bounded because `state.json` may already hold a cycle. */
+/** Same folder only, since nesting is only drawn within one. Bounded because
+ *  `state.json` may already hold a cycle. */
 export function blockerCandidates(
   workspaces: Workspace[],
   workspaceId: WorkspaceId,

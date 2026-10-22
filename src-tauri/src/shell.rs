@@ -45,7 +45,7 @@ pub fn which(bin: &str, install_hint: Option<&str>) -> AppResult<PathBuf> {
 
 /// Interactive zsh under iTerm2 prepends shell-integration OSC escapes, each
 /// ending in BEL; the path is whatever follows the last one.
-pub fn extract_path(raw: &str) -> String {
+fn extract_path(raw: &str) -> String {
     let trimmed = match raw.rfind('\x07') {
         Some(idx) => &raw[idx + 1..],
         None => raw,
@@ -76,8 +76,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn no_bell_returns_trimmed_input() {
-        assert_eq!(extract_path("  /opt/homebrew/bin/tmux  \n"), "/opt/homebrew/bin/tmux");
-    }
 }

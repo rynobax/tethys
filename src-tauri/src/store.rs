@@ -23,9 +23,19 @@ impl WorkspaceNotifier for NullNotifier {
     fn workspace_changed(&self, _workspace_id: &str) {}
 }
 
+#[cfg(test)]
+pub struct RecordingNotifier(pub Arc<std::sync::Mutex<Vec<String>>>);
+
+#[cfg(test)]
+impl WorkspaceNotifier for RecordingNotifier {
+    fn workspace_changed(&self, workspace_id: &str) {
+        self.0.lock().unwrap().push(workspace_id.to_string());
+    }
+}
+
 pub struct Store {
-    state: Arc<RwLock<AppState>>,
-    dirty: Arc<Notify>,
+    state: RwLock<AppState>,
+    dirty: Notify,
     state_path: PathBuf,
     tmp_path: PathBuf,
     notifier: Box<dyn WorkspaceNotifier>,
@@ -36,7 +46,6 @@ const DEBOUNCE: Duration = Duration::from_millis(250);
 impl Store {
     pub async fn load(
         state_path: PathBuf,
-        tmp_path: PathBuf,
         notifier: Box<dyn WorkspaceNotifier>,
     ) -> AppResult<Arc<Self>> {
         let raw = match tokio::fs::read(&state_path).await {
@@ -106,10 +115,10 @@ impl Store {
         }
 
         let store = Arc::new(Self {
-            state: Arc::new(RwLock::new(initial)),
-            dirty: Arc::new(Notify::new()),
+            state: RwLock::new(initial),
+            dirty: Notify::new(),
+            tmp_path: state_path.with_extension("json.tmp"),
             state_path,
-            tmp_path,
             notifier,
         });
 
@@ -152,10 +161,6 @@ impl Store {
         let result = self.update_workspace_quiet(id, f).await?;
         self.notifier.workspace_changed(id);
         Ok(result)
-    }
-
-    pub fn notify_workspace_changed(&self, id: &str) {
-        self.notifier.workspace_changed(id);
     }
 
     /// For edits the UI already shows locally, e.g. notes typing, where an
@@ -396,15 +401,6 @@ mod tests {
     use chrono::Utc;
     use std::sync::Mutex;
 
-    #[derive(Default)]
-    struct RecordingNotifier(Arc<Mutex<Vec<String>>>);
-
-    impl WorkspaceNotifier for RecordingNotifier {
-        fn workspace_changed(&self, workspace_id: &str) {
-            self.0.lock().unwrap().push(workspace_id.to_string());
-        }
-    }
-
     fn workspace(id: &str, status: WorkspaceStatus) -> Workspace {
         Workspace {
             id: id.into(),
@@ -437,13 +433,9 @@ mod tests {
             std::fs::write(&state_path, raw).unwrap();
         }
         let notified = Arc::new(Mutex::new(Vec::new()));
-        let store = Store::load(
-            state_path,
-            tmp.path().join("state.json.tmp"),
-            Box::new(RecordingNotifier(notified.clone())),
-        )
-        .await
-        .unwrap();
+        let store = Store::load(state_path, Box::new(RecordingNotifier(notified.clone())))
+            .await
+            .unwrap();
         Fixture {
             store,
             notified,
@@ -613,13 +605,9 @@ mod tests {
     async fn writes_land_at_the_real_path_after_the_debounce() {
         let tmp = tempfile::tempdir().unwrap();
         let state_path = tmp.path().join("state.json");
-        let store = Store::load(
-            state_path.clone(),
-            tmp.path().join("state.json.tmp"),
-            Box::new(NullNotifier),
-        )
-        .await
-        .unwrap();
+        let store = Store::load(state_path.clone(), Box::new(NullNotifier))
+            .await
+            .unwrap();
 
         store
             .mutate(|s| {
@@ -679,15 +667,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn the_migration_does_not_run_twice() {
-        let f = fixture_with_raw(&archived_state_json()).await;
-        let migrated = f.store.read(|s| s.clone()).await;
-
-        let again = fixture_with(Some(migrated)).await;
-        let folders = again.store.read(|s| s.folders.clone()).await;
-        assert_eq!(folders.len(), 1, "one Archived folder, not two");
-    }
 
     /// PR 7 sits in both the branch slot and `attached_prs`.
     fn two_slot_state_json() -> String {

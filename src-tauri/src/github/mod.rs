@@ -51,7 +51,6 @@ pub(crate) mod test_support {
             merge_queue: None,
             head_sha: "sha".into(),
             fetched_at: Utc::now(),
-            last_error: None,
         }
     }
 }

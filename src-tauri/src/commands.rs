@@ -22,19 +22,18 @@ use crate::job::{JobEvent, JobTx};
 use crate::mcp::McpLaunch;
 use crate::paths::Paths;
 use crate::provision::{
-    provision_repo_worktree, provision_workspace, teardown_repo_worktree, RepoProvision,
-    RepoTeardown, WorkspaceProvision,
+    provision_repo_worktree, provision_workspace, regen_workspace_claude_md,
+    teardown_repo_worktree, RepoProvision, RepoTeardown, WorkspaceProvision,
 };
 use crate::provision_queue::ProvisionQueue;
 use crate::purge::Purger;
 use crate::reconcile::{self, Discrepancies};
-use crate::registry::{self, starter_template, RegistryLoad, Repo, RepoRegistry};
+use crate::registry::{self, starter_template, RegistryLoad, Repo};
 use crate::sessions::{open_session, OpenSession, SessionInfo, SessionSupervisor};
 use crate::state::{Folder, FolderId, Origin, SystemErrorEntry, Workspace, WorkspaceId};
 use crate::store::Store;
 use crate::theme::Theme;
 use crate::tmux::{self, TmuxBin};
-use crate::workspace_doc;
 
 #[tauri::command]
 pub async fn list_workspaces(store: State<'_, Arc<Store>>) -> AppResult<Vec<Workspace>> {
@@ -250,11 +249,8 @@ pub struct CreateWorkspaceArgs {
     pub workspace_id: WorkspaceId,
     pub branch: String,
     pub repo_selections: Vec<String>,
-    #[serde(default)]
-    pub agent: Option<Agent>,
-    #[serde(default)]
+    pub agent: Agent,
     pub agent_binary: Option<String>,
-    #[serde(default)]
     pub folder: Option<FolderId>,
 }
 
@@ -310,7 +306,7 @@ pub async fn create_workspace(
     let draft = Workspace::draft(
         id.clone(),
         branch.clone(),
-        args.agent.unwrap_or_default(),
+        args.agent,
         agent_binary,
         Origin::Ui,
         args.folder.clone(),
@@ -360,8 +356,7 @@ pub struct AddRepoArgs {
     pub repo_keys: Vec<String>,
 }
 
-/// Repos are added in order, each committed as it lands, so a failure keeps
-/// the ones before it and tears down only its own worktree.
+/// Each repo is committed as it lands, so a failure keeps the ones before it.
 #[tauri::command]
 pub async fn add_repo_to_workspace(
     store: State<'_, Arc<Store>>,
@@ -422,7 +417,6 @@ pub async fn add_repo_to_workspace(
 
     let tx = spawn_event_forwarder(on_event);
 
-    // Runs the setup scripts, the expensive part of a create.
     let first_key = (planned.len() == 1).then(|| planned[0].0.key.as_str());
     let _slot = queue.acquire_announcing(&tx, first_key).await;
 
@@ -458,7 +452,6 @@ pub async fn add_repo_to_workspace(
     Ok(updated)
 }
 
-/// On failure, tears down only this repo's new worktree.
 async fn add_one_repo(
     store: &Store,
     workspace_id: &WorkspaceId,
@@ -468,40 +461,34 @@ async fn add_one_repo(
     paths: &Paths,
     tx: &JobTx,
 ) -> AppResult<Workspace> {
-    let provision = provision_repo_worktree(RepoProvision {
+    let link = provision_repo_worktree(RepoProvision {
         repo,
         worktree_path,
         branch,
         paths,
         tx,
     })
-    .await;
+    .await?;
 
-    let committed = match provision {
-        Ok(link) => {
-            store
-                .update_workspace(workspace_id, |ws| {
-                    // Re-checked: provisioning took minutes. A link on a deleted
-                    // workspace hands the purger a worktree it doesn't know of.
-                    if ws.deleted_at.is_some() {
-                        return Err(AppError::Other(
-                            "workspace was deleted while the repo was being provisioned"
-                                .into(),
-                        ));
-                    }
-                    if ws.has_link(&link.repo_key) {
-                        return Err(AppError::Other(format!(
-                            "repo '{}' is already in this workspace",
-                            link.repo_key
-                        )));
-                    }
-                    ws.repo_links.push(link.clone());
-                    Ok(ws.clone())
-                })
-                .await
-        }
-        Err(e) => Err(e),
-    };
+    let committed = store
+        .update_workspace(workspace_id, |ws| {
+            // Provisioning took minutes, and the purger can't see a worktree
+            // linked onto a deleted workspace.
+            if ws.deleted_at.is_some() {
+                return Err(AppError::Other(
+                    "workspace was deleted while the repo was being provisioned".into(),
+                ));
+            }
+            if ws.has_link(&link.repo_key) {
+                return Err(AppError::Other(format!(
+                    "repo '{}' is already in this workspace",
+                    link.repo_key
+                )));
+            }
+            ws.repo_links.push(link.clone());
+            Ok(ws.clone())
+        })
+        .await;
 
     match committed {
         Ok(updated) => {
@@ -518,13 +505,11 @@ async fn add_one_repo(
             let msg = e.to_string();
             warn!(error = %msg, repo = %repo.key, "add_repo_to_workspace failed; rolling back worktree");
             tx.status(format!("rolling back: {msg}"), Some(&repo.key));
-            // Backstop: `provision_repo_worktree` already cleans up, including
-            // any branch it created.
             teardown_repo_worktree(RepoTeardown {
                 repo_key: &repo.key,
                 worktree_path,
                 branch,
-                created_branch: false,
+                created_branch: link.created_branch,
                 paths,
                 tx,
             })
@@ -547,7 +532,7 @@ pub async fn delete_workspace(
         .await?;
 
     // Stop the agent writing to a worktree about to be removed.
-    if let Some(sid) = session_id.filter(|_| !tmux_bin.0.as_os_str().is_empty()) {
+    if let Some(sid) = session_id {
         tmux::kill_session(&tmux_bin.0, &sid);
     }
 
@@ -913,7 +898,6 @@ pub async fn remove_orphan_dir(
 /// State-only removal: no git ops.
 #[tauri::command]
 pub async fn forget_workspace(
-    app: AppHandle,
     store: State<'_, Arc<Store>>,
     tmux_bin: State<'_, TmuxBin>,
     id: WorkspaceId,
@@ -937,12 +921,12 @@ pub async fn forget_workspace(
         return Err(AppError::WorkspaceNotFound(id));
     }
 
-    if let Some(sid) = session_id.filter(|_| !tmux_bin.0.as_os_str().is_empty()) {
+    if let Some(sid) = session_id {
         tmux::kill_session(&tmux_bin.0, &sid);
     }
 
     info!(%id, "forgot workspace (state-only removal)");
-    emit_workspace_changed(&app, &id);
+    store.notify_changed(&id);
     Ok(())
 }
 
@@ -1039,7 +1023,7 @@ pub async fn switch_agent(
         .await?;
 
     // So `open_session` can't just reattach the old process.
-    if let Some(sid) = session_id.filter(|_| !tmux_bin.0.as_os_str().is_empty()) {
+    if let Some(sid) = session_id {
         tmux::kill_session(&tmux_bin.0, &sid);
     }
 
@@ -1219,33 +1203,6 @@ async fn append_repo_to_workspace_root_settings(
             None,
         );
     }
-}
-
-async fn regen_workspace_claude_md(
-    workspace: &Workspace,
-    registry: &RepoRegistry,
-    paths: &Paths,
-    tx: &JobTx,
-) {
-    match workspace_doc::regenerate(workspace, registry, paths).await {
-        Ok(Some(path)) => tx.status(format!("wrote {}", path.display()), None),
-        Ok(None) => {}
-        Err(e) => {
-            warn!(
-                workspace = %workspace.id,
-                error = %e,
-                "failed to write workspace-root CLAUDE.md"
-            );
-            tx.status(format!("workspace CLAUDE.md write failed: {e}"), None);
-        }
-    }
-}
-
-fn emit_workspace_changed(app: &AppHandle, workspace_id: &str) {
-    let _ = app.emit(
-        "workspace:changed",
-        serde_json::json!({ "workspace_id": workspace_id }),
-    );
 }
 
 fn spawn_event_forwarder(channel: Channel<JobEvent>) -> JobTx {

@@ -39,6 +39,8 @@ mod store;
 mod strays;
 mod theme;
 mod tmux;
+#[cfg(test)]
+mod test_support;
 mod turn;
 mod workspace_doc;
 
@@ -116,17 +118,11 @@ pub fn run() {
                     error!(?path, %error, "repos.toml failed to load")
                 }
             }
-            app.manage::<Arc<RegistryLoad>>(Arc::new(registry_load));
+            let registry = Arc::new(registry_load);
+            app.manage(registry.clone());
 
-            let state_path = paths.state_file();
-            let tmp_path = paths.state_tmp_file();
             let store: Arc<Store> = tauri::async_runtime::block_on(async {
-                Store::load(
-                    state_path,
-                    tmp_path,
-                    Box::new(TauriNotifier(handle.clone())),
-                )
-                .await
+                Store::load(paths.state_file(), Box::new(TauriNotifier(handle.clone()))).await
             })
             .map_err(|e| {
                 error!(error = %e, "failed to load store");
@@ -134,8 +130,6 @@ pub fn run() {
             })?;
             handle.manage::<Arc<Store>>(store.clone());
 
-            // An unresolved agent errors at spawn, against the workspace that
-            // tried to start, not at boot.
             let agent_bins = AgentBins::resolve_all();
             app.manage(agent_bins.clone());
 
@@ -200,27 +194,25 @@ pub fn run() {
             let provision_queue = provision_queue::ProvisionQueue::new();
             app.manage(provision_queue.clone());
 
-            let registry_for_handoff: Arc<RegistryLoad> =
-                app.state::<Arc<RegistryLoad>>().inner().clone();
-            let mcp_launch = mcp::McpLaunch::resolve(&paths, &registry_for_handoff);
+            let mcp_launch = mcp::McpLaunch::resolve(&paths, &registry);
             app.manage::<Option<mcp::McpLaunch>>(mcp_launch.clone());
 
-            let handoff = Arc::new(handoff::Handoff::new(
-                store.clone(),
-                registry_for_handoff,
-                paths.clone(),
+            let handoff = Arc::new(handoff::Handoff {
+                store: store.clone(),
+                registry: registry.clone(),
+                paths: paths.clone(),
                 in_progress,
-                provision_queue,
-                supervisor.clone(),
-                tmux_bin_path.clone().unwrap_or_default(),
+                queue: provision_queue,
+                supervisor: supervisor.clone(),
+                tmux_bin: tmux_bin_path.clone().unwrap_or_default(),
                 agent_bins,
-                mcp_launch,
-            ));
+                mcp: mcp_launch,
+            });
             let mcp_socket = paths.mcp_socket();
             let mcp_services = mcp::McpServices {
                 handoff,
                 store: store.clone(),
-                registry: app.state::<Arc<RegistryLoad>>().inner().clone(),
+                registry: registry.clone(),
             };
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = mcp::listen(&mcp_socket, mcp_services).await {
@@ -228,10 +220,9 @@ pub fn run() {
                 }
             });
 
-            let registry_for_poller: Arc<RegistryLoad> = app.state::<Arc<RegistryLoad>>().inner().clone();
             let poller = Arc::new(GithubPoller::new(
                 store.clone(),
-                registry_for_poller,
+                registry.clone(),
                 handle.clone(),
             ));
             app.manage(poller.clone());
@@ -244,23 +235,19 @@ pub fn run() {
             });
             tauri::async_runtime::spawn(poller.clone().run());
 
-            let registry_for_purger: Arc<RegistryLoad> =
-                app.state::<Arc<RegistryLoad>>().inner().clone();
             let purger = Arc::new(Purger::new(
                 store.clone(),
                 paths.clone(),
-                registry_for_purger,
+                registry.clone(),
                 handle.clone(),
             ));
             app.manage(purger.clone());
             tauri::async_runtime::spawn(purger.clone().run());
 
-            let registry_for_docs: Arc<RegistryLoad> =
-                app.state::<Arc<RegistryLoad>>().inner().clone();
             let store_for_docs = store.clone();
             let paths_for_docs = paths.clone();
             tauri::async_runtime::spawn(async move {
-                refresh_workspace_docs(&store_for_docs, &registry_for_docs, &paths_for_docs).await;
+                refresh_workspace_docs(&store_for_docs, &registry, &paths_for_docs).await;
             });
 
             app.manage(paths);

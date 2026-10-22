@@ -19,7 +19,7 @@ fn is_pnp_path(value: &str) -> bool {
     value.contains(".pnp.")
 }
 
-/// `None` when nothing survives and the variable should be dropped.
+/// `None` means drop the variable.
 fn strip_pnp_from_node_options(value: &str) -> Option<String> {
     let tokens: Vec<&str> = value.split_whitespace().collect();
     let mut kept: Vec<&str> = Vec::new();

@@ -23,10 +23,6 @@ impl Paths {
         self.data_dir.join("state.json")
     }
 
-    pub fn state_tmp_file(&self) -> PathBuf {
-        self.data_dir.join("state.json.tmp")
-    }
-
     pub fn logs_dir(&self) -> PathBuf {
         self.data_dir.join("logs")
     }

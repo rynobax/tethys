@@ -364,7 +364,7 @@ function StatusTab({
   );
 }
 
-/** The label opens the path; the path stays plain text so it can be copied. */
+/** The path stays plain text so it can be copied. */
 function PathRow({
   label,
   path,
@@ -568,7 +568,6 @@ function DiskMismatchSection({
       onChanged();
     });
 
-  // One Forget button per workspace, not per repo.
   const missingByWorkspace = new Map<
     string,
     { branch: string; repos: string[] }

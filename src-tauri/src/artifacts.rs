@@ -11,7 +11,7 @@ use tracing::{debug, warn};
 use crate::state::WorkspaceId;
 use crate::store::Store;
 
-pub const CAP_PER_WORKSPACE: usize = 12;
+const CAP_PER_WORKSPACE: usize = 12;
 
 const LABEL_MAX_CHARS: usize = 18;
 
@@ -230,7 +230,7 @@ fn shell_words(s: &str) -> Vec<String> {
 }
 
 /// `(label, source)` for every mermaid fence.
-pub fn extract_diagrams(message: &str) -> Vec<(String, String)> {
+fn extract_diagrams(message: &str) -> Vec<(String, String)> {
     let lines: Vec<&str> = message.lines().collect();
     let mut out = Vec::new();
     let mut i = 0;

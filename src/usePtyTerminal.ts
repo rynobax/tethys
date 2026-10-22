@@ -15,15 +15,10 @@ const DEFAULT_XTERM_THEME = {
   foreground: "#e8e8e8",
 };
 
-export interface PtyTerminalOptions {
-  /** Returns a teardown that runs before the terminal is disposed. Needn't be
-   *  stable: it's read through a ref. */
-  onReady?: (term: Terminal, container: HTMLDivElement) => (() => void) | void;
-}
-
+/** `onReady`'s teardown runs before dispose. `onReady` needn't be stable. */
 export function usePtyTerminal(
   sessionId: string,
-  options: PtyTerminalOptions = {},
+  onReady: (term: Terminal, container: HTMLDivElement) => () => void,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -31,8 +26,8 @@ export function usePtyTerminal(
   // Read through a ref so a theme change doesn't rebuild xterm.
   const themeRef = useRef(theme);
   themeRef.current = theme;
-  const onReadyRef = useRef(options.onReady);
-  onReadyRef.current = options.onReady;
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
 
   useEffect(() => {
     if (!termRef.current) return;
@@ -77,7 +72,7 @@ export function usePtyTerminal(
     term.focus();
     termRef.current = term;
 
-    const teardownExtras = onReadyRef.current?.(term, container);
+    const teardownExtras = onReadyRef.current(term, container);
 
     const dataSub = term.onData((data) => {
       const bytes = Array.from(new TextEncoder().encode(data));
@@ -124,18 +119,17 @@ export function usePtyTerminal(
       ro.disconnect();
       dataSub.dispose();
       resizeSub.dispose();
-      teardownExtras?.();
+      teardownExtras();
       term.dispose();
       termRef.current = null;
-      // The channel keeps succeeding while its callback is registered, so the
-      // backend never drops it on its own.
+      // The backend never drops a live channel on its own.
       api.detachSession(sessionId, channel.id).catch(() => {});
-      // Tauri never unregisters a command-arg channel's callback, which would
-      // otherwise pin the disposed terminal and its scrollback forever.
+      // Tauri never unregisters a command-arg channel's callback; this unpins
+      // the disposed terminal.
       channel.onmessage = () => {};
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  return { containerRef, termRef };
+  return containerRef;
 }

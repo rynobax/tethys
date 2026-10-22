@@ -1,12 +1,8 @@
-//! Kills processes a session started that outlived the session — a dev server
-//! backgrounded with `nohup`, a test run orphaned by a timed-out tool call.
-//! They reparent to launchd, so no process tree leads back to the workspace,
-//! but they keep the environment tmux gave the session: every process carrying
-//! a session's tag belongs to it, and one whose session is gone is a stray.
+//! Kills processes that outlived the session that started them. They reparent
+//! to launchd, so no process tree leads back, but they keep the environment
+//! tmux gave the session: a process whose tag names no live session is a stray.
 //!
-//! Sessions started before `TETHYS_SESSION_ID` existed carry only
-//! `TETHYS_SPAWN_TOKEN`, so either tag counts, and a process is live if either
-//! names a live session.
+//! Older sessions carry only `TETHYS_SPAWN_TOKEN`, so either tag counts.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -131,7 +127,7 @@ fn find_strays<'a>(
         std::iter::successors(by_pid.get(&pid).and_then(|c| c.parent), |p| {
             by_pid.get(p).and_then(|c| c.parent)
         })
-        // A hand-edited or racing table could loop; no real chain is this deep.
+        // A racing table could loop; no real chain is this deep.
         .take(64)
     };
     let above_us: HashSet<Pid> = std::iter::once(own_pid).chain(ancestors(own_pid)).collect();

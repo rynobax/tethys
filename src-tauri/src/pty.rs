@@ -23,12 +23,12 @@ pub type OnReady = Box<dyn FnOnce() + Send>;
 
 const BRACKETED_PASTE_ON: &[u8] = b"\x1b[?2004h";
 
+const RING_CAPACITY: usize = 2 * 1024 * 1024;
+
 pub struct PtySpawn<'a> {
-    pub program: &'a Path,
     pub args: &'a [String],
     pub cwd: &'a Path,
     pub seed_bytes: &'a [u8],
-    pub ring_capacity: usize,
     pub tmux_session_name: String,
     pub tmux_bin: PathBuf,
 }
@@ -45,11 +45,9 @@ pub struct PtyProcess {
 impl PtyProcess {
     pub fn spawn(req: PtySpawn<'_>, on_ready: OnReady, on_exit: OnExit) -> AppResult<Self> {
         let PtySpawn {
-            program,
             args,
             cwd,
             seed_bytes,
-            ring_capacity,
             tmux_session_name,
             tmux_bin,
         } = req;
@@ -64,7 +62,7 @@ impl PtyProcess {
             })
             .map_err(|e| AppError::Other(format!("openpty failed: {e}")))?;
 
-        let mut cmd = CommandBuilder::new(program);
+        let mut cmd = CommandBuilder::new(&tmux_bin);
         for arg in args {
             cmd.arg(arg);
         }
@@ -87,10 +85,8 @@ impl PtyProcess {
             .take_writer()
             .map_err(|e| AppError::Other(format!("take writer failed: {e}")))?;
 
-        let ring: Ring = Arc::new(Mutex::new(VecDeque::with_capacity(ring_capacity)));
-        if !seed_bytes.is_empty() {
-            append_to_ring(&ring, seed_bytes, ring_capacity);
-        }
+        let ring: Ring = Arc::new(Mutex::new(VecDeque::with_capacity(RING_CAPACITY)));
+        append_to_ring(&ring, seed_bytes, RING_CAPACITY);
         let subscribers: Arc<Mutex<Vec<Channel<InvokeResponseBody>>>> =
             Arc::new(Mutex::new(Vec::new()));
         let running = Arc::new(Mutex::new(true));
@@ -100,7 +96,6 @@ impl PtyProcess {
             reader,
             ring: ring.clone(),
             subscribers: subscribers.clone(),
-            ring_capacity,
             tui_ready: tui_ready.clone(),
             on_ready,
         });
@@ -207,7 +202,7 @@ impl ReadyWatch {
     }
 }
 
-pub fn append_to_ring(ring: &Ring, data: &[u8], capacity: usize) {
+fn append_to_ring(ring: &Ring, data: &[u8], capacity: usize) {
     let mut ring = ring.lock().unwrap();
     if data.len() >= capacity {
         ring.clear();
@@ -225,7 +220,6 @@ struct ReaderThread {
     reader: Box<dyn Read + Send>,
     ring: Ring,
     subscribers: Arc<Mutex<Vec<Channel<InvokeResponseBody>>>>,
-    ring_capacity: usize,
     tui_ready: Arc<AtomicBool>,
     on_ready: OnReady,
 }
@@ -235,7 +229,6 @@ fn spawn_reader_thread(thread: ReaderThread) {
         mut reader,
         ring,
         subscribers,
-        ring_capacity,
         tui_ready,
         on_ready,
     } = thread;
@@ -251,7 +244,7 @@ fn spawn_reader_thread(thread: ReaderThread) {
                 }
                 Ok(n) => {
                     let chunk = &buf[..n];
-                    append_to_ring(&ring, chunk, ring_capacity);
+                    append_to_ring(&ring, chunk, RING_CAPACITY);
                     if watch.observe(chunk) {
                         debug!("pty reader: program enabled bracketed paste — TUI is up");
                         tui_ready.store(true, Ordering::Release);

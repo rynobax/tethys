@@ -44,7 +44,7 @@ pub async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLi
 
     let branch_preexisted = git::branch_exists(&clone_path, ctx.branch).await?;
     let remote_exists = !branch_preexisted
-        && git::remote_branch_exists(&clone_path, "origin", ctx.branch).await?;
+        && git::remote_branch_exists(&clone_path, ctx.branch).await?;
     let plan = git::plan_branch(ctx.branch, branch_preexisted, remote_exists);
     let created_branch = plan.created_branch;
 
@@ -60,7 +60,7 @@ pub async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLi
             &clone_path,
             ctx.worktree_path,
             ctx.branch,
-            plan.source.as_ref(),
+            &plan.source,
             ctx.tx,
             &ctx.repo.key,
         )
@@ -180,7 +180,7 @@ pub async fn teardown_repo_worktree(ctx: RepoTeardown<'_>) {
     if ctx.worktree_path.exists() {
         let clone_path = ctx.paths.repo_clone_path(ctx.repo_key);
         if let Err(cleanup_err) =
-            git::worktree_remove(&clone_path, ctx.worktree_path, true, ctx.tx, ctx.repo_key).await
+            git::worktree_remove(&clone_path, ctx.worktree_path, ctx.tx, ctx.repo_key).await
         {
             ctx.tx.status(
                 format!("cleanup failed for {}: {cleanup_err}", ctx.repo_key),
@@ -366,6 +366,15 @@ async fn seed_workspace_root(
         tx.status(format!("workspace-root settings seed failed: {e}"), None);
     }
 
+    regen_workspace_claude_md(workspace, registry, paths, tx).await;
+}
+
+pub async fn regen_workspace_claude_md(
+    workspace: &Workspace,
+    registry: &RepoRegistry,
+    paths: &Paths,
+    tx: &JobTx,
+) {
     match workspace_doc::regenerate(workspace, registry, paths).await {
         Ok(Some(path)) => tx.status(format!("wrote {}", path.display()), None),
         Ok(None) => {}
@@ -383,45 +392,7 @@ async fn seed_workspace_root(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command as StdCommand;
-
-    fn git_ok(dir: &Path, args: &[&str]) {
-        let out = StdCommand::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .output()
-            .expect("spawn git");
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
-    fn git_out(dir: &Path, args: &[&str]) -> String {
-        let out = StdCommand::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .output()
-            .expect("spawn git");
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    }
-
-    fn init_origin(dir: &Path) {
-        let out = StdCommand::new("git")
-            .args(["init", "-b", "main"])
-            .arg(dir)
-            .output()
-            .expect("git init");
-        assert!(out.status.success());
-        git_ok(dir, &["config", "user.email", "t@example.com"]);
-        git_ok(dir, &["config", "user.name", "T"]);
-        std::fs::write(dir.join("README.md"), "hi").unwrap();
-        git_ok(dir, &["add", "."]);
-        git_ok(dir, &["commit", "-m", "init"]);
-    }
+    use crate::test_support::{git_ok, git_out, init_repo_with_commit};
 
     fn repo(key: &str, origin: &Path, setup_script: Option<&str>) -> Repo {
         Repo {
@@ -447,7 +418,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let origin = tmp.path().join("origin");
         std::fs::create_dir_all(&origin).unwrap();
-        init_origin(&origin);
+        init_repo_with_commit(&origin);
         let worktree_root = tmp.path().join("worktrees");
         std::fs::create_dir_all(&worktree_root).unwrap();
         Fixture {
@@ -471,7 +442,6 @@ mod tests {
         async fn new(f: &Fixture, setup_script: &str) -> Self {
             let store = Store::load(
                 f.paths.data_dir.join("state.json"),
-                f.paths.data_dir.join("state.json.tmp"),
                 Box::new(crate::store::NullNotifier),
             )
             .await

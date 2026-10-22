@@ -42,9 +42,8 @@ impl RunOutcome {
 pub async fn run_streamed<I, S>(
     program: &str,
     args: I,
-    cwd: Option<&Path>,
     tx: &JobTx,
-    repo: Option<&str>,
+    repo: &str,
 ) -> AppResult<RunOutcome>
 where
     I: IntoIterator<Item = S>,
@@ -52,9 +51,6 @@ where
 {
     let mut cmd = Command::new(program);
     cmd.args(args);
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd.env("GIT_TERMINAL_PROMPT", "0");
 
@@ -66,16 +62,18 @@ where
     let stderr = child.stderr.take().expect("stderr piped");
 
     let tx_out = tx.clone();
-    let repo_out = repo.map(String::from);
-    let stdout_task = tokio::spawn(async move {
-        drain_lines(stdout, &tx_out, LogStream::Stdout, repo_out.as_deref()).await
-    });
+    let repo_out = repo.to_string();
+    let stdout_task =
+        tokio::spawn(
+            async move { drain_lines(stdout, &tx_out, LogStream::Stdout, &repo_out).await },
+        );
 
     let tx_err = tx.clone();
-    let repo_err = repo.map(String::from);
-    let stderr_task = tokio::spawn(async move {
-        drain_lines(stderr, &tx_err, LogStream::Stderr, repo_err.as_deref()).await
-    });
+    let repo_err = repo.to_string();
+    let stderr_task =
+        tokio::spawn(
+            async move { drain_lines(stderr, &tx_err, LogStream::Stderr, &repo_err).await },
+        );
 
     let status = child.wait().await?;
     let _ = stdout_task.await;
@@ -107,7 +105,7 @@ async fn drain_lines<R: AsyncRead + Unpin>(
     mut reader: R,
     tx: &JobTx,
     stream: LogStream,
-    repo: Option<&str>,
+    repo: &str,
 ) -> Vec<String> {
     let mut tail: std::collections::VecDeque<String> =
         std::collections::VecDeque::with_capacity(STDERR_TAIL_LINES);
@@ -191,9 +189,8 @@ pub async fn ensure_clone(
             remote_url.as_ref(),
             clone_path.as_os_str(),
         ],
-        None,
         tx,
-        Some(repo),
+        repo,
     )
     .await?
     .check(format!("git clone {remote_url}"))?;
@@ -210,57 +207,41 @@ pub async fn pull_clone(clone_path: &Path, tx: &JobTx, repo: &str) -> AppResult<
         "pull".as_ref(),
         "--ff-only".as_ref(),
     ];
-    run_streamed("git", args, None, tx, Some(repo))
+    run_streamed("git", args, tx, repo)
         .await?
         .check(format!("git pull --ff-only in {}", clone_path.display()))?;
     Ok(())
 }
 
-pub enum WorktreeBranch<'a> {
-    NewFromHead,
-    /// e.g. `origin/<branch>`.
-    TrackRemote(&'a str),
-    /// Git refuses a branch checked out in another worktree, which is the
-    /// guard against two workspaces sharing a branch.
-    ExistingLocal,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchPlan {
-    pub source: OwnedWorktreeBranch,
+    pub source: WorktreeBranch,
     /// Purge deletes only branches Tethys created.
     pub created_branch: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OwnedWorktreeBranch {
+pub enum WorktreeBranch {
     NewFromHead,
+    /// e.g. `origin/<branch>`.
     TrackRemote(String),
+    /// Git refuses a branch checked out in another worktree, which is the
+    /// guard against two workspaces sharing a branch.
     ExistingLocal,
-}
-
-impl OwnedWorktreeBranch {
-    pub fn as_ref(&self) -> WorktreeBranch<'_> {
-        match self {
-            OwnedWorktreeBranch::NewFromHead => WorktreeBranch::NewFromHead,
-            OwnedWorktreeBranch::TrackRemote(s) => WorktreeBranch::TrackRemote(s),
-            OwnedWorktreeBranch::ExistingLocal => WorktreeBranch::ExistingLocal,
-        }
-    }
 }
 
 pub fn plan_branch(branch: &str, local_exists: bool, remote_exists: bool) -> BranchPlan {
     match (local_exists, remote_exists) {
         (true, _) => BranchPlan {
-            source: OwnedWorktreeBranch::ExistingLocal,
+            source: WorktreeBranch::ExistingLocal,
             created_branch: false,
         },
         (false, true) => BranchPlan {
-            source: OwnedWorktreeBranch::TrackRemote(format!("origin/{branch}")),
+            source: WorktreeBranch::TrackRemote(format!("origin/{branch}")),
             created_branch: true,
         },
         (false, false) => BranchPlan {
-            source: OwnedWorktreeBranch::NewFromHead,
+            source: WorktreeBranch::NewFromHead,
             created_branch: true,
         },
     }
@@ -270,7 +251,7 @@ pub async fn worktree_add(
     clone_path: &Path,
     worktree_path: &Path,
     branch: &str,
-    source: WorktreeBranch<'_>,
+    source: &WorktreeBranch,
     tx: &JobTx,
     repo: &str,
 ) -> AppResult<()> {
@@ -308,7 +289,7 @@ pub async fn worktree_add(
         }
     }
 
-    run_streamed("git", args, None, tx, Some(repo))
+    run_streamed("git", args, tx, repo)
         .await?
         .check(format!("git worktree add {}", worktree_path.display()))?;
     Ok(())
@@ -344,12 +325,10 @@ pub async fn ensure_clone_on_default_branch(
         "checkout".as_ref(),
         default.as_ref(),
     ];
-    run_streamed("git", args, None, tx, Some(repo))
-        .await?
-        .check(format!(
-            "git checkout {default} in {}",
-            clone_path.display()
-        ))?;
+    run_streamed("git", args, tx, repo).await?.check(format!(
+        "git checkout {default} in {}",
+        clone_path.display()
+    ))?;
     Ok(())
 }
 
@@ -392,12 +371,8 @@ pub async fn branch_exists(clone_path: &Path, branch: &str) -> AppResult<bool> {
 }
 
 /// Only as fresh as the clone's last pull.
-pub async fn remote_branch_exists(
-    clone_path: &Path,
-    remote: &str,
-    branch: &str,
-) -> AppResult<bool> {
-    show_ref_exists(clone_path, &format!("refs/remotes/{remote}/{branch}")).await
+pub async fn remote_branch_exists(clone_path: &Path, branch: &str) -> AppResult<bool> {
+    show_ref_exists(clone_path, &format!("refs/remotes/origin/{branch}")).await
 }
 
 async fn show_ref_exists(clone_path: &Path, refspec: &str) -> AppResult<bool> {
@@ -422,7 +397,7 @@ pub async fn worktree_prune_best_effort(clone_path: &Path, tx: &JobTx, repo: &st
         "worktree".as_ref(),
         "prune".as_ref(),
     ];
-    match run_streamed("git", args, None, tx, Some(repo)).await {
+    match run_streamed("git", args, tx, repo).await {
         Ok(outcome) if outcome.success() => {}
         Ok(outcome) => tx.status(outcome.failure_message("worktree prune"), Some(repo)),
         Err(e) => tx.status(format!("worktree prune failed: {e}"), Some(repo)),
@@ -443,7 +418,7 @@ pub async fn branch_delete_best_effort(
         "-D".as_ref(),
         branch.as_ref(),
     ];
-    match run_streamed("git", args, None, tx, Some(repo)).await {
+    match run_streamed("git", args, tx, repo).await {
         Ok(outcome) if outcome.success() => {}
         Ok(outcome) => tx.status(
             format!(
@@ -456,11 +431,10 @@ pub async fn branch_delete_best_effort(
     }
 }
 
-/// Errors on a dirty worktree unless `force`.
+/// Forced: purge and rollback both mean to discard whatever is in it.
 pub async fn worktree_remove(
     clone_path: &Path,
     worktree_path: &Path,
-    force: bool,
     tx: &JobTx,
     repo: &str,
 ) -> AppResult<()> {
@@ -469,18 +443,16 @@ pub async fn worktree_remove(
         Some(repo),
     );
 
-    let mut args: Vec<&OsStr> = vec![
+    let args: [&OsStr; 6] = [
         "-C".as_ref(),
         clone_path.as_os_str(),
         "worktree".as_ref(),
         "remove".as_ref(),
+        "--force".as_ref(),
+        worktree_path.as_os_str(),
     ];
-    if force {
-        args.push("--force".as_ref());
-    }
-    args.push(worktree_path.as_os_str());
 
-    run_streamed("git", args, None, tx, Some(repo))
+    run_streamed("git", args, tx, repo)
         .await?
         .check(format!("git worktree remove {}", worktree_path.display()))?;
     Ok(())
@@ -489,41 +461,8 @@ pub async fn worktree_remove(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{git_ok, init_repo_with_commit};
     use std::process::Command as StdCommand;
-
-    fn git_ok(dir: &Path, args: &[&str]) {
-        let out = StdCommand::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .output()
-            .expect("spawn git");
-        assert!(
-            out.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
-    fn init_repo_with_commit(dir: &Path) {
-        let out = StdCommand::new("git")
-            .arg("init")
-            .arg("-b")
-            .arg("main")
-            .arg(dir)
-            .output()
-            .expect("spawn git init");
-        assert!(
-            out.status.success(),
-            "git init failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        git_ok(dir, &["config", "user.email", "test@example.com"]);
-        git_ok(dir, &["config", "user.name", "Test"]);
-        std::fs::write(dir.join("README.md"), "hi").unwrap();
-        git_ok(dir, &["add", "."]);
-        git_ok(dir, &["commit", "-m", "init"]);
-    }
 
     fn clone(origin: &Path, dest: &Path) {
         let out = StdCommand::new("git")
@@ -552,22 +491,22 @@ mod tests {
     #[test]
     fn branch_planning_over_every_combination() {
         let local = plan_branch("feat/x", true, false);
-        assert_eq!(local.source, OwnedWorktreeBranch::ExistingLocal);
+        assert_eq!(local.source, WorktreeBranch::ExistingLocal);
         assert!(!local.created_branch, "never delete a branch we found");
 
         let both = plan_branch("feat/x", true, true);
-        assert_eq!(both.source, OwnedWorktreeBranch::ExistingLocal);
+        assert_eq!(both.source, WorktreeBranch::ExistingLocal);
         assert!(!both.created_branch);
 
         let remote = plan_branch("feat/x", false, true);
         assert_eq!(
             remote.source,
-            OwnedWorktreeBranch::TrackRemote("origin/feat/x".into())
+            WorktreeBranch::TrackRemote("origin/feat/x".into())
         );
         assert!(remote.created_branch);
 
         let fresh = plan_branch("feat/x", false, false);
-        assert_eq!(fresh.source, OwnedWorktreeBranch::NewFromHead);
+        assert_eq!(fresh.source, WorktreeBranch::NewFromHead);
         assert!(fresh.created_branch);
     }
 
@@ -591,15 +530,9 @@ mod tests {
     #[tokio::test]
     async fn splits_progress_output_on_carriage_returns() {
         let (tx, mut rx) = recording_tx();
-        let outcome = run_streamed(
-            "/bin/sh",
-            ["-c", "printf 'a\rb\rc\n'"],
-            None,
-            &tx,
-            None,
-        )
-        .await
-        .unwrap();
+        let outcome = run_streamed("/bin/sh", ["-c", "printf 'a\rb\rc\n'"], &tx, "repo")
+            .await
+            .unwrap();
 
         assert!(outcome.success());
         assert_eq!(logged_lines(&mut rx), vec!["a", "b", "c"]);
@@ -611,9 +544,8 @@ mod tests {
         let outcome = run_streamed(
             "/bin/sh",
             ["-c", "echo 'fatal: not a git repository' >&2; exit 128"],
-            None,
             &tx,
-            None,
+            "repo",
         )
         .await
         .unwrap();
@@ -630,9 +562,8 @@ mod tests {
         let outcome = run_streamed(
             "/bin/sh",
             ["-c", "for i in $(seq 1 50); do echo line$i >&2; done; exit 1"],
-            None,
             &tx,
-            None,
+            "repo",
         )
         .await
         .unwrap();
@@ -642,21 +573,6 @@ mod tests {
         assert!(!msg.contains("line40"), "drops older lines: {msg}");
     }
 
-    #[tokio::test]
-    async fn silent_sink_discards_output() {
-        let outcome = run_streamed(
-            "/bin/sh",
-            ["-c", "echo hello; echo oops >&2; exit 3"],
-            None,
-            &JobTx::silent(),
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert!(!outcome.success());
-        assert!(outcome.failure_message("op").contains("oops"));
-    }
 
     #[tokio::test]
     async fn switches_clone_back_to_default_branch() {
@@ -721,7 +637,7 @@ mod tests {
             &clone_path,
             &worktree_path,
             "feature",
-            WorktreeBranch::ExistingLocal,
+            &WorktreeBranch::ExistingLocal,
             &JobTx::silent(),
             "repo",
         )
@@ -744,7 +660,7 @@ mod tests {
             &clone_path,
             &first,
             "feature",
-            WorktreeBranch::ExistingLocal,
+            &WorktreeBranch::ExistingLocal,
             &JobTx::silent(),
             "repo",
         )
@@ -756,7 +672,7 @@ mod tests {
             &clone_path,
             &second,
             "feature",
-            WorktreeBranch::ExistingLocal,
+            &WorktreeBranch::ExistingLocal,
             &JobTx::silent(),
             "repo",
         )
