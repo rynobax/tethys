@@ -1357,7 +1357,9 @@ function AddRepoDialog({
                         checked={picked.has(r.key)}
                         onChange={() => toggle(r.key)}
                       />
-                      <span className="repo-display">{r.key}</span>
+                      <span className="repo-display" title={r.key}>
+                        {r.key}
+                      </span>
                     </label>
                   </li>
                 ))}
@@ -1530,7 +1532,9 @@ function CreateWorkspaceDialog({
                       checked={selected.has(r.key)}
                       onChange={() => toggle(r.key)}
                     />
-                    <span className="repo-display">{r.key}</span>
+                    <span className="repo-display" title={r.key}>
+                      {r.key}
+                    </span>
                   </label>
                 </li>
               ))}
