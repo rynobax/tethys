@@ -1174,7 +1174,8 @@ function RepoPrChips({
             ))}
             {group.prs.length < group.stack.size && (
               <span className="gh-stack-count">
-                {group.prs.length} of {group.stack.size}
+                {group.prs.map((e) => e.status.stack!.position).join(", ")} of{" "}
+                {group.stack.size}
               </span>
             )}
           </span>
