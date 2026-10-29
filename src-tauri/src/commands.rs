@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use serde::Deserialize;
 use tauri::{ipc::Channel, AppHandle, Emitter, State};
-use tracing::{info, warn};
+use tracing::info;
 
 use std::path::{Path, PathBuf};
 
@@ -13,7 +13,6 @@ use crate::agent::Agent;
 use crate::artifacts::{Artifact, ArtifactKind, ArtifactStore};
 use crate::branch_name;
 use crate::agent_bin::{self, AgentBins};
-use crate::claude_local;
 use crate::error::{AppError, AppResult};
 use crate::github::poller::{AuthSnapshot, GithubPoller};
 use crate::github::{self, GithubPrStatus};
@@ -21,14 +20,11 @@ use crate::inprogress::InProgressWorkspaces;
 use crate::job::{JobEvent, JobTx};
 use crate::mcp::McpLaunch;
 use crate::paths::Paths;
-use crate::provision::{
-    provision_repo_worktree, provision_workspace, regen_workspace_claude_md,
-    teardown_repo_worktree, RepoProvision, RepoTeardown, WorkspaceProvision,
-};
+use crate::provision::{add_repos, provision_workspace, RepoAddition, WorkspaceProvision};
 use crate::provision_queue::ProvisionQueue;
 use crate::purge::Purger;
 use crate::reconcile::{self, Discrepancies};
-use crate::registry::{self, starter_template, RegistryLoad, Repo};
+use crate::registry::{starter_template, RegistryLoad, Repo};
 use crate::sessions::{open_session, OpenSession, SessionInfo, SessionSupervisor};
 use crate::state::{Folder, FolderId, Origin, SystemErrorEntry, Workspace, WorkspaceId};
 use crate::store::Store;
@@ -356,7 +352,6 @@ pub struct AddRepoArgs {
     pub repo_keys: Vec<String>,
 }
 
-/// Each repo is committed as it lands, so a failure keeps the ones before it.
 #[tauri::command]
 pub async fn add_repo_to_workspace(
     store: State<'_, Arc<Store>>,
@@ -367,156 +362,17 @@ pub async fn add_repo_to_workspace(
     on_event: Channel<JobEvent>,
 ) -> AppResult<Workspace> {
     let reg = registry.require()?;
-    if args.repo_keys.is_empty() {
-        return Err(AppError::Other("no repos to add".into()));
-    }
-
-    let (branch, present, is_deleted) = store
-        .with_workspace(&args.workspace_id, |w| {
-            let present: Vec<String> = args
-                .repo_keys
-                .iter()
-                .filter(|k| w.has_link(k))
-                .cloned()
-                .collect();
-            (w.branch.clone(), present, w.deleted_at.is_some())
-        })
-        .await?;
-
-    if is_deleted {
-        return Err(AppError::Other(
-            "workspace is soft-deleted; cancel deletion before adding repos".into(),
-        ));
-    }
-    if let Some(key) = present.first() {
-        return Err(AppError::Other(format!(
-            "repo '{key}' is already in this workspace"
-        )));
-    }
-
-    let workspace_dir = registry::sanitize_branch_for_dir(&branch);
-    let mut planned: Vec<(Repo, PathBuf)> = Vec::with_capacity(args.repo_keys.len());
-    for key in &args.repo_keys {
-        if planned.iter().any(|(r, _)| &r.key == key) {
-            return Err(AppError::Other(format!("repo '{key}' was asked for twice")));
-        }
-        let repo = reg
-            .find_repo(key)
-            .cloned()
-            .ok_or_else(|| AppError::Other(format!("unknown repo key: {key}")))?;
-        let worktree_path = reg.plan_worktree_path(&workspace_dir, &repo.key);
-        if worktree_path.exists() {
-            return Err(AppError::Other(format!(
-                "a worktree directory already exists at {}. Remove it first or \
-                 pick a different repo.",
-                worktree_path.display()
-            )));
-        }
-        planned.push((repo, worktree_path));
-    }
-
     let tx = spawn_event_forwarder(on_event);
-
-    let first_key = (planned.len() == 1).then(|| planned[0].0.key.as_str());
-    let _slot = queue.acquire_announcing(&tx, first_key).await;
-
-    let mut updated: Option<Workspace> = None;
-    for (repo, worktree_path) in &planned {
-        let added = add_one_repo(
-            &store,
-            &args.workspace_id,
-            repo,
-            worktree_path,
-            &branch,
-            &paths,
-            &tx,
-        )
-        .await;
-        match added {
-            Ok(ws) => updated = Some(ws),
-            Err(e) => {
-                if let Some(ws) = &updated {
-                    regen_workspace_claude_md(ws, reg, &paths, &tx).await;
-                }
-                let _ = tx.0.send(JobEvent::Failed {
-                    error: e.to_string(),
-                });
-                return Err(e);
-            }
-        }
-    }
-
-    let updated = updated.expect("repo_keys is non-empty");
-    regen_workspace_claude_md(&updated, reg, &paths, &tx).await;
-    let _ = tx.0.send(JobEvent::Success);
-    Ok(updated)
-}
-
-async fn add_one_repo(
-    store: &Store,
-    workspace_id: &WorkspaceId,
-    repo: &Repo,
-    worktree_path: &Path,
-    branch: &str,
-    paths: &Paths,
-    tx: &JobTx,
-) -> AppResult<Workspace> {
-    let link = provision_repo_worktree(RepoProvision {
-        repo,
-        worktree_path,
-        branch,
-        paths,
-        tx,
+    add_repos(RepoAddition {
+        workspace_id: &args.workspace_id,
+        repo_keys: &args.repo_keys,
+        registry: reg,
+        paths: &paths,
+        store: &store,
+        queue: &queue,
+        tx: &tx,
     })
-    .await?;
-
-    let committed = store
-        .update_workspace(workspace_id, |ws| {
-            // Provisioning took minutes, and the purger can't see a worktree
-            // linked onto a deleted workspace.
-            if ws.deleted_at.is_some() {
-                return Err(AppError::Other(
-                    "workspace was deleted while the repo was being provisioned".into(),
-                ));
-            }
-            if ws.has_link(&link.repo_key) {
-                return Err(AppError::Other(format!(
-                    "repo '{}' is already in this workspace",
-                    link.repo_key
-                )));
-            }
-            ws.repo_links.push(link.clone());
-            Ok(ws.clone())
-        })
-        .await;
-
-    match committed {
-        Ok(updated) => {
-            append_repo_to_workspace_root_settings(&updated, &repo.key, paths, tx).await;
-            info!(
-                id = %workspace_id,
-                repo = %repo.key,
-                branch = %branch,
-                "added repo to workspace"
-            );
-            Ok(updated)
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            warn!(error = %msg, repo = %repo.key, "add_repo_to_workspace failed; rolling back worktree");
-            tx.status(format!("rolling back: {msg}"), Some(&repo.key));
-            teardown_repo_worktree(RepoTeardown {
-                repo_key: &repo.key,
-                worktree_path,
-                branch,
-                created_branch: link.created_branch,
-                paths,
-                tx,
-            })
-            .await;
-            Err(e)
-        }
-    }
+    .await
 }
 
 /// Soft delete; the purger tears down once the grace window passes.
@@ -1174,35 +1030,6 @@ JSON.stringify(paths);"#;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(serde_json::from_str(stdout.trim())?)
-}
-
-async fn append_repo_to_workspace_root_settings(
-    workspace: &Workspace,
-    repo_key: &str,
-    paths: &Paths,
-    tx: &JobTx,
-) {
-    let Some(workspace_root) = workspace.root_buf() else {
-        return;
-    };
-    if let Err(e) = claude_local::append_repo_to_workspace_root_settings(
-        &workspace_root,
-        repo_key,
-        paths,
-    )
-    .await
-    {
-        warn!(
-            workspace = %workspace.id,
-            repo = %repo_key,
-            error = %e,
-            "failed to extend workspace-root settings.local.json"
-        );
-        tx.status(
-            format!("workspace-root settings extend failed: {e}"),
-            None,
-        );
-    }
 }
 
 fn spawn_event_forwarder(channel: Channel<JobEvent>) -> JobTx {

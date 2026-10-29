@@ -111,6 +111,7 @@ pub async fn append_repo_to_workspace_root_settings(
             root.add_permission(category, &entry.scoped_to_repo(repo_key));
         }
     }
+    root.allow_write(&paths.repo_git_dir(repo_key));
 
     root.set("_seededBy", Value::String(SEEDED_MARKER.into()));
     root.remove("_generatedBy");
@@ -239,6 +240,42 @@ mod tests {
         assert_eq!(
             allow_write[0].as_str(),
             Some(paths.repo_git_dir("never-symlinked").to_string_lossy().as_ref())
+        );
+    }
+
+    #[tokio::test]
+    async fn appending_a_repo_grants_its_git_dir_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            data_dir: tmp.path().to_path_buf(),
+        };
+        let workspace_root = tmp.path().join("ws");
+        fs::create_dir_all(&workspace_root).await.unwrap();
+        write_workspace_root_settings(&workspace_root, &["frontend".into()], &paths)
+            .await
+            .unwrap();
+
+        append_repo_to_workspace_root_settings(&workspace_root, "backend", &paths)
+            .await
+            .unwrap();
+
+        let written =
+            fs::read_to_string(workspace_root.join(".claude/settings.local.json"))
+                .await
+                .unwrap();
+        let parsed: Value = serde_json::from_str(&written).unwrap();
+        let allow_write: Vec<&str> = parsed["sandbox"]["filesystem"]["allowWrite"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            allow_write,
+            vec![
+                paths.repo_git_dir("frontend").to_string_lossy().as_ref(),
+                paths.repo_git_dir("backend").to_string_lossy().as_ref(),
+            ]
         );
     }
 

@@ -8,7 +8,7 @@ This repo has no branches — work directly on `main` and commit there. Don't cr
 
 ## Stack
 
-Tauri 2.x shell · Rust core (`src-tauri/`) · React + TypeScript frontend (`src/`) · xterm.js (DOM renderer) for terminal rendering · `portable-pty` for PTY spawning · JSON file persistence (no SQLite) · `tethys-hook` companion binary (`crates/tethys-hook/`) that forwards Claude Code hooks over a Unix socket · `tethys-mcp` companion binary (`crates/tethys-mcp/`, built on the `rmcp` SDK) that gives each session two MCP tools: handing work off to a new workspace, and linking a PR to the current one.
+Tauri 2.x shell · Rust core (`src-tauri/`) · React + TypeScript frontend (`src/`) · xterm.js (DOM renderer) for terminal rendering · `portable-pty` for PTY spawning · JSON file persistence (no SQLite) · `tethys-hook` companion binary (`crates/tethys-hook/`) that forwards Claude Code hooks over a Unix socket · `tethys-mcp` companion binary (`crates/tethys-mcp/`, built on the `rmcp` SDK) that gives each session three MCP tools: handing work off to a new workspace, linking a PR to the current one, and adding repos to it.
 
 ## Running
 
@@ -71,7 +71,7 @@ Deliberately absent for codex: **pending permissions**, which has no counterpart
 
 ## The session's MCP tools
 
-Tethys renders an MCP config per session at spawn time — nothing on disk, either way. Claude gets `--mcp-config` (inline JSON) paired with `--allowed-tools` naming *every* tool, so no call can stall on a permission dialog nobody is watching; never `--strict-mcp-config`, which would cut the session off from every other MCP server. Codex gets the same server as `-c mcp_servers.tethys.…` overrides, with `tools.<t>.approval_mode="approve"` as its `--allowed-tools` equivalent. Both bake the identity into the server's `env` block. Two tools live behind it, sharing one socket and told apart by the frame's `op` tag.
+Tethys renders an MCP config per session at spawn time — nothing on disk, either way. Claude gets `--mcp-config` (inline JSON) paired with `--allowed-tools` naming *every* tool, so no call can stall on a permission dialog nobody is watching; never `--strict-mcp-config`, which would cut the session off from every other MCP server. Codex gets the same server as `-c mcp_servers.tethys.…` overrides, with `tools.<t>.approval_mode="approve"` as its `--allowed-tools` equivalent. Both bake the identity into the server's `env` block. Three tools live behind it, sharing one socket and told apart by the frame's `op` tag.
 
 ### Handoffs
 
@@ -88,6 +88,16 @@ The tool returns as soon as the `Creating` draft is in state: provisioning runs 
 `record()` is a plain insert-or-refresh into the link's one PR list (see **Tracked PRs**), so linking a PR the poller already found is a refresh rather than a second chip. It reports back whether the PR turned out to be the one for the workspace's own branch — read off `head_branch`, not off where it was stored — so an agent can tell "I linked the PR I just opened" from "I linked somebody else's".
 
 Deliberately absent: no creating or editing PRs (this records, it doesn't act on GitHub), no unlinking, and no linking to any workspace but the caller's.
+
+### Adding repos
+
+`mcp__tethys__add_repos` adds repos to the *calling* workspace — the agent-facing half of the "Add repo" picker, and the same function behind both (`provision::add_repos`): same setup-queue slot, same commit-as-each-lands, same rollback of only the failing repo's worktree. The workspace comes from the `env` block, like the other two, so an agent can only ever grow its own.
+
+Unlike a handoff, it **waits**. A handoff's result belongs to a session that doesn't exist yet; a repo added here is something the caller wants to use in its very next step, so the reply carries each worktree's path. That can mean minutes, which is why the codex line raises `tool_timeout_sec` from its 60-second default. Claude Code's own MCP timeout is already long enough. An interrupted call doesn't cancel the job: Tethys finishes it and only the reply is lost. That's why a repo the workspace already has is reported back with its path rather than refused, so an agent that retries gets an answer instead of an error. A partial failure names the repos that landed before it.
+
+A codex session's sandbox can't write to the new repo's git dir until it restarts, because `--add-dir` is fixed at spawn. Claude's grant lives in the workspace-root `settings.local.json`, which an add extends.
+
+Deliberately absent: no removing repos, no progress shown in the UI while an agent's add runs (the row updates when each repo lands), and no adding to any workspace but the caller's.
 
 One trap worth remembering: Claude Code negotiates MCP protocol `2026-07-28`, which requires `ttlMs` on a `tools/list` reply. `rmcp`'s `with_all_items` omits it, and a reply without it is silently rejected and retried until the client reports "tools fetch failed". `tools_result()` sets it, and a test in `crates/tethys-mcp` holds it there.
 

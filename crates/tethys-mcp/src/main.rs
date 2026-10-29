@@ -20,8 +20,9 @@ use serde_json::json;
 use tokio::net::UnixStream;
 
 use tethys_mcp::{
-    read_frame, write_frame, CreateWorkspace, LinkPr, Request, Response, ENV_REPO_KEYS,
-    ENV_SESSION_ID, ENV_SOCKET, ENV_WORKSPACE_ID, TOOL_CREATE_WORKSPACE, TOOL_LINK_PR,
+    read_frame, write_frame, AddRepos, CreateWorkspace, LinkPr, Request, Response,
+    ENV_REPO_KEYS, ENV_SESSION_ID, ENV_SOCKET, ENV_WORKSPACE_ID, TOOL_ADD_REPOS,
+    TOOL_CREATE_WORKSPACE, TOOL_LINK_PR,
 };
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +39,11 @@ struct LinkPrArgs {
     reference: String,
     #[serde(default)]
     repo_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddReposArgs {
+    repos: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,18 +77,21 @@ impl TethysServer {
 
     /// Enumerating the registry means an unknown repo is refused now, not
     /// minutes later as a failed provision.
-    fn create_workspace_schema(&self) -> JsonObject {
-        let repo_items = if self.repo_keys.is_empty() {
+    fn repo_key_items(&self) -> serde_json::Value {
+        if self.repo_keys.is_empty() {
             json!({ "type": "string" })
         } else {
             json!({ "type": "string", "enum": self.repo_keys })
-        };
+        }
+    }
+
+    fn create_workspace_schema(&self) -> JsonObject {
         let schema = json!({
             "type": "object",
             "properties": {
                 "repos": {
                     "type": "array",
-                    "items": repo_items,
+                    "items": self.repo_key_items(),
                     "minItems": 1,
                     "description": "Repo keys the new workspace should span. \
                         Each becomes a git worktree checked out on `branch`.",
@@ -193,11 +202,58 @@ impl TethysServer {
         )
     }
 
+    fn add_repos_schema(&self) -> JsonObject {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "repos": {
+                    "type": "array",
+                    "items": self.repo_key_items(),
+                    "minItems": 1,
+                    "description": "Repo keys to add to this workspace. Each \
+                        becomes a git worktree on this workspace's branch, beside \
+                        the repos already here.",
+                },
+            },
+            "required": ["repos"],
+            "additionalProperties": false,
+        });
+        schema
+            .as_object()
+            .cloned()
+            .expect("input schema literal is an object")
+    }
+
+    fn add_repos_tool(&self) -> Tool {
+        Tool::new(
+            Cow::Borrowed(TOOL_ADD_REPOS),
+            Cow::Borrowed(
+                "Add repos to the Tethys workspace this session belongs to. Each \
+                 one gets a git worktree at the workspace root, checked out on this \
+                 workspace's branch and set up the same way as the repos already \
+                 here — clone, dependency install, setup scripts.\n\n\
+                 Reach for it when the task needs a repo this workspace doesn't \
+                 have. Don't read another checkout of it, clone it yourself, or \
+                 guess at its contents instead.\n\n\
+                 The call waits until every repo is ready and returns their \
+                 worktree paths. That takes minutes, and longer if Tethys is busy \
+                 setting up other workspaces, since it builds one at a time. Repos \
+                 already in the workspace are reported back rather than refused. \
+                 If one fails, the repos added before it stay added.",
+            ),
+            self.add_repos_schema(),
+        )
+    }
+
     /// Protocol `2026-07-28` requires `ttlMs`, which `with_all_items` omits;
     /// without it Claude Code retries until "tools fetch failed". Zero, since
     /// the `repos` enum is fixed at spawn.
     fn tools_result(&self) -> ListToolsResult {
-        ListToolsResult::with_all_items(vec![self.create_workspace_tool(), self.link_pr_tool()])
+        ListToolsResult::with_all_items(vec![
+            self.create_workspace_tool(),
+            self.link_pr_tool(),
+            self.add_repos_tool(),
+        ])
             .with_ttl_ms(0)
             .with_cache_scope(CacheScope::Private)
     }
@@ -222,7 +278,8 @@ impl ServerHandler for TethysServer {
             .with_instructions(
                 "Tethys manages parallel agent sessions across git worktrees. \
                  Use create_workspace to hand a distinct piece of work to a fresh \
-                 workspace with its own branch and its own session.",
+                 workspace with its own branch and its own session, and add_repos \
+                 when the work in this one needs a repo it doesn't have yet.",
             )
     }
 
@@ -242,6 +299,7 @@ impl ServerHandler for TethysServer {
         match request.name.as_ref() {
             TOOL_CREATE_WORKSPACE => self.create_workspace(request.arguments).await,
             TOOL_LINK_PR => self.link_pr(request.arguments).await,
+            TOOL_ADD_REPOS => self.add_repos(request.arguments).await,
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool: {other}"),
                 None,
@@ -336,6 +394,44 @@ impl TethysServer {
     }
 }
 
+impl TethysServer {
+    async fn add_repos(
+        &self,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let args: AddReposArgs = parse_args(arguments)?;
+        let request = Request::AddRepos(AddRepos {
+            from_workspace: self.from_workspace.clone(),
+            from_session: self.from_session.clone(),
+            repos: args.repos,
+        });
+
+        let response = match self.send(&request).await {
+            Ok(response) => response,
+            Err(e) => return Ok(failed(format!("adding repos failed: {e}"))),
+        };
+
+        Ok(match response {
+            Response::Added { branch, repos } => {
+                let lines: Vec<String> = repos
+                    .iter()
+                    .map(|r| {
+                        let note = if r.added { "" } else { " (already here)" };
+                        format!("- {}: {}{note}", r.repo_key, r.worktree_path)
+                    })
+                    .collect();
+                CallToolResult::success(vec![ContentBlock::text(format!(
+                    "Ready, on branch `{branch}`:\n{}",
+                    lines.join("\n")
+                ))])
+                .into()
+            }
+            Response::Rejected { message } => failed(format!("adding repos failed: {message}")),
+            other => failed(format!("Tethys answered an add with {other:?}")),
+        })
+    }
+}
+
 fn parse_args<T: serde::de::DeserializeOwned>(
     arguments: Option<JsonObject>,
 ) -> Result<T, ErrorData> {
@@ -395,6 +491,16 @@ mod tests {
         assert_eq!(schema["required"], serde_json::json!(["reference"]));
         assert_eq!(
             schema["properties"]["repo_key"]["enum"],
+            serde_json::json!(["nl-frontend", "nl-backend"])
+        );
+    }
+
+    #[test]
+    fn add_repos_enumerates_the_registry() {
+        let schema = serde_json::to_value(server().add_repos_schema()).expect("serialize");
+        assert_eq!(schema["required"], serde_json::json!(["repos"]));
+        assert_eq!(
+            schema["properties"]["repos"]["items"]["enum"],
             serde_json::json!(["nl-frontend", "nl-backend"])
         );
     }

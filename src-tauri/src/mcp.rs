@@ -6,14 +6,19 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
 
 use crate::agent_cmd::toml_string;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::github;
 use crate::handoff::Handoff;
+use crate::job::JobTx;
 use crate::paths::Paths;
+use crate::provision::{self, RepoAddition};
+use crate::provision_queue::ProvisionQueue;
 use crate::registry::RegistryLoad;
 use crate::store::Store;
 
-pub use tethys_mcp::{CreateWorkspace, LinkPr, Request, Response};
+pub use tethys_mcp::{AddRepos, AddedRepo, CreateWorkspace, LinkPr, Request, Response};
+
+const TOOL_TIMEOUT_SECS: u32 = 60 * 60;
 
 #[derive(Debug, Clone)]
 pub struct McpLaunch {
@@ -86,6 +91,10 @@ impl McpLaunch {
                 .collect::<Vec<_>>()
                 .join(",")
             ),
+            // `add_repos` waits out clones, installs and the setup queue;
+            // codex's 60s default would abandon it partway.
+            "-c".into(),
+            format!("mcp_servers.{server}.tool_timeout_sec={TOOL_TIMEOUT_SECS}"),
         ];
         for tool in tethys_mcp::TOOL_NAMES {
             args.push("-c".into());
@@ -119,6 +128,8 @@ pub struct McpServices {
     pub handoff: Arc<Handoff>,
     pub store: Arc<Store>,
     pub registry: Arc<RegistryLoad>,
+    pub paths: Paths,
+    pub queue: ProvisionQueue,
 }
 
 pub async fn listen(socket_path: &Path, services: McpServices) -> AppResult<()> {
@@ -158,6 +169,7 @@ async fn serve_connection(mut stream: UnixStream, services: McpServices) -> AppR
     let response = match request {
         Request::CreateWorkspace(req) => create_workspace(&services, req).await,
         Request::LinkPr(req) => link_pr(&services, req).await,
+        Request::AddRepos(req) => add_repos(&services, req).await,
     };
     tethys_mcp::write_frame(&mut stream, &response).await?;
     Ok(())
@@ -215,6 +227,100 @@ async fn link_pr(services: &McpServices, req: LinkPr) -> Response {
     }
 }
 
+async fn add_repos(services: &McpServices, req: AddRepos) -> Response {
+    debug!(
+        from_workspace = %req.from_workspace,
+        from_session = ?req.from_session,
+        repos = ?req.repos,
+        "repo add requested"
+    );
+    match add_missing_repos(services, &req).await {
+        Ok(response) => response,
+        Err(e) => {
+            warn!(error = %e, "repo add refused");
+            Response::Rejected {
+                message: e.to_string(),
+            }
+        }
+    }
+}
+
+/// A repo already linked is reported back rather than refused, so an agent
+/// retrying an interrupted call gets its paths instead of an error.
+async fn add_missing_repos(services: &McpServices, req: &AddRepos) -> AppResult<Response> {
+    let reg = services.registry.require()?;
+    let workspace_id = &req.from_workspace;
+
+    let mut wanted: Vec<String> = Vec::with_capacity(req.repos.len());
+    for key in &req.repos {
+        if !wanted.contains(key) {
+            wanted.push(key.clone());
+        }
+    }
+    let missing: Vec<String> = services
+        .store
+        .with_workspace(workspace_id, |w| {
+            wanted.iter().filter(|k| !w.has_link(k)).cloned().collect()
+        })
+        .await?;
+
+    let workspace = if missing.is_empty() {
+        services.store.with_workspace(workspace_id, |w| w.clone()).await?
+    } else {
+        let added = provision::add_repos(RepoAddition {
+            workspace_id,
+            repo_keys: &missing,
+            registry: reg,
+            paths: &services.paths,
+            store: &services.store,
+            queue: &services.queue,
+            tx: &JobTx::silent(),
+        })
+        .await;
+        match added {
+            Ok(ws) => ws,
+            Err(e) => return Err(with_partial_progress(services, workspace_id, &missing, e).await),
+        }
+    };
+
+    let repos = wanted
+        .iter()
+        .filter_map(|key| workspace.repo_links.iter().find(|l| &l.repo_key == key))
+        .map(|link| AddedRepo {
+            repo_key: link.repo_key.clone(),
+            worktree_path: link.worktree_path.display().to_string(),
+            added: missing.contains(&link.repo_key),
+        })
+        .collect();
+    Ok(Response::Added {
+        branch: workspace.branch,
+        repos,
+    })
+}
+
+/// Repos before a failure stay added, and the agent should know which.
+async fn with_partial_progress(
+    services: &McpServices,
+    workspace_id: &str,
+    missing: &[String],
+    error: AppError,
+) -> AppError {
+    let landed: Vec<String> = services
+        .store
+        .with_workspace(workspace_id, |w| {
+            missing.iter().filter(|k| w.has_link(k)).cloned().collect()
+        })
+        .await
+        .unwrap_or_default();
+    if landed.is_empty() {
+        return error;
+    }
+    AppError::Other(format!(
+        "{error}. Added before the failure, and still in the workspace: {}",
+        landed.join(", ")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,7 +357,8 @@ mod tests {
         assert!(args[0].starts_with("--mcp-config={"));
         assert_eq!(
             args[1],
-            "--allowed-tools=mcp__tethys__create_workspace,mcp__tethys__link_pr"
+            "--allowed-tools=mcp__tethys__create_workspace,mcp__tethys__link_pr,\
+             mcp__tethys__add_repos"
         );
     }
 }

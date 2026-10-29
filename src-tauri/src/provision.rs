@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -12,7 +12,7 @@ use crate::job::{JobEvent, JobTx};
 use crate::paths::Paths;
 use crate::provision_queue::ProvisionQueue;
 use crate::reconcile;
-use crate::registry::{Repo, RepoRegistry};
+use crate::registry::{self, Repo, RepoRegistry};
 use crate::setup;
 use crate::state::{RepoLink, Workspace, WorkspaceStatus};
 use crate::store::Store;
@@ -325,6 +325,181 @@ pub async fn provision_workspace(ctx: WorkspaceProvision<'_>) -> AppResult<Works
             let _ = ctx.tx.0.send(JobEvent::Failed { error: msg });
             Err(e)
         }
+    }
+}
+
+pub struct RepoAddition<'a> {
+    pub workspace_id: &'a str,
+    pub repo_keys: &'a [String],
+    pub registry: &'a RepoRegistry,
+    pub paths: &'a Paths,
+    pub store: &'a Store,
+    pub queue: &'a ProvisionQueue,
+    pub tx: &'a JobTx,
+}
+
+/// Each repo is committed as it lands, so a failure keeps the ones before it.
+pub async fn add_repos(ctx: RepoAddition<'_>) -> AppResult<Workspace> {
+    if ctx.repo_keys.is_empty() {
+        return Err(AppError::Other("no repos to add".into()));
+    }
+
+    let (branch, present, is_deleted) = ctx
+        .store
+        .with_workspace(ctx.workspace_id, |w| {
+            let present: Vec<String> = ctx
+                .repo_keys
+                .iter()
+                .filter(|k| w.has_link(k))
+                .cloned()
+                .collect();
+            (w.branch.clone(), present, w.deleted_at.is_some())
+        })
+        .await?;
+
+    if is_deleted {
+        return Err(AppError::Other(
+            "workspace is soft-deleted; cancel deletion before adding repos".into(),
+        ));
+    }
+    if let Some(key) = present.first() {
+        return Err(AppError::Other(format!(
+            "repo '{key}' is already in this workspace"
+        )));
+    }
+
+    let workspace_dir = registry::sanitize_branch_for_dir(&branch);
+    let mut planned: Vec<(Repo, PathBuf)> = Vec::with_capacity(ctx.repo_keys.len());
+    for key in ctx.repo_keys {
+        if planned.iter().any(|(r, _)| &r.key == key) {
+            return Err(AppError::Other(format!("repo '{key}' was asked for twice")));
+        }
+        let repo = ctx
+            .registry
+            .find_repo(key)
+            .cloned()
+            .ok_or_else(|| AppError::Other(format!("unknown repo key: {key}")))?;
+        let worktree_path = ctx.registry.plan_worktree_path(&workspace_dir, &repo.key);
+        if worktree_path.exists() {
+            return Err(AppError::Other(format!(
+                "a worktree directory already exists at {}. Remove it first or \
+                 pick a different repo.",
+                worktree_path.display()
+            )));
+        }
+        planned.push((repo, worktree_path));
+    }
+
+    let first_key = (planned.len() == 1).then(|| planned[0].0.key.as_str());
+    let _slot = ctx.queue.acquire_announcing(ctx.tx, first_key).await;
+
+    let mut updated: Option<Workspace> = None;
+    for (repo, worktree_path) in &planned {
+        match add_one_repo(&ctx, repo, worktree_path, &branch).await {
+            Ok(ws) => updated = Some(ws),
+            Err(e) => {
+                if let Some(ws) = &updated {
+                    regen_workspace_claude_md(ws, ctx.registry, ctx.paths, ctx.tx).await;
+                }
+                let _ = ctx.tx.0.send(JobEvent::Failed {
+                    error: e.to_string(),
+                });
+                return Err(e);
+            }
+        }
+    }
+
+    let updated = updated.expect("repo_keys is non-empty");
+    regen_workspace_claude_md(&updated, ctx.registry, ctx.paths, ctx.tx).await;
+    let _ = ctx.tx.0.send(JobEvent::Success);
+    Ok(updated)
+}
+
+async fn add_one_repo(
+    ctx: &RepoAddition<'_>,
+    repo: &Repo,
+    worktree_path: &Path,
+    branch: &str,
+) -> AppResult<Workspace> {
+    let link = provision_repo_worktree(RepoProvision {
+        repo,
+        worktree_path,
+        branch,
+        paths: ctx.paths,
+        tx: ctx.tx,
+    })
+    .await?;
+
+    let committed = ctx
+        .store
+        .update_workspace(ctx.workspace_id, |ws| {
+            // Provisioning took minutes, and the purger can't see a worktree
+            // linked onto a deleted workspace.
+            if ws.deleted_at.is_some() {
+                return Err(AppError::Other(
+                    "workspace was deleted while the repo was being provisioned".into(),
+                ));
+            }
+            if ws.has_link(&link.repo_key) {
+                return Err(AppError::Other(format!(
+                    "repo '{}' is already in this workspace",
+                    link.repo_key
+                )));
+            }
+            ws.repo_links.push(link.clone());
+            Ok(ws.clone())
+        })
+        .await;
+
+    match committed {
+        Ok(updated) => {
+            extend_workspace_root_settings(&updated, &repo.key, ctx.paths, ctx.tx).await;
+            info!(
+                id = %ctx.workspace_id,
+                repo = %repo.key,
+                branch = %branch,
+                "added repo to workspace"
+            );
+            Ok(updated)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            warn!(error = %msg, repo = %repo.key, "adding repo failed; rolling back worktree");
+            ctx.tx.status(format!("rolling back: {msg}"), Some(&repo.key));
+            teardown_repo_worktree(RepoTeardown {
+                repo_key: &repo.key,
+                worktree_path,
+                branch,
+                created_branch: link.created_branch,
+                paths: ctx.paths,
+                tx: ctx.tx,
+            })
+            .await;
+            Err(e)
+        }
+    }
+}
+
+async fn extend_workspace_root_settings(
+    workspace: &Workspace,
+    repo_key: &str,
+    paths: &Paths,
+    tx: &JobTx,
+) {
+    let Some(workspace_root) = workspace.root_buf() else {
+        return;
+    };
+    if let Err(e) =
+        claude_local::append_repo_to_workspace_root_settings(&workspace_root, repo_key, paths)
+            .await
+    {
+        warn!(
+            workspace = %workspace.id,
+            repo = %repo_key,
+            error = %e,
+            "failed to extend workspace-root settings.local.json"
+        );
+        tx.status(format!("workspace-root settings extend failed: {e}"), None);
     }
 }
 

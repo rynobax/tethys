@@ -8,13 +8,18 @@ pub const SERVER_NAME: &str = "tethys";
 
 pub const TOOL_CREATE_WORKSPACE: &str = "create_workspace";
 pub const TOOL_LINK_PR: &str = "link_pr";
+pub const TOOL_ADD_REPOS: &str = "add_repos";
 
 /// Bare, as codex grants them.
-pub const TOOL_NAMES: &[&str] = &[TOOL_CREATE_WORKSPACE, TOOL_LINK_PR];
+pub const TOOL_NAMES: &[&str] = &[TOOL_CREATE_WORKSPACE, TOOL_LINK_PR, TOOL_ADD_REPOS];
 
 /// Qualified, as Claude's `--allowed-tools` wants them. An unlisted tool
 /// stalls on a permission dialog nobody is watching.
-pub const ALLOWED_TOOLS: &[&str] = &["mcp__tethys__create_workspace", "mcp__tethys__link_pr"];
+pub const ALLOWED_TOOLS: &[&str] = &[
+    "mcp__tethys__create_workspace",
+    "mcp__tethys__link_pr",
+    "mcp__tethys__add_repos",
+];
 
 pub const ENV_SOCKET: &str = "TETHYS_MCP_SOCKET";
 pub const ENV_WORKSPACE_ID: &str = "TETHYS_MCP_WORKSPACE_ID";
@@ -29,6 +34,7 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub enum Request {
     CreateWorkspace(CreateWorkspace),
     LinkPr(LinkPr),
+    AddRepos(AddRepos),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +63,23 @@ pub struct LinkPr {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddRepos {
+    /// Also the workspace the repos are added to, as with `LinkPr`.
+    pub from_workspace: String,
+    #[serde(default)]
+    pub from_session: Option<String>,
+    pub repos: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddedRepo {
+    pub repo_key: String,
+    pub worktree_path: String,
+    /// False when it was already in the workspace before this call.
+    pub added: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response {
     Accepted {
@@ -69,6 +92,10 @@ pub enum Response {
         number: u32,
         url: String,
         is_branch_pr: bool,
+    },
+    Added {
+        branch: String,
+        repos: Vec<AddedRepo>,
     },
     Rejected {
         message: String,
@@ -171,6 +198,19 @@ mod tests {
         assert_eq!(req.from_session, None);
     }
 
+    #[test]
+    fn an_add_repos_frame_parses_under_its_own_tag() {
+        let raw = r#"{
+            "op": "add_repos",
+            "from_workspace": "ws-1",
+            "repos": ["nl-backend"]
+        }"#;
+        let Request::AddRepos(req) = serde_json::from_str(raw).expect("must deserialize") else {
+            panic!("must parse as an add_repos request")
+        };
+        assert_eq!(req.repos, vec!["nl-backend".to_string()]);
+        assert_eq!(req.from_session, None);
+    }
 
     #[tokio::test]
     async fn a_zero_length_frame_is_rejected() {

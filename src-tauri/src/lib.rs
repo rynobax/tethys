@@ -202,7 +202,7 @@ pub fn run() {
                 registry: registry.clone(),
                 paths: paths.clone(),
                 in_progress,
-                queue: provision_queue,
+                queue: provision_queue.clone(),
                 supervisor: supervisor.clone(),
                 tmux_bin: tmux_bin_path.clone().unwrap_or_default(),
                 agent_bins,
@@ -213,6 +213,8 @@ pub fn run() {
                 handoff,
                 store: store.clone(),
                 registry: registry.clone(),
+                paths: paths.clone(),
+                queue: provision_queue,
             };
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = mcp::listen(&mcp_socket, mcp_services).await {

@@ -26,7 +26,7 @@ This directory is a **Tethys workspace**: one unit of work spanning the git work
 ## Ground rules
 
 - **This workspace is the whole world.** Everything you may read or change lives under `{workspace_root}`. Other copies of these repos exist on this machine — Ryan's own checkouts, and Tethys's internal base clones under `{clone_dir}` — and they are *not* part of this task: they sit on different branches with different content. Don't read, grep, `cd` into, or reason from them.
-- **If the task needs a repo that isn't listed above, stop and ask Ryan to add it.** He adds it with Tethys's "Add repo" action, which cuts that repo a worktree here on `{branch}`. Don't substitute another checkout, clone the repo, or guess at its contents — name the repo you need, say why, and wait for it to appear. In the registry but not in this workspace: {available_repos}.
+- **If the task needs a repo that isn't listed above, add it with the `tethys` MCP server's `add_repos` tool.** That cuts the repo a worktree here on `{branch}` and returns once it's ready. If the tool isn't available, stop and ask Ryan to add the repo instead. Don't substitute another checkout, clone the repo, or guess at its contents. In the registry but not in this workspace: {available_repos}.
 - **The branch is shared, the repos are not.** A change spanning repos means a separate commit in each repo, each on `{branch}`. Nothing here is a monorepo; there is no root package manager, test runner, or git repo at this level.
 - Each worktree keeps its git metadata in Tethys's base clone rather than beside the checkout, so `git` commands work normally from inside a worktree but the `.git` entry there is a file, not a directory.
 "#;
