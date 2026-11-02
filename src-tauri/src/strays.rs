@@ -23,12 +23,7 @@ const TERM_GRACE: Duration = Duration::from_secs(10);
 /// A dedicated thread: a sweep is blocking syscalls and a grace-period sleep.
 pub fn spawn(tmux_bin: PathBuf) {
     std::thread::spawn(move || {
-        let own = Tags::of_env(std::env::vars_os().map(|(k, v)| {
-            let mut kv = k;
-            kv.push("=");
-            kv.push(v);
-            kv
-        }));
+        let own = Tags::own();
         loop {
             sweep(&tmux_bin, &own);
             std::thread::sleep(SWEEP_INTERVAL);
@@ -37,13 +32,23 @@ pub fn spawn(tmux_bin: PathBuf) {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct Tags {
-    session_id: Option<String>,
+pub(crate) struct Tags {
+    pub(crate) session_id: Option<String>,
     spawn_token: Option<String>,
 }
 
 impl Tags {
-    fn of_env(env: impl IntoIterator<Item = OsString>) -> Self {
+    /// Tethys's own, set when it was started from inside a session.
+    pub(crate) fn own() -> Self {
+        Tags::of_env(std::env::vars_os().map(|(k, v)| {
+            let mut kv = k;
+            kv.push("=");
+            kv.push(v);
+            kv
+        }))
+    }
+
+    pub(crate) fn of_env(env: impl IntoIterator<Item = OsString>) -> Self {
         let mut tags = Tags::default();
         for kv in env {
             let Some(kv) = kv.to_str() else { continue };
@@ -61,7 +66,7 @@ impl Tags {
         self.session_id.is_none() && self.spawn_token.is_none()
     }
 
-    fn shares_any(&self, other: &Tags) -> bool {
+    pub(crate) fn shares_any(&self, other: &Tags) -> bool {
         (self.session_id.is_some() && self.session_id == other.session_id)
             || (self.spawn_token.is_some() && self.spawn_token == other.spawn_token)
     }
@@ -220,7 +225,7 @@ fn sweep(tmux_bin: &Path, own: &Tags) {
 
 /// Re-reads each pid first, so a pid the kernel has since reused for an
 /// unrelated process is left alone. Returns how many were signalled.
-fn signal_if_same(targets: &[(Pid, u64)], signal: Signal) -> usize {
+pub(crate) fn signal_if_same(targets: &[(Pid, u64)], signal: Signal) -> usize {
     let pids: Vec<Pid> = targets.iter().map(|(p, _)| *p).collect();
     let mut sys = System::new();
     sys.refresh_processes_specifics(

@@ -84,6 +84,9 @@ pub struct SessionSupervisor {
     /// Every keystroke lands here, so it's kept off the store until the idle
     /// sweep folds it in.
     activity: Mutex<HashMap<SessionId, DateTime<Utc>>>,
+    /// Why the memory budget killed something, held until a hook can tell
+    /// the agent.
+    budget_notices: Mutex<HashMap<SessionId, Vec<String>>>,
     turn: Arc<TurnTracker>,
     artifacts: Arc<ArtifactStore>,
     store: Arc<Store>,
@@ -96,6 +99,7 @@ impl SessionSupervisor {
             sessions: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             activity: Mutex::new(HashMap::new()),
+            budget_notices: Mutex::new(HashMap::new()),
             turn: Arc::new(TurnTracker::new()),
             artifacts,
             store,
@@ -394,6 +398,9 @@ impl SessionSupervisor {
                 self.record_page_if_written(&msg).await;
                 self.handle_resume_working(msg).await
             }
+            // Registered only to carry a budget notice back. It also fires
+            // for a tool the user interrupted, so it says nothing about turns.
+            "post-tool-failure" => {}
             // `interrupt` is codex's escape.
             "stop" | "stop-failure" | "interrupt" => self.handle_stop(msg).await,
             "notify" => self.handle_notify(msg).await,
@@ -666,6 +673,34 @@ impl SessionSupervisor {
 
     pub fn forget(&self, session_id: &str) {
         self.sessions.lock().unwrap().remove(session_id);
+        self.budget_notices.lock().unwrap().remove(session_id);
+    }
+
+    pub fn record_budget_kill(&self, session_id: &str, notice: String) {
+        self.budget_notices
+            .lock()
+            .unwrap()
+            .entry(session_id.to_string())
+            .or_default()
+            .push(notice);
+    }
+
+    /// Claude only: codex's hooks haven't been checked for a way to pass
+    /// context back, so its notices wait until the session is forgotten.
+    pub async fn take_budget_notices(&self, msg: &HookMessage) -> Option<String> {
+        if self.budget_notices.lock().unwrap().is_empty() {
+            return None;
+        }
+        let (ws_id, sess_id) = self.resolve_session(msg).await?;
+        let agent = self
+            .store
+            .read(|s| s.find_workspace(&ws_id).map(|w| w.agent))
+            .await?;
+        if agent != Agent::Claude {
+            return None;
+        }
+        let notices = self.budget_notices.lock().unwrap().remove(&sess_id)?;
+        Some(notices.join("\n\n"))
     }
 }
 

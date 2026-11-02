@@ -1318,6 +1318,24 @@ button.danger.primary:hover:not(:disabled) {
   gap: 12px;
 }
 
+.budget-request-banner {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-left: 3px solid var(--accent);
+  padding: 8px 12px;
+  border-radius: 0 4px 4px 0;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.budget-request-banner .actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .binary-menu-wrap {
   position: relative;
   display: inline-flex;

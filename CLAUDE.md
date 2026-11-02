@@ -8,7 +8,7 @@ This repo has no branches — work directly on `main` and commit there. Don't cr
 
 ## Stack
 
-Tauri 2.x shell · Rust core (`src-tauri/`) · React + TypeScript frontend (`src/`) · xterm.js (DOM renderer) for terminal rendering · `portable-pty` for PTY spawning · JSON file persistence (no SQLite) · `tethys-hook` companion binary (`crates/tethys-hook/`) that forwards Claude Code hooks over a Unix socket · `tethys-mcp` companion binary (`crates/tethys-mcp/`, built on the `rmcp` SDK) that gives each session three MCP tools: handing work off to a new workspace, linking a PR to the current one, and adding repos to it.
+Tauri 2.x shell · Rust core (`src-tauri/`) · React + TypeScript frontend (`src/`) · xterm.js (DOM renderer) for terminal rendering · `portable-pty` for PTY spawning · JSON file persistence (no SQLite) · `tethys-hook` companion binary (`crates/tethys-hook/`) that forwards Claude Code hooks over a Unix socket · `tethys-mcp` companion binary (`crates/tethys-mcp/`, built on the `rmcp` SDK) that gives each session four MCP tools: handing work off to a new workspace, linking a PR to the current one, adding repos to it, and asking for a higher memory budget.
 
 ## Running
 
@@ -42,6 +42,18 @@ Closing a session doesn't take everything it started with it. A dev server backg
 
 Its safeguards matter more than its rule. The sweep is skipped outright if tmux can't list every session and its environment, since a session missing from the answer would read as dead. The process snapshot is taken *before* the session list, so a session started in between has nothing in the snapshot to lose. Tethys, its ancestors and its children are spared, and so is anything sharing Tethys's own tags — `pnpm tauri dev` run from inside a session puts the whole dev tree under that session's tag. tmux and `memwatch.sh`, and everything under them, are spared by name, because both outlive the Tethys that started them and could carry the tag of a session that has since died; killing the tmux server would take every session with it. A kill is SIGTERM, then SIGKILL after 10 seconds, and each pid is re-read against its start time before either signal so a reused pid is left alone.
 
+### Memory budget
+
+macOS has no cgroups and enforces no memory limit on a process or a tree — `ulimit -v` is refused, `RLIMIT_RSS` ignored — so a test run that grows past what the machine has doesn't fail, it swaps everything to a standstill. `budget.rs` is the limit macOS won't provide: every 3 seconds it sums the footprint of every process carrying a session's `TETHYS_SESSION_ID`, and a session over its **budget** (8 GB; `TETHYS_MEM_BUDGET` takes a number of GB or `off`) loses its biggest job. It's the same tag the stray sweep reads, so it sees Python, Node, anything, with no cooperation from the agent or the repo's test config.
+
+The agent CLI itself — the tmux pane's process — is neither counted nor killed; the budget is for what the agent *ran*. A **job** is a subtree hanging off the agent (one Bash tool call, a background task, an MCP server) or one that detached from it, and a job goes whole, SIGTERM then SIGKILL after 5 seconds, so a test runner and its workers die together. One job per session per sweep: the next sweep sees what that freed. Memory is `ri_phys_footprint`, the Activity Monitor number, because RSS leaves out compressed pages and understates exactly when memory is short. Processes sharing Tethys's own tags are spared, as with strays. The environment is read once per process — `sysinfo`'s `OnlyIfNotSet` on a `System` kept across sweeps — so a sweep is ~12ms.
+
+The agent is **told why**, because an unexplained exit 143 reads as a flaky test and gets rerun. The notice is recorded *before* the signal, and the killed command's own `PostToolUse` or `PostToolUseFailure` hook carries it back as `additionalContext`: `tethys-hook` waits up to 500ms for a reply on those events and on `UserPromptSubmit` (`tethys_hook::reply_event_name`), and stays fire-and-forget on every other. `PostToolUseFailure` is registered only for this — it also fires for a tool the user interrupted, so it touches no turn state. Codex sessions are killed the same way but not told: nobody has checked whether codex's hooks can return context.
+
+An agent that genuinely needs more calls `mcp__tethys__request_memory_budget` (GB, minutes up to 480, a reason). Only Ryan can grant it: the call **waits** — up to 30 minutes, then it's refused — while the workspace's sidebar dot lights and an Approve/Deny banner sits above its terminal. The dot is OR'd in on the frontend rather than set as turn state, because the agent is mid-tool-call and the Claude probe would correct a `WaitingInput` back to `Working` within 2 seconds. A grant raises that session's budget, never lowers it, and lapses on its own; grants and pending requests live in memory and are gone after a restart, which is the safe direction.
+
+Deliberately absent: a machine-wide floor (killing the biggest session when free memory or swap says the whole machine is in trouble even though no one session is over), anything inside OrbStack's VM (its own `memory_mib` is the guardrail there), a sidebar mark for a kill, and pausing instead of killing.
+
 Deliberately absent: a second session, a session per agent, any way to start a fresh conversation while one exists (`/clear` inside the agent does that), the per-repo **scripts** (`[repo.scripts]` in `repos.toml`, the `dev` chip and its terminal — a stale table in your `repos.toml` is ignored, not an error), and per-session anything.
 
 ## Which agent runs
@@ -71,7 +83,7 @@ Deliberately absent for codex: **pending permissions**, which has no counterpart
 
 ## The session's MCP tools
 
-Tethys renders an MCP config per session at spawn time — nothing on disk, either way. Claude gets `--mcp-config` (inline JSON) paired with `--allowed-tools` naming *every* tool, so no call can stall on a permission dialog nobody is watching; never `--strict-mcp-config`, which would cut the session off from every other MCP server. Codex gets the same server as `-c mcp_servers.tethys.…` overrides, with `tools.<t>.approval_mode="approve"` as its `--allowed-tools` equivalent. Both bake the identity into the server's `env` block. Three tools live behind it, sharing one socket and told apart by the frame's `op` tag.
+Tethys renders an MCP config per session at spawn time — nothing on disk, either way. Claude gets `--mcp-config` (inline JSON) paired with `--allowed-tools` naming *every* tool, so no call can stall on a permission dialog nobody is watching; never `--strict-mcp-config`, which would cut the session off from every other MCP server. Codex gets the same server as `-c mcp_servers.tethys.…` overrides, with `tools.<t>.approval_mode="approve"` as its `--allowed-tools` equivalent. Both bake the identity into the server's `env` block. Four tools live behind it — the fourth, `request_memory_budget`, is covered under **Memory budget** — sharing one socket and told apart by the frame's `op` tag.
 
 ### Handoffs
 

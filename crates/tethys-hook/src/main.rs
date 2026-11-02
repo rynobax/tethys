@@ -71,7 +71,32 @@ fn run() -> io::Result<()> {
     let len = (payload.len() as u32).to_be_bytes();
     stream.write_all(&len)?;
     stream.write_all(&payload)?;
+
+    let Some(claude_event) = tethys_hook::reply_event_name(&msg.event) else {
+        return Ok(());
+    };
+    // The agent waits on this hook, so a wedged Tethys mustn't stall it.
+    stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+    let context = read_reply(&mut stream)?;
+    if !context.is_empty() {
+        let output = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": claude_event,
+                "additionalContext": context,
+            }
+        });
+        println!("{output}");
+    }
     Ok(())
+}
+
+/// Length-prefixed like the request; empty means nothing to say.
+fn read_reply(stream: &mut UnixStream) -> io::Result<String> {
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len)?;
+    let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
+    stream.read_exact(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// `tethys-hook <event> [--spawn-token <token>]`. Unknown flags are ignored.

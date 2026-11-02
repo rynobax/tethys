@@ -9,9 +9,15 @@ pub const SERVER_NAME: &str = "tethys";
 pub const TOOL_CREATE_WORKSPACE: &str = "create_workspace";
 pub const TOOL_LINK_PR: &str = "link_pr";
 pub const TOOL_ADD_REPOS: &str = "add_repos";
+pub const TOOL_REQUEST_MEMORY_BUDGET: &str = "request_memory_budget";
 
 /// Bare, as codex grants them.
-pub const TOOL_NAMES: &[&str] = &[TOOL_CREATE_WORKSPACE, TOOL_LINK_PR, TOOL_ADD_REPOS];
+pub const TOOL_NAMES: &[&str] = &[
+    TOOL_CREATE_WORKSPACE,
+    TOOL_LINK_PR,
+    TOOL_ADD_REPOS,
+    TOOL_REQUEST_MEMORY_BUDGET,
+];
 
 /// Qualified, as Claude's `--allowed-tools` wants them. An unlisted tool
 /// stalls on a permission dialog nobody is watching.
@@ -19,6 +25,7 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "mcp__tethys__create_workspace",
     "mcp__tethys__link_pr",
     "mcp__tethys__add_repos",
+    "mcp__tethys__request_memory_budget",
 ];
 
 pub const ENV_SOCKET: &str = "TETHYS_MCP_SOCKET";
@@ -35,6 +42,7 @@ pub enum Request {
     CreateWorkspace(CreateWorkspace),
     LinkPr(LinkPr),
     AddRepos(AddRepos),
+    RequestMemoryBudget(RequestMemoryBudget),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +80,17 @@ pub struct AddRepos {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestMemoryBudget {
+    /// Also the session whose budget is raised.
+    pub from_workspace: String,
+    #[serde(default)]
+    pub from_session: Option<String>,
+    pub gb: u64,
+    pub minutes: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddedRepo {
     pub repo_key: String,
     pub worktree_path: String,
@@ -97,6 +116,12 @@ pub enum Response {
         branch: String,
         repos: Vec<AddedRepo>,
     },
+    BudgetApproved {
+        gb: u64,
+        /// Local wall-clock time, `HH:MM`.
+        until: String,
+    },
+    BudgetDenied,
     Rejected {
         message: String,
     },

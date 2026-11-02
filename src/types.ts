@@ -199,6 +199,15 @@ export interface SessionInfo {
   tui_ready: boolean;
 }
 
+/** An agent asking for a higher memory budget; it waits until answered. */
+export interface BudgetRequest {
+  workspace_id: WorkspaceId;
+  session_id: string;
+  gb: number;
+  minutes: number;
+  reason: string;
+}
+
 export interface TurnChangedEvent {
   workspace_id: string;
   session_id: string;

@@ -20,9 +20,9 @@ use serde_json::json;
 use tokio::net::UnixStream;
 
 use tethys_mcp::{
-    read_frame, write_frame, AddRepos, CreateWorkspace, LinkPr, Request, Response,
-    ENV_REPO_KEYS, ENV_SESSION_ID, ENV_SOCKET, ENV_WORKSPACE_ID, TOOL_ADD_REPOS,
-    TOOL_CREATE_WORKSPACE, TOOL_LINK_PR,
+    read_frame, write_frame, AddRepos, CreateWorkspace, LinkPr, Request, RequestMemoryBudget,
+    Response, ENV_REPO_KEYS, ENV_SESSION_ID, ENV_SOCKET, ENV_WORKSPACE_ID, TOOL_ADD_REPOS,
+    TOOL_CREATE_WORKSPACE, TOOL_LINK_PR, TOOL_REQUEST_MEMORY_BUDGET,
 };
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +44,13 @@ struct LinkPrArgs {
 #[derive(Debug, Deserialize)]
 struct AddReposArgs {
     repos: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestMemoryBudgetArgs {
+    gb: u64,
+    minutes: u64,
+    reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -245,6 +252,58 @@ impl TethysServer {
         )
     }
 
+    fn request_memory_budget_schema(&self) -> JsonObject {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "gb": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The budget to ask for, in GB, covering everything \
+                        this session runs at once. Ask for what the run needs, not \
+                        the most you can think of.",
+                },
+                "minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 480,
+                    "description": "How long the higher budget lasts before the \
+                        normal one applies again.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Shown to Ryan when he decides: what you need \
+                        to run and why it needs this much memory.",
+                },
+            },
+            "required": ["gb", "minutes", "reason"],
+            "additionalProperties": false,
+        });
+        schema
+            .as_object()
+            .cloned()
+            .expect("input schema literal is an object")
+    }
+
+    fn request_memory_budget_tool(&self) -> Tool {
+        Tool::new(
+            Cow::Borrowed(TOOL_REQUEST_MEMORY_BUDGET),
+            Cow::Borrowed(
+                "Ask Ryan to raise this session's memory budget for a while. \
+                 Tethys kills the biggest job a session is running once \
+                 everything it started holds more memory than its budget, and \
+                 tells you when it has.\n\n\
+                 Reach for it only after a kill, when the run genuinely needs the \
+                 memory — a narrower run (fewer test files, fewer workers) is \
+                 usually the better answer. Ryan approves or denies it in \
+                 Tethys, and the call waits for him, up to 30 minutes. \
+                 Approval applies to this session only, and only until the time \
+                 runs out.",
+            ),
+            self.request_memory_budget_schema(),
+        )
+    }
+
     /// Protocol `2026-07-28` requires `ttlMs`, which `with_all_items` omits;
     /// without it Claude Code retries until "tools fetch failed". Zero, since
     /// the `repos` enum is fixed at spawn.
@@ -253,6 +312,7 @@ impl TethysServer {
             self.create_workspace_tool(),
             self.link_pr_tool(),
             self.add_repos_tool(),
+            self.request_memory_budget_tool(),
         ])
             .with_ttl_ms(0)
             .with_cache_scope(CacheScope::Private)
@@ -300,6 +360,7 @@ impl ServerHandler for TethysServer {
             TOOL_CREATE_WORKSPACE => self.create_workspace(request.arguments).await,
             TOOL_LINK_PR => self.link_pr(request.arguments).await,
             TOOL_ADD_REPOS => self.add_repos(request.arguments).await,
+            TOOL_REQUEST_MEMORY_BUDGET => self.request_memory_budget(request.arguments).await,
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool: {other}"),
                 None,
@@ -428,6 +489,47 @@ impl TethysServer {
             }
             Response::Rejected { message } => failed(format!("adding repos failed: {message}")),
             other => failed(format!("Tethys answered an add with {other:?}")),
+        })
+    }
+}
+
+impl TethysServer {
+    async fn request_memory_budget(
+        &self,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let args: RequestMemoryBudgetArgs = parse_args(arguments)?;
+        let request = Request::RequestMemoryBudget(RequestMemoryBudget {
+            from_workspace: self.from_workspace.clone(),
+            from_session: self.from_session.clone(),
+            gb: args.gb,
+            minutes: args.minutes,
+            reason: args.reason,
+        });
+
+        let response = match self.send(&request).await {
+            Ok(response) => response,
+            Err(e) => return Ok(failed(format!("budget request failed: {e}"))),
+        };
+
+        Ok(match response {
+            Response::BudgetApproved { gb, until } => {
+                CallToolResult::success(vec![ContentBlock::text(format!(
+                    "Approved: this session's memory budget is {gb} GB until {until}, \
+                     then the normal budget applies again."
+                ))])
+                .into()
+            }
+            Response::BudgetDenied => CallToolResult::success(vec![ContentBlock::text(
+                "Denied: the budget is unchanged. Don't rerun the job as it was; \
+                 narrow it, or ask Ryan how he'd like to proceed."
+                    .to_string(),
+            )])
+            .into(),
+            Response::Rejected { message } => {
+                failed(format!("budget request refused, nothing changed: {message}"))
+            }
+            other => failed(format!("Tethys answered a budget request with {other:?}")),
         })
     }
 }

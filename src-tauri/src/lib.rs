@@ -1,6 +1,7 @@
 mod agent;
 mod artifacts;
 mod branch_name;
+mod budget;
 mod child_env;
 mod agent_bin;
 mod agent_cmd;
@@ -177,6 +178,9 @@ pub fn run() {
                 idle::spawn(supervisor.clone(), store.clone(), path.clone());
                 strays::spawn(path.clone());
             }
+            let budgets = Arc::new(budget::Budgets::new(handle.clone()));
+            app.manage(budgets.clone());
+            budget::spawn(supervisor.clone(), budgets.clone());
 
             let socket_path = paths.hook_socket();
             let sup_for_listener = supervisor.clone();
@@ -215,6 +219,7 @@ pub fn run() {
                 registry: registry.clone(),
                 paths: paths.clone(),
                 queue: provision_queue,
+                budgets,
             };
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = mcp::listen(&mcp_socket, mcp_services).await {
@@ -279,6 +284,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_workspaces,
+            commands::list_budget_requests,
+            commands::decide_budget_request,
             commands::create_workspace,
             commands::add_repo_to_workspace,
             commands::delete_workspace,

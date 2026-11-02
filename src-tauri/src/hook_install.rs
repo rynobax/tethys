@@ -16,6 +16,9 @@ const EVENTS: &[(&str, &str)] = &[
     // There's no `PermissionResponse` hook; a gated tool finishing is the
     // first sign its prompt was answered, lagging by the tool's runtime.
     ("PostToolUse", "post-tool"),
+    // Only to carry a memory-budget notice: a killed command can end as a
+    // failed tool call, which skips PostToolUse.
+    ("PostToolUseFailure", "post-tool-failure"),
     ("Stop", "stop"),
     // A turn that dies to an API error would otherwise stay Working forever.
     ("StopFailure", "stop-failure"),

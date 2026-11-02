@@ -9,6 +9,7 @@ import {
 import * as api from "./ipc/commands";
 import type {
   Agent,
+  BudgetRequest,
   CreateWorkspaceArgs,
   Discrepancies,
   Folder,
@@ -86,6 +87,9 @@ function App() {
   );
   const [turnStates, setTurnStates] = useState<
     Map<WorkspaceId, { needsTurn: boolean; working: boolean }>
+  >(new Map());
+  const [budgetRequests, setBudgetRequests] = useState<
+    Map<WorkspaceId, BudgetRequest>
   >(new Map());
   // Cached so switching in doesn't flash "Dormant"; `null` means dormant.
   const [sessionByWorkspace, setSessionByWorkspace] = useState<
@@ -172,9 +176,23 @@ function App() {
     );
   });
 
+  const refreshBudgetRequests = useCallback(() => {
+    api
+      .listBudgetRequests()
+      .then((requests) =>
+        setBudgetRequests(new Map(requests.map((r) => [r.workspace_id, r]))),
+      )
+      .catch((e) => console.error("list_budget_requests failed:", e));
+  }, []);
+  useEffect(refreshBudgetRequests, [refreshBudgetRequests]);
+  useAppEvent("session:budget_requests_changed", refreshBudgetRequests);
+
+  // A budget request holds the agent's turn open while the probe reports it
+  // busy, so it can't ride on the turn state.
   const workspaceNeedsTurn = useCallback(
-    (w: Workspace): boolean => turnStates.get(w.id)?.needsTurn ?? false,
-    [turnStates],
+    (w: Workspace): boolean =>
+      budgetRequests.has(w.id) || (turnStates.get(w.id)?.needsTurn ?? false),
+    [turnStates, budgetRequests],
   );
 
   const workspaceWorking = useCallback(
@@ -627,6 +645,7 @@ function App() {
               }
               onRequestDelete={() => handleDelete(selected)}
               addRepoRun={addRepoRuns.get(selected.id) ?? null}
+              budgetRequest={budgetRequests.get(selected.id) ?? null}
               onStartAddRepo={(repoKeys) => startAddRepo(selected.id, repoKeys)}
               onDismissAddRepo={() => dismissAddRepo(selected.id)}
             />
@@ -768,6 +787,7 @@ function WorkspaceDetail({
   onNotesChange,
   onRequestDelete,
   addRepoRun,
+  budgetRequest,
   onStartAddRepo,
   onDismissAddRepo,
 }: {
@@ -778,6 +798,7 @@ function WorkspaceDetail({
   onNotesChange: (notes: string) => void;
   onRequestDelete: () => void;
   addRepoRun: AddRepoRun | null;
+  budgetRequest: BudgetRequest | null;
   onStartAddRepo: (repoKeys: string[]) => void;
   onDismissAddRepo: () => void;
 }) {
@@ -827,6 +848,15 @@ function WorkspaceDetail({
     void openSession();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meta?.id, meta?.agent_session_id, session?.id]);
+
+  const decideBudget = async (approve: boolean) => {
+    setError(null);
+    try {
+      await api.decideBudgetRequest(workspace.id, approve);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   const detachPr = async (repoKey: string, prNumber: number) => {
     setError(null);
@@ -952,6 +982,26 @@ function WorkspaceDetail({
             />
           )}
           {error && <div className="error-banner">{error}</div>}
+          {budgetRequest && (
+            <div className="budget-request-banner">
+              <span>
+                {agentLabel} asks for a {budgetRequest.gb} GB memory budget for{" "}
+                {budgetRequest.minutes} min: {budgetRequest.reason}
+              </span>
+              <div className="actions">
+                <button type="button" onClick={() => decideBudget(false)}>
+                  Deny
+                </button>
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() => decideBudget(true)}
+                >
+                  Approve
+                </button>
+              </div>
+            </div>
+          )}
           {session ? (
             <>
               {!session.running && (

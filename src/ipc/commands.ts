@@ -6,6 +6,7 @@ export { Channel, convertFileSrc };
 import type {
   Agent,
   Artifact,
+  BudgetRequest,
   CreateWorkspaceArgs,
   Discrepancies,
   Folder,
@@ -121,6 +122,12 @@ export const switchAgent = (
 
 export const acknowledgeSessionTurn = (workspaceId: WorkspaceId) =>
   invoke<void>("acknowledge_session_turn", { workspaceId });
+
+export const listBudgetRequests = () =>
+  invoke<BudgetRequest[]>("list_budget_requests");
+
+export const decideBudgetRequest = (workspaceId: WorkspaceId, approve: boolean) =>
+  invoke<void>("decide_budget_request", { workspaceId, approve });
 
 export const attachSession = (
   sessionId: string,

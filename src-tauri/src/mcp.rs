@@ -6,6 +6,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
 
 use crate::agent_cmd::toml_string;
+use crate::budget::{Budgets, Decision, OverrideRequest};
 use crate::error::{AppError, AppResult};
 use crate::github;
 use crate::handoff::Handoff;
@@ -16,7 +17,9 @@ use crate::provision_queue::ProvisionQueue;
 use crate::registry::RegistryLoad;
 use crate::store::Store;
 
-pub use tethys_mcp::{AddRepos, AddedRepo, CreateWorkspace, LinkPr, Request, Response};
+pub use tethys_mcp::{
+    AddRepos, AddedRepo, CreateWorkspace, LinkPr, Request, RequestMemoryBudget, Response,
+};
 
 const TOOL_TIMEOUT_SECS: u32 = 60 * 60;
 
@@ -130,6 +133,7 @@ pub struct McpServices {
     pub registry: Arc<RegistryLoad>,
     pub paths: Paths,
     pub queue: ProvisionQueue,
+    pub budgets: Arc<Budgets>,
 }
 
 pub async fn listen(socket_path: &Path, services: McpServices) -> AppResult<()> {
@@ -170,6 +174,7 @@ async fn serve_connection(mut stream: UnixStream, services: McpServices) -> AppR
         Request::CreateWorkspace(req) => create_workspace(&services, req).await,
         Request::LinkPr(req) => link_pr(&services, req).await,
         Request::AddRepos(req) => add_repos(&services, req).await,
+        Request::RequestMemoryBudget(req) => request_memory_budget(&services, req).await,
     };
     tethys_mcp::write_frame(&mut stream, &response).await?;
     Ok(())
@@ -242,6 +247,32 @@ async fn add_repos(services: &McpServices, req: AddRepos) -> Response {
                 message: e.to_string(),
             }
         }
+    }
+}
+
+async fn request_memory_budget(services: &McpServices, req: RequestMemoryBudget) -> Response {
+    let Some(session_id) = req.from_session else {
+        return Response::Rejected {
+            message: "this session predates budget requests; restart it to use them".into(),
+        };
+    };
+    let request = OverrideRequest {
+        workspace_id: req.from_workspace,
+        session_id,
+        gb: req.gb,
+        minutes: req.minutes,
+        reason: req.reason,
+    };
+    let gb = request.gb;
+    match services.budgets.request(request).await {
+        Ok(Decision::Approved { until }) => Response::BudgetApproved {
+            gb,
+            until: until.format("%H:%M").to_string(),
+        },
+        Ok(Decision::Denied) => Response::BudgetDenied,
+        Err(e) => Response::Rejected {
+            message: e.to_string(),
+        },
     }
 }
 
@@ -358,7 +389,7 @@ mod tests {
         assert_eq!(
             args[1],
             "--allowed-tools=mcp__tethys__create_workspace,mcp__tethys__link_pr,\
-             mcp__tethys__add_repos"
+             mcp__tethys__add_repos,mcp__tethys__request_memory_budget"
         );
     }
 }

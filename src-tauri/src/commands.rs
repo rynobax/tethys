@@ -12,6 +12,7 @@ use tauri::ipc::InvokeResponseBody;
 use crate::agent::Agent;
 use crate::artifacts::{Artifact, ArtifactKind, ArtifactStore};
 use crate::branch_name;
+use crate::budget::{Budgets, OverrideRequest};
 use crate::agent_bin::{self, AgentBins};
 use crate::error::{AppError, AppResult};
 use crate::github::poller::{AuthSnapshot, GithubPoller};
@@ -800,6 +801,20 @@ pub async fn get_session(
         })
         .await;
     Ok(session_id.and_then(|id| supervisor.info(&id)))
+}
+
+#[tauri::command]
+pub fn list_budget_requests(budgets: State<'_, Arc<Budgets>>) -> Vec<OverrideRequest> {
+    budgets.pending()
+}
+
+#[tauri::command]
+pub fn decide_budget_request(
+    budgets: State<'_, Arc<Budgets>>,
+    workspace_id: WorkspaceId,
+    approve: bool,
+) -> AppResult<()> {
+    budgets.decide(&workspace_id, approve)
 }
 
 #[tauri::command]

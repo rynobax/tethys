@@ -2,6 +2,21 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The events Tethys answers, each with the name Claude Code expects back in
+/// `hookEventName`. Any other event is fire-and-forget.
+const REPLYING_EVENTS: &[(&str, &str)] = &[
+    ("post-tool", "PostToolUse"),
+    ("post-tool-failure", "PostToolUseFailure"),
+    ("user-submit", "UserPromptSubmit"),
+];
+
+pub fn reply_event_name(event: &str) -> Option<&'static str> {
+    REPLYING_EVENTS
+        .iter()
+        .find(|(ours, _)| *ours == event)
+        .map(|(_, claude)| *claude)
+}
+
 /// All optional: an agent's schema shift must never break either side.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
