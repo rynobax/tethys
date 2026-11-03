@@ -120,12 +120,12 @@ impl TethysServer {
                 },
                 "as_child": {
                     "type": "boolean",
-                    "description": "Set true to make the new workspace a child of \
-                        the one you are in: Tethys draws it beneath yours, and when \
-                        Ryan deletes it you are sent a message naming it and the \
-                        state of its pull requests. Your workspace can't be deleted \
-                        while it has children. Leave it out for a workspace that \
-                        stands on its own.",
+                    "description": "Set true if you need to be notified when this \
+                        workspace finishes its work. Default to false if unsure. A \
+                        child is drawn beneath your workspace, and when Ryan deletes \
+                        it you are sent a message naming its branch and the state of \
+                        its pull requests. Your workspace can't be deleted while it \
+                        has children.",
                 },
             },
             "required": ["repos", "branch", "brief"],
