@@ -121,11 +121,7 @@ impl TethysServer {
                 "as_child": {
                     "type": "boolean",
                     "description": "Set true if you need to be notified when this \
-                        workspace finishes its work. Default to false if unsure. A \
-                        child is drawn beneath your workspace, and when Ryan deletes \
-                        it you are sent a message naming its branch and the state of \
-                        its pull requests. Your workspace can't be deleted while it \
-                        has children.",
+                        workspace finishes its work. Default to false if unsure.",
                 },
             },
             "required": ["repos", "branch", "brief"],
