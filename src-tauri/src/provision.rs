@@ -13,7 +13,8 @@ use crate::paths::Paths;
 use crate::provision_queue::ProvisionQueue;
 use crate::reconcile;
 use crate::registry::{self, Repo, RepoRegistry};
-use crate::setup;
+use crate::repo_env;
+use crate::setup::{self, ScriptKind};
 use crate::state::{RepoLink, Workspace, WorkspaceStatus};
 use crate::store::Store;
 use crate::workspace_doc;
@@ -77,6 +78,9 @@ pub async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLi
         )
         .await?;
 
+        let env = repo_env::render(ctx.repo, ctx.worktree_path);
+        repo_env::write_dotenv(ctx.worktree_path, &env, ctx.tx, &ctx.repo.key).await?;
+
         let mut link = RepoLink {
             repo_key: ctx.repo.key.clone(),
             worktree_path: ctx.worktree_path.to_path_buf(),
@@ -92,9 +96,11 @@ pub async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLi
             .as_ref()
             .filter(|s| !s.trim().is_empty())
         {
-            setup::run_setup_script(
+            setup::run_repo_script(
+                ScriptKind::Setup,
                 script,
                 ctx.worktree_path,
+                &env,
                 ctx.repo.setup_timeout_secs,
                 ctx.tx,
                 &ctx.repo.key,
@@ -576,6 +582,8 @@ mod tests {
             default_branch: None,
             default_setup_script: setup_script.map(String::from),
             setup_timeout_secs: Some(30),
+            teardown_script: None,
+            env: Default::default(),
             copy_files: Vec::new(),
             claude_notes: None,
             github_slug: None,
@@ -817,6 +825,51 @@ mod tests {
         .unwrap();
 
         assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "SECRET=1");
+    }
+
+    #[tokio::test]
+    async fn repo_env_lands_in_the_worktree_env_file_and_the_setup_script() {
+        let f = fixture();
+        let mut r = repo(
+            "api",
+            &f.origin,
+            Some("printf '%s' \"$COMPOSE_PROJECT_NAME\" > seen"),
+        );
+        r.copy_files = vec![".env".into()];
+        r.env = [("COMPOSE_PROJECT_NAME".into(), "{repo}-{workspace}".into())].into();
+
+        let first = f.worktree_root.join("ws-0").join("api");
+        provision_repo_worktree(RepoProvision {
+            repo: &repo("api", &f.origin, None),
+            worktree_path: &first,
+            branch: "feat/a",
+            paths: &f.paths,
+            tx: &JobTx::silent(),
+        })
+        .await
+        .unwrap();
+        std::fs::write(
+            f.paths.repo_clone_path("api").join(".env"),
+            "SECRET=1\nCOMPOSE_PROJECT_NAME=api\n",
+        )
+        .unwrap();
+
+        let wt = f.worktree_root.join("My-WS").join("api");
+        provision_repo_worktree(RepoProvision {
+            repo: &r,
+            worktree_path: &wt,
+            branch: "feat/b",
+            paths: &f.paths,
+            tx: &JobTx::silent(),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(wt.join(".env")).unwrap(),
+            "SECRET=1\nCOMPOSE_PROJECT_NAME=api-my-ws\n"
+        );
+        assert_eq!(std::fs::read_to_string(wt.join("seen")).unwrap(), "api-my-ws");
     }
 
     #[tokio::test]

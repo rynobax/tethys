@@ -229,6 +229,8 @@ mod tests {
             default_branch: None,
             default_setup_script: None,
             setup_timeout_secs: None,
+            teardown_script: None,
+            env: Default::default(),
             copy_files: Vec::new(),
             claude_notes: notes.map(str::to_string),
             github_slug: None,

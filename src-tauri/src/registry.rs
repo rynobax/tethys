@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use schemars::{schema_for, JsonSchema};
@@ -54,7 +55,13 @@ pub struct Repo {
     #[serde(default)]
     pub default_setup_script: Option<String>,
 
-    /// Setup script timeout in seconds. Defaults to 600.
+    /// Shell command run in a worktree just before purge removes it, to clean
+    /// up what the worktree started outside itself (containers, volumes,
+    /// images). A failure is logged and the purge carries on.
+    #[serde(default)]
+    pub teardown_script: Option<String>,
+
+    /// Timeout in seconds for the setup and teardown scripts. Defaults to 600.
     #[serde(default)]
     pub setup_timeout_secs: Option<u64>,
 
@@ -63,6 +70,16 @@ pub struct Repo {
     /// destinations left alone; absolute paths and `..` are rejected.
     #[serde(default)]
     pub copy_files: Vec<String>,
+
+    /// Variables written into each new worktree's `.env` (replacing any line
+    /// for the same key) and exported to its setup and teardown scripts.
+    /// Values may use `{workspace}` (the workspace directory name, lowercased,
+    /// with anything but `a-z0-9_-` turned into `-`) and `{repo}` (this key).
+    /// The usual one is `COMPOSE_PROJECT_NAME = "{repo}-{workspace}"`, without
+    /// which every worktree's Compose project is named after its folder, which
+    /// is the repo key in every workspace.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 
     /// Markdown rendered verbatim into the generated `CLAUDE.md` of every
     /// workspace with this repo: local-setup context you'd otherwise re-explain
@@ -103,6 +120,13 @@ impl RegistryLoad {
                         return RegistryLoad::Invalid {
                             path: path.to_path_buf(),
                             error: format!("worktree_root: {e}"),
+                        };
+                    }
+                    if let Err(e) = validate_repo_envs(&registry.repos) {
+                        warn!(error = %e, "repos.toml loaded but a repo's env is unusable");
+                        return RegistryLoad::Invalid {
+                            path: path.to_path_buf(),
+                            error: e,
                         };
                     }
                     populate_github_slugs(&mut registry);
@@ -162,6 +186,33 @@ impl RepoRegistry {
     pub fn plan_worktree_path(&self, workspace_dir: &str, repo_key: &str) -> PathBuf {
         self.worktree_root.join(workspace_dir).join(repo_key)
     }
+}
+
+/// Keys must be names a shell can export; values must fit on one `.env` line,
+/// single-quoted if need be.
+fn validate_repo_envs(repos: &[Repo]) -> Result<(), String> {
+    for repo in repos {
+        for (key, value) in &repo.env {
+            let mut chars = key.chars();
+            let valid_key = chars
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !valid_key {
+                return Err(format!(
+                    "repo '{}': env key '{key}' must be letters, digits and '_', not starting with a digit",
+                    repo.key
+                ));
+            }
+            if value.contains(['\n', '\r', '\'']) {
+                return Err(format!(
+                    "repo '{}': env value for '{key}' can't contain a newline or a single quote",
+                    repo.key
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Git refs already forbid every other path-unsafe character.

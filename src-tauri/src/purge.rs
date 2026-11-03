@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,7 +15,9 @@ use crate::job::JobTx;
 use crate::paths::Paths;
 use crate::pending_permissions;
 use crate::reconcile;
-use crate::registry::RegistryLoad;
+use crate::registry::{RegistryLoad, Repo};
+use crate::repo_env;
+use crate::setup::{self, ScriptKind};
 use crate::state::{SystemErrorEntry, Workspace};
 use crate::store::Store;
 
@@ -39,12 +42,16 @@ async fn purge_workspace(
     }
 
     let tx = JobTx::silent();
+    let reg = registry.require().ok();
 
     for link in &workspace.repo_links {
         let clone_path = paths.repo_clone_path(&link.repo_key);
 
         if !link.worktree_path.exists() {
             continue;
+        }
+        if let Some(repo) = reg.and_then(|r| r.find_repo(&link.repo_key)) {
+            run_teardown(repo, &link.worktree_path, &tx).await;
         }
         if !clone_path.exists() {
             tokio::fs::remove_dir_all(&link.worktree_path)
@@ -67,7 +74,7 @@ async fn purge_workspace(
         }
     }
 
-    if let Ok(reg) = registry.require() {
+    if let Some(reg) = reg {
         if let Some(parent) = workspace.root_buf() {
             if parent.exists() && reconcile::is_under(&reg.worktree_root, &parent) {
                 if let Err(e) = tokio::fs::remove_dir_all(&parent).await {
@@ -91,6 +98,38 @@ async fn purge_workspace(
             Ok(())
         })
         .await
+}
+
+/// Best-effort, like the permission capture: a broken teardown must not leave
+/// a workspace that can't be purged. The script gets the repo's rendered env,
+/// so it addresses this worktree's resources even if its `.env` never had them.
+async fn run_teardown(repo: &Repo, worktree_path: &Path, tx: &JobTx) {
+    let Some(script) = repo
+        .teardown_script
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return;
+    };
+    let env = repo_env::render(repo, worktree_path);
+    if let Err(e) = setup::run_repo_script(
+        ScriptKind::Teardown,
+        script,
+        worktree_path,
+        &env,
+        repo.setup_timeout_secs,
+        tx,
+        &repo.key,
+    )
+    .await
+    {
+        warn!(
+            repo = %repo.key,
+            worktree = %worktree_path.display(),
+            error = %e,
+            "teardown script failed; purging anyway"
+        );
+    }
 }
 
 pub struct Purger {

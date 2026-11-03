@@ -32,6 +32,7 @@ mod pty;
 mod purge;
 mod reconcile;
 mod registry;
+mod repo_env;
 mod scrollback;
 mod sessions;
 mod setup;

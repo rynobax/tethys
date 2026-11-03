@@ -127,6 +127,16 @@ A job that can sit in the queue for minutes is a job nobody should have to watch
 
 Deliberately absent: no persisted queue (quit with four waiting and they're gone, exactly like a workspace caught mid-provision), no priority, no way to reorder or cancel a queued job except by deleting the workspace, and no cap on how many can wait.
 
+## Per-worktree env
+
+Every worktree sits in a folder named after its repo (`<workspace>/nl-backend`), and Docker Compose names a project after the folder holding the compose file. So every workspace — and the main checkout — landed in one Compose project, sharing its postgres, volumes and built image. A `docker compose down -v` in one workspace deleted the main checkout's dev database on 2026-11-03.
+
+A repo's `[repo.env]` table in `repos.toml` is the fix, and it's generic rather than Compose-aware: Tethys knows nothing about Docker. Each pair is upserted into the worktree's `.env` right after `copy_files` (a line for the same key, copied from the clone, is replaced rather than duplicated) and exported to the setup script. Values take `{repo}` and `{workspace}`, the latter the workspace folder lowercased with anything outside `a-z0-9_-` turned into `-`, since Compose rejects capitals and dots in a project name. nl-backend sets `COMPOSE_PROJECT_NAME = "{repo}-{workspace}"`.
+
+A project per workspace means a pile of images and volumes per workspace, so a repo can also set a `teardown_script`, which purge runs in the worktree before removing it. Best-effort, like the permission capture: a failure is logged and the purge carries on. It gets the same rendered env, and rendering depends only on the worktree path, so the teardown addresses this workspace's project even when the `.env` never had the line. That matters because existing workspaces weren't backfilled: a `docker compose down -v` that fell back to the folder name would delete the shared project all over again. nl-backend's teardown spells the project out with `-p "${COMPOSE_PROJECT_NAME:?}"` for the same reason.
+
+Deliberately absent: a backfill of existing worktrees (their running stacks would be orphaned and their next run would start on an empty database), a teardown on provisioning rollback, and any isolation of nl-backend's fixed `container_name`s and host ports — so two workspaces still can't both `docker compose up`, though `docker compose run --rm django …` is fully isolated.
+
 ## Folders
 
 The sidebar is a partition: every workspace sits in exactly one folder, and `folder: None` *is* the **Default** folder — deliberately not a `Folder` at all, which is what makes it always present, unnameable, and impossible to delete or drag off the top. Folders are flat and inert: membership decides where a row is drawn and nothing else. Create none and the sidebar looks exactly as it did before they existed — headers appear only once a real folder does.
