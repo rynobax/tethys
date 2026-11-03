@@ -8,6 +8,7 @@ const REPLYING_EVENTS: &[(&str, &str)] = &[
     ("post-tool", "PostToolUse"),
     ("post-tool-failure", "PostToolUseFailure"),
     ("user-submit", "UserPromptSubmit"),
+    ("session-start", "SessionStart"),
 ];
 
 pub fn reply_event_name(event: &str) -> Option<&'static str> {
@@ -38,4 +39,7 @@ pub struct HookMessage {
     pub tool_command: Option<String>,
     /// `None` for sessions Tethys didn't spawn.
     pub spawn_token: Option<String>,
+    /// Claude's cross-session inbox, from `CLAUDE_CODE_MESSAGING_*`.
+    pub messaging_socket: Option<String>,
+    pub messaging_token: Option<String>,
 }

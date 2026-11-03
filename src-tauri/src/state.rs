@@ -50,10 +50,14 @@ pub struct Workspace {
     pub status: WorkspaceStatus,
     #[serde(default)]
     pub notes: String,
-    /// The frontend decides whether it counts; clear it only where the id
-    /// stops existing.
+    /// Set only by an agent's `as_child` handoff. Cleared where the id stops
+    /// existing; the frontend draws a child whose parent is gone at top level.
     #[serde(default)]
-    pub blocked_by: Option<WorkspaceId>,
+    pub parent: Option<WorkspaceId>,
+    /// News about this workspace's children its session hasn't been given
+    /// yet, oldest first.
+    #[serde(default)]
+    pub child_events: Vec<String>,
     /// Oldest first.
     #[serde(default)]
     pub artifacts: Vec<Artifact>,
@@ -164,6 +168,16 @@ pub struct AgentSessionMeta {
     /// The user's last keystroke or the agent's last hook, whichever is later.
     #[serde(default)]
     pub last_active_at: Option<DateTime<Utc>>,
+    /// Claude's cross-session inbox, reported by every hook. Persisted
+    /// because a reattached session fires no SessionStart.
+    #[serde(default)]
+    pub inbox: Option<Inbox>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Inbox {
+    pub socket: PathBuf,
+    pub token: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -199,7 +213,8 @@ impl Workspace {
             folder,
             status: WorkspaceStatus::Creating,
             notes: String::new(),
-            blocked_by: None,
+            parent: None,
+            child_events: Vec::new(),
             artifacts: Vec::new(),
         }
     }
@@ -293,31 +308,13 @@ impl AppState {
         self.workspaces.iter_mut().find(|w| w.id == id)
     }
 
-    /// The hop limit lets a hand-edited `state.json` that already holds a
-    /// cycle terminate the walk.
-    pub fn blocker_would_cycle(&self, workspace_id: &str, blocker_id: &str) -> bool {
-        if workspace_id == blocker_id {
-            return true;
-        }
-        let mut cursor = Some(blocker_id);
-        for _ in 0..self.workspaces.len() + 1 {
-            let Some(id) = cursor else { return false };
-            if id == workspace_id {
-                return true;
-            }
-            cursor = self
-                .find_workspace(id)
-                .and_then(|w| w.blocked_by.as_deref());
-        }
-        // Already cyclic.
-        true
-    }
-
-    /// A missing workspace differs from everything, erring towards refusing
-    /// a blocker link.
-    pub fn folders_differ(&self, a: &str, b: &str) -> bool {
-        let folder_of = |id: &str| self.find_workspace(id).map(|w| w.folder.clone());
-        folder_of(a) != folder_of(b)
+    /// Soft-deleted children don't count: waiting out their grace window to
+    /// delete the parent would be pointless.
+    pub fn live_children(&self, parent_id: &str) -> usize {
+        self.workspaces
+            .iter()
+            .filter(|w| w.parent.as_deref() == Some(parent_id) && w.deleted_at.is_none())
+            .count()
     }
 
     pub fn find_folder_mut(&mut self, id: &str) -> Option<&mut Folder> {
@@ -351,10 +348,10 @@ impl AppState {
         moved
     }
 
-    pub fn clear_links_to(&mut self, blocker_id: &str) {
+    pub fn orphan_children_of(&mut self, parent_id: &str) {
         for ws in &mut self.workspaces {
-            if ws.blocked_by.as_deref() == Some(blocker_id) {
-                ws.blocked_by = None;
+            if ws.parent.as_deref() == Some(parent_id) {
+                ws.parent = None;
             }
         }
     }
@@ -389,7 +386,8 @@ mod tests {
             folder: None,
             status: WorkspaceStatus::Ready,
             notes: String::new(),
-            blocked_by: None,
+            parent: None,
+            child_events: Vec::new(),
             artifacts: Vec::new(),
         }
     }
@@ -404,6 +402,7 @@ mod tests {
             notification_type: None,
             turn_acknowledged: false,
             last_active_at: None,
+            inbox: None,
         }
     }
 
@@ -556,11 +555,11 @@ mod tests {
     }
 
 
-    fn blocking_state(links: &[(&str, Option<&str>)]) -> AppState {
+    fn family(members: &[(&str, Option<&str>, bool)]) -> AppState {
         AppState {
-            workspaces: links
+            workspaces: members
                 .iter()
-                .map(|(id, blocker)| {
+                .map(|(id, parent, deleted)| {
                     let mut ws = Workspace::draft(
                         (*id).into(),
                         format!("branch/{id}"),
@@ -569,7 +568,8 @@ mod tests {
                         Origin::Ui,
                         None,
                     );
-                    ws.blocked_by = blocker.map(str::to_string);
+                    ws.parent = parent.map(str::to_string);
+                    ws.deleted_at = deleted.then(Utc::now);
                     ws
                 })
                 .collect(),
@@ -578,38 +578,18 @@ mod tests {
     }
 
     #[test]
-    fn a_workspace_cannot_block_itself() {
-        let state = blocking_state(&[("a", None)]);
-        assert!(state.blocker_would_cycle("a", "a"));
+    fn soft_deleted_children_do_not_hold_up_their_parent() {
+        let state = family(&[("p", None, false), ("a", Some("p"), true), ("b", Some("p"), false)]);
+        assert_eq!(state.live_children("p"), 1);
+        assert_eq!(state.live_children("b"), 0);
     }
 
     #[test]
-    fn an_unrelated_blocker_is_allowed() {
-        // a <- b
-        let state = blocking_state(&[("a", None), ("b", Some("a")), ("c", None)]);
-        assert!(!state.blocker_would_cycle("c", "b"));
-    }
-
-    #[test]
-    fn a_blocker_downstream_of_the_target_would_cycle() {
-        // a <- b <- c
-        let state = blocking_state(&[("a", None), ("b", Some("a")), ("c", Some("b"))]);
-        assert!(state.blocker_would_cycle("a", "c"));
-        assert!(state.blocker_would_cycle("a", "b"));
-    }
-
-    #[test]
-    fn a_preexisting_cycle_does_not_hang_the_walk() {
-        let state = blocking_state(&[("a", Some("b")), ("b", Some("a")), ("c", None)]);
-        assert!(state.blocker_would_cycle("c", "a"));
-    }
-
-    #[test]
-    fn clearing_links_drops_every_dependent() {
-        let mut state = blocking_state(&[("a", None), ("b", Some("a")), ("c", Some("a"))]);
-        state.clear_links_to("a");
-        assert_eq!(state.workspaces[1].blocked_by, None);
-        assert_eq!(state.workspaces[2].blocked_by, None);
+    fn orphaning_drops_every_child_link() {
+        let mut state = family(&[("p", None, false), ("a", Some("p"), false), ("b", Some("p"), true)]);
+        state.orphan_children_of("p");
+        assert_eq!(state.workspaces[1].parent, None);
+        assert_eq!(state.workspaces[2].parent, None);
     }
 
     #[test]
@@ -702,19 +682,6 @@ mod tests {
             ],
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn default_folder_counts_as_a_folder_for_blocking() {
-        let s = folder_state(&[("a", None), ("b", None), ("c", Some("f1"))]);
-        assert!(!s.folders_differ("a", "b"));
-        assert!(s.folders_differ("a", "c"));
-    }
-
-    #[test]
-    fn a_missing_workspace_differs_from_everything() {
-        let s = folder_state(&[("a", None)]);
-        assert!(s.folders_differ("a", "ghost"));
     }
 
     #[test]

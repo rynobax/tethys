@@ -111,8 +111,8 @@ export interface Workspace {
   folder: FolderId | null;
   status: WorkspaceStatus;
   notes: string;
-  /** Whether this counts as blocked is `workspaceTree`'s call, not this field's. */
-  blocked_by: WorkspaceId | null;
+  /** Whether it nests is `workspaceTree`'s call, not this field's. */
+  parent: WorkspaceId | null;
 }
 
 export interface SystemErrorEntry {

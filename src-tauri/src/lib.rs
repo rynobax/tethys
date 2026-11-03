@@ -2,6 +2,7 @@ mod agent;
 mod artifacts;
 mod branch_name;
 mod budget;
+mod child_events;
 mod child_env;
 mod agent_bin;
 mod agent_cmd;
@@ -298,7 +299,6 @@ pub fn run() {
             commands::reorder_folders,
             commands::move_workspaces_to_folder,
             commands::reorder_workspaces,
-            commands::set_workspace_blocker,
             commands::run_purge_now,
             commands::list_system_errors,
             commands::dismiss_system_error,

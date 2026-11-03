@@ -88,7 +88,7 @@ impl Handoff {
 
         let id = uuid::Uuid::new_v4().to_string();
         // The caller's binary, so work can't leave a `claude-hipaa` workspace.
-        let draft = Workspace::draft(
+        let mut draft = Workspace::draft(
             id.clone(),
             branch.clone(),
             caller.agent,
@@ -99,30 +99,22 @@ impl Handoff {
             },
             caller.folder.clone(),
         );
-        // Same mutation as the insert, so the caller never points at a missing
-        // row.
-        let blocks_caller = req.blocks_caller;
-        let caller_id = caller.id.clone();
+        if req.as_child {
+            draft.parent = Some(caller.id.clone());
+        }
         self.store
             .mutate(|s| {
-                s.workspaces.insert(0, draft.clone());
-                if blocks_caller {
-                    if let Some(ws) = s.find_workspace_mut(&caller_id) {
-                        ws.blocked_by = Some(draft.id.clone());
-                    }
-                }
+                s.workspaces.insert(0, draft);
                 Ok(())
             })
             .await?;
         self.store.notify_changed(&id);
-        if blocks_caller {
-            self.store.notify_changed(&caller.id);
-        }
 
         info!(
             workspace = %id,
             branch = %branch,
             from_workspace = %caller.id,
+            as_child = req.as_child,
             repos = selected.len(),
             "handoff accepted"
         );

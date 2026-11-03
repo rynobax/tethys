@@ -5,11 +5,8 @@ pub enum AppError {
     #[error("workspace not found: {0}")]
     WorkspaceNotFound(String),
 
-    #[error("that would make the two workspaces wait on each other")]
-    BlockerWouldCycle,
-
-    #[error("a workspace can only wait on one in the same folder")]
-    BlockerInAnotherFolder,
+    #[error("delete its {0} child workspace(s) first")]
+    HasChildren(usize),
 
     #[error("folder not found: {0}")]
     FolderNotFound(String),

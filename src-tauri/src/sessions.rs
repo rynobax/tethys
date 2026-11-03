@@ -19,7 +19,7 @@ use crate::agent_cmd;
 use crate::hook_listener::HookMessage;
 use crate::mcp::McpLaunch;
 use crate::pty::{OnExit, PtyProcess, PtySpawn, Ring};
-use crate::state::{AgentSessionMeta, SessionRuntimeState, WorkspaceId};
+use crate::state::{AgentSessionMeta, Inbox, SessionRuntimeState, WorkspaceId};
 use crate::store::Store;
 use crate::turn::{TurnChanged, TurnSignal, TurnState, TurnTracker};
 use crate::tmux;
@@ -577,6 +577,16 @@ impl SessionSupervisor {
         let transcript_path = msg.transcript_path.as_deref().map(PathBuf::from);
         let workspace_id = pending.workspace_id.clone();
         let session_id = pending.session_id.clone();
+        // Only from the hook its own spawn token matched: a `claude` run inside
+        // the session shares its cwd but has an inbox of its own.
+        let inbox = msg
+            .messaging_socket
+            .as_deref()
+            .zip(msg.messaging_token.clone())
+            .map(|(socket, token)| Inbox {
+                socket: PathBuf::from(socket),
+                token,
+            });
 
         let update = self
             .store
@@ -586,6 +596,7 @@ impl SessionSupervisor {
                 };
                 session.agent_session_id = Some(agent_session_id.clone());
                 session.transcript_path = transcript_path.clone();
+                session.inbox = inbox;
                 Ok(true)
             })
             .await;
@@ -685,10 +696,16 @@ impl SessionSupervisor {
             .push(notice);
     }
 
-    /// Claude only: codex's hooks haven't been checked for a way to pass
-    /// context back, so its notices wait until the session is forgotten.
-    pub async fn take_budget_notices(&self, msg: &HookMessage) -> Option<String> {
-        if self.budget_notices.lock().unwrap().is_empty() {
+    /// What a replying hook hands back as context: budget notices and child
+    /// events. Claude only: codex's hooks haven't been checked for a way to
+    /// pass context back, so its notices wait until the session is forgotten.
+    pub async fn take_hook_reply(&self, msg: &HookMessage) -> Option<String> {
+        let nothing_waiting = self.budget_notices.lock().unwrap().is_empty()
+            && self
+                .store
+                .read(|s| s.workspaces.iter().all(|w| w.child_events.is_empty()))
+                .await;
+        if nothing_waiting {
             return None;
         }
         let (ws_id, sess_id) = self.resolve_session(msg).await?;
@@ -699,8 +716,10 @@ impl SessionSupervisor {
         if agent != Agent::Claude {
             return None;
         }
-        let notices = self.budget_notices.lock().unwrap().remove(&sess_id)?;
-        Some(notices.join("\n\n"))
+        let notices = self.budget_notices.lock().unwrap().remove(&sess_id);
+        let events = crate::child_events::take_for_reply(&self.store, &ws_id).await;
+        let parts: Vec<String> = notices.into_iter().flatten().chain(events).collect();
+        (!parts.is_empty()).then(|| parts.join("\n\n"))
     }
 }
 
@@ -1031,6 +1050,7 @@ pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
         notification_type: None,
         turn_acknowledged: false,
         last_active_at: Some(Utc::now()),
+        inbox: None,
     };
     req.store
         .update_workspace(req.workspace_id, |ws| {

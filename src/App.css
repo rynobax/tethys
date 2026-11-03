@@ -131,14 +131,14 @@ html,
   background: var(--accent);
 }
 
-.workspace-list > li.is-blocked {
+.workspace-list > li.is-child {
   margin-left: calc(var(--depth, 1) * 14px);
 }
 
 /* Stops at -7px, where the selection bar begins, so the two sit side by side.
    The arm is pinned to the top, not the centre, to meet the branch name with
    or without a PR line. */
-.workspace-list > li.is-blocked::after {
+.workspace-list > li.is-child::after {
   content: "";
   position: absolute;
   left: -15px;
@@ -1767,7 +1767,6 @@ li.is-dragging {
   position: fixed;
   z-index: 200;
   min-width: 160px;
-  /* The blocker picker expands inline, past the estimated height. */
   max-height: calc(100vh - 16px);
   overflow-y: auto;
   background: var(--bg);
@@ -1797,37 +1796,6 @@ li.is-dragging {
 .context-menu button.danger {
   color: var(--danger);
 }
-.context-menu-picker {
-  display: flex;
-  flex-direction: column;
-  max-height: 240px;
-  overflow-y: auto;
-  margin: 2px 0 2px 10px;
-  padding-left: 4px;
-  border-left: 1px solid var(--border);
-}
-.context-menu-picker button {
-  font-family: "SF Mono", ui-monospace, monospace;
-  font-size: 11px;
-  padding: 4px 8px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 220px;
-}
-.context-menu-picker button.is-current {
-  color: var(--accent);
-}
-.context-menu button .disclosure {
-  display: inline-block;
-  width: 10px;
-  margin-right: 4px;
-  transition: transform 0.12s ease;
-}
-.context-menu button .disclosure.open {
-  transform: rotate(90deg);
-}
-
 .context-menu button:disabled {
   cursor: default;
   opacity: 0.5;

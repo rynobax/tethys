@@ -63,14 +63,6 @@ export const showPrView = (
 
 export const hidePrView = () => invoke<void>("hide_pr_view");
 
-export const setWorkspaceBlocker = (
-  workspaceId: WorkspaceId,
-  blockerId: WorkspaceId | null,
-) =>
-  invoke<void>("set_workspace_blocker", {
-    args: { workspace_id: workspaceId, blocker_id: blockerId },
-  });
-
 export const openInVscode = (id: WorkspaceId) =>
   invoke<void>("open_in_vscode", { id });
 

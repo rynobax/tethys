@@ -35,14 +35,14 @@ _Avoid_: Tag, label, group
 **Default Folder**:
 Where a workspace sits when the user hasn't filed it anywhere. Always present, and not named by the user the way the folders they create are. New workspaces land wherever the user picks; a handoff lands in the same folder as the session that asked for it.
 
-### Blocking
+### Children
 
-**Blocker**:
-The workspace another workspace is waiting on before its own work can continue. Always declared — by the user, or by an agent at handoff — never inferred from branch or PR topology.
-_Avoid_: Dependency, upstream, parent
+**Child**:
+A workspace an agent handed work to and asked to keep track of, drawn beneath the workspace that made it. When the user deletes it, that workspace's session is told, along with what became of its pull requests. Every child is a Handoff; not every Handoff is a child.
+_Avoid_: Sub-workspace, blocker, dependent
 
-**Blocked**:
-A workspace that has a blocker: at most one at a time, though one blocker can hold up several workspaces. It stops being blocked once its blocker leaves the sidebar, ends up in a different folder, or the link is cleared.
+**Parent**:
+The workspace a child was handed out from. It can't be deleted while any of its children are still live, and it hears only about its own children, not theirs.
 
 ### Lifecycle
 

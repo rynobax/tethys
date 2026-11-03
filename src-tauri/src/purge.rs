@@ -87,7 +87,7 @@ async fn purge_workspace(
     store
         .mutate(|s| {
             s.workspaces.retain(|w| w.id != id);
-            s.clear_links_to(&id);
+            s.orphan_children_of(&id);
             Ok(())
         })
         .await

@@ -55,6 +55,8 @@ fn run() -> io::Result<()> {
         tool_file_path: input.tool_input.as_ref().and_then(|t| t.file_path.clone()),
         tool_command: input.tool_input.and_then(|t| t.command),
         spawn_token: spawn_token.or_else(|| env::var("TETHYS_SPAWN_TOKEN").ok()),
+        messaging_socket: env::var("CLAUDE_CODE_MESSAGING_SOCKET").ok(),
+        messaging_token: env::var("CLAUDE_CODE_MESSAGING_TOKEN").ok(),
     };
 
     let socket_path = socket_path()?;

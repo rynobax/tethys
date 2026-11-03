@@ -106,6 +106,7 @@ mod tests {
             notification_type: None,
             turn_acknowledged: false,
             last_active_at,
+            inbox: None,
         }
     }
 

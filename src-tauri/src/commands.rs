@@ -381,9 +381,14 @@ pub async fn add_repo_to_workspace(
 pub async fn delete_workspace(
     app: AppHandle,
     store: State<'_, Arc<Store>>,
+    registry: State<'_, Arc<RegistryLoad>>,
     tmux_bin: State<'_, TmuxBin>,
     id: WorkspaceId,
 ) -> AppResult<()> {
+    let children = store.read(|s| s.live_children(&id)).await;
+    if children > 0 {
+        return Err(AppError::HasChildren(children));
+    }
     let session_id: Option<String> = store
         .with_workspace(&id, |w| w.session.as_ref().map(|m| m.id.clone()))
         .await?;
@@ -393,15 +398,24 @@ pub async fn delete_workspace(
         tmux::kill_session(&tmux_bin.0, &sid);
     }
 
-    store
+    let deleted = store
         .update_workspace(&id, |ws| {
             ws.deleted_at = Some(Utc::now());
-            Ok(())
+            Ok(ws.clone())
         })
         .await?;
 
     info!(%id, "soft-deleted workspace");
     let _ = app.emit("system_status:changed", &());
+
+    // Fetching the child's PRs can take seconds; the delete shouldn't wait.
+    if deleted.parent.is_some() {
+        let store = store.inner().clone();
+        let registry = registry.inner().clone();
+        tauri::async_runtime::spawn(async move {
+            crate::child_events::child_deleted(&store, &registry, deleted).await;
+        });
+    }
     Ok(())
 }
 
@@ -568,7 +582,7 @@ pub async fn reorder_folders(
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct MoveWorkspacesToFolderArgs {
-    /// A whole blocker stack at once, so a move can't split one.
+    /// A parent with all its descendants, so a move can't split them.
     pub workspace_ids: Vec<WorkspaceId>,
     pub folder: Option<FolderId>,
 }
@@ -603,50 +617,6 @@ pub async fn move_workspaces_to_folder(
             Ok(())
         })
         .await
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct SetWorkspaceBlockerArgs {
-    pub workspace_id: WorkspaceId,
-    pub blocker_id: Option<WorkspaceId>,
-}
-
-#[tauri::command]
-pub async fn set_workspace_blocker(
-    store: State<'_, Arc<Store>>,
-    args: SetWorkspaceBlockerArgs,
-) -> AppResult<()> {
-    let SetWorkspaceBlockerArgs {
-        workspace_id,
-        blocker_id,
-    } = args;
-    let target = workspace_id.clone();
-    store
-        .mutate(|s| {
-            if !s.workspaces.iter().any(|w| w.id == workspace_id) {
-                return Err(AppError::WorkspaceNotFound(workspace_id.clone()));
-            }
-            if let Some(blocker) = &blocker_id {
-                if !s.workspaces.iter().any(|w| &w.id == blocker) {
-                    return Err(AppError::WorkspaceNotFound(blocker.clone()));
-                }
-                if s.blocker_would_cycle(&workspace_id, blocker) {
-                    return Err(AppError::BlockerWouldCycle);
-                }
-                // Nesting is per folder: a cross-folder link would never draw.
-                if s.folders_differ(&workspace_id, blocker) {
-                    return Err(AppError::BlockerInAnotherFolder);
-                }
-            }
-            if let Some(ws) = s.find_workspace_mut(&workspace_id) {
-                ws.blocked_by = blocker_id;
-            }
-            Ok(())
-        })
-        .await?;
-    store.notify_changed(&target);
-    Ok(())
 }
 
 /// Still respects the grace window.
@@ -770,7 +740,7 @@ pub async fn forget_workspace(
         .mutate(|s| {
             let before = s.workspaces.len();
             s.workspaces.retain(|w| w.id != id);
-            s.clear_links_to(&id);
+            s.orphan_children_of(&id);
             Ok(s.workspaces.len() < before)
         })
         .await?;

@@ -31,7 +31,7 @@ struct CreateWorkspaceArgs {
     branch: String,
     brief: String,
     #[serde(default)]
-    blocks_caller: bool,
+    as_child: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,14 +118,14 @@ impl TethysServer {
                         discover from the code. This is the only thing carried \
                         across — you cannot follow up.",
                 },
-                "blocks_caller": {
+                "as_child": {
                     "type": "boolean",
-                    "description": "Set true when you cannot continue until this \
-                        work lands. Marks the workspace you are in as waiting on \
-                        the new one, which shows up in Tethys as a nested row. \
-                        Purely a visual reminder — nothing is paused or gated, and \
-                        you will not be told when it clears. Leave it out for work \
-                        that runs alongside yours.",
+                    "description": "Set true to make the new workspace a child of \
+                        the one you are in: Tethys draws it beneath yours, and when \
+                        Ryan deletes it you are sent a message naming it and the \
+                        state of its pull requests. Your workspace can't be deleted \
+                        while it has children. Leave it out for a workspace that \
+                        stands on its own.",
                 },
             },
             "required": ["repos", "branch", "brief"],
@@ -151,7 +151,9 @@ impl TethysServer {
                  builds one workspace at a time, so a handoff asked for while others \
                  are still setting up waits its turn. You will \
                  not hear back from it, cannot read its progress, and cannot send it \
-                 anything further — so put everything it needs in the brief.\n\n\
+                 anything further — so put everything it needs in the brief. The \
+                 one exception is `as_child`, which tells you when the child is \
+                 deleted.\n\n\
                  Reach for it when work should proceed on its own branch, in \
                  parallel with what you are doing. It is the wrong tool for work \
                  belonging on the current branch, which you should just do.",
@@ -383,7 +385,7 @@ impl TethysServer {
             repos: args.repos,
             branch: args.branch,
             brief: args.brief,
-            blocks_caller: args.blocks_caller,
+            as_child: args.as_child,
         });
 
         let response = match self.send(&request).await {

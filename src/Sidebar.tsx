@@ -5,7 +5,6 @@ import {
   PointerSensor,
   closestCenter,
   pointerWithin,
-  useDraggable,
   useDroppable,
   useSensor,
   useSensors,
@@ -26,7 +25,6 @@ import { CSS } from "@dnd-kit/utilities";
 import type { Folder, FolderId, Workspace, WorkspaceId } from "./types";
 import { GithubChip } from "./GithubChip";
 import {
-  blockerCandidates,
   folderSections,
   linkPrEntries,
   type WorkspaceRow as TreeRow,
@@ -50,7 +48,6 @@ type Props = {
   onSetFolderCollapsed: (id: FolderId, collapsed: boolean) => void;
   onDelete: (ws: Workspace) => void;
   onClearTurn: (ws: Workspace) => void;
-  onSetBlocker: (ws: Workspace, blockerId: WorkspaceId | null) => void;
   workspaceNeedsTurn: (ws: Workspace) => boolean;
   workspaceWorking: (ws: Workspace) => boolean;
 };
@@ -63,7 +60,7 @@ const isHeaderId = (id: string) => id.startsWith(HEADER_PREFIX);
 const folderFromHeaderId = (id: string): FolderId | null =>
   id === DEFAULT_HEADER ? null : id.slice(HEADER_PREFIX.length);
 
-// A blocker stack drags as one so it can't be split across folders.
+// A parent drags with its children, which can't be dragged on their own.
 type Block = { rows: TreeRow[]; ids: WorkspaceId[] };
 
 type Section = { folder: Folder | null; blocks: Block[] };
@@ -109,7 +106,6 @@ export function Sidebar({
   onSetFolderCollapsed,
   onDelete,
   onClearTurn,
-  onSetBlocker,
   workspaceNeedsTurn,
   workspaceWorking,
 }: Props) {
@@ -121,16 +117,6 @@ export function Sidebar({
       })),
     [workspaces, folders],
   );
-
-  const rootOf = useMemo(() => {
-    const map = new Map<WorkspaceId, WorkspaceId>();
-    for (const section of sections) {
-      for (const block of section.blocks) {
-        for (const id of block.ids) map.set(id, block.ids[0]);
-      }
-    }
-    return map;
-  }, [sections]);
 
   const placed: PlacedBlock[] = useMemo(
     () =>
@@ -205,9 +191,7 @@ export function Sidebar({
   };
 
   const dropWorkspace = (draggedId: WorkspaceId, overId: string) => {
-    const root = rootOf.get(draggedId);
-    if (!root) return;
-    const from = placed.findIndex((p) => p.block.ids[0] === root);
+    const from = placed.findIndex((p) => p.block.ids[0] === draggedId);
     if (from < 0) return;
     const destination = folderAtTarget(overId);
     if (destination === undefined) return;
@@ -318,9 +302,10 @@ export function Sidebar({
                             onContextMenu={(x, y) => setMenu({ ws: w, x, y })}
                           />
                         ) : (
-                          <DraggableWorkspaceRow
+                          <WorkspaceRow
                             key={w.id}
                             {...rowProps(w)}
+                            isDragging={false}
                             depth={depth}
                             onSelect={() => onSelect(w.id)}
                             onContextMenu={(x, y) => setMenu({ ws: w, x, y })}
@@ -357,11 +342,12 @@ export function Sidebar({
           y={menu.y}
           workspace={menu.ws}
           hasTurn={workspaceNeedsTurn(menu.ws)}
-          blockerOptions={blockerCandidates(workspaces, menu.ws.id)}
+          liveChildren={
+            workspaces.filter((w) => w.parent === menu.ws.id).length
+          }
           onClose={() => setMenu(null)}
           onDelete={onDelete}
           onClearTurn={onClearTurn}
-          onSetBlocker={onSetBlocker}
         />
       )}
       {folderMenu && (
@@ -556,50 +542,6 @@ function SortableWorkspaceRow({
   );
 }
 
-// Not sortable: a blocked row's drag resolves to its blocker's stack.
-function DraggableWorkspaceRow({
-  workspace,
-  selected,
-  needsTurn,
-  working,
-  depth,
-  onSelect,
-  onContextMenu,
-}: {
-  workspace: Workspace;
-  selected: boolean;
-  needsTurn: boolean;
-  working: boolean;
-  depth: number;
-  onSelect: () => void;
-  onContextMenu: (x: number, y: number) => void;
-}) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } =
-    useDraggable({ id: workspace.id, data: { type: "workspace" } });
-
-  return (
-    <WorkspaceRow
-      workspace={workspace}
-      selected={selected}
-      needsTurn={needsTurn}
-      working={working}
-      isDragging={isDragging}
-      depth={depth}
-      onSelect={onSelect}
-      onContextMenu={onContextMenu}
-      dndProps={{
-        ref: setNodeRef,
-        style: {
-          transform: CSS.Translate.toString(transform),
-          opacity: isDragging ? 0 : undefined,
-        },
-        attributes,
-        listeners,
-      }}
-    />
-  );
-}
-
 type DndProps = {
   ref: (node: HTMLElement | null) => void;
   style: React.CSSProperties;
@@ -639,7 +581,7 @@ function WorkspaceRow({
       : "";
   const classes = [
     selected ? "selected" : "",
-    depth > 0 ? "is-blocked" : "",
+    depth > 0 ? "is-child" : "",
     isDragging ? "is-dragging" : "",
     status === "creating" || status === "queued" ? "pending" : "",
     status === "creation_failed" ? "creation-failed" : "",
@@ -765,25 +707,23 @@ function ContextMenu({
   y,
   workspace,
   hasTurn,
-  blockerOptions,
+  liveChildren,
   onClose,
   onDelete,
   onClearTurn,
-  onSetBlocker,
 }: {
   x: number;
   y: number;
   workspace: Workspace;
   hasTurn: boolean;
-  blockerOptions: Workspace[];
+  /** Mirrors the backend's refusal, so Delete can say why up front. */
+  liveChildren: number;
   onClose: () => void;
   onDelete: (ws: Workspace) => void;
   onClearTurn: (ws: Workspace) => void;
-  onSetBlocker: (ws: Workspace, blockerId: WorkspaceId | null) => void;
 }) {
   const ref = useDismissOnOutsideClick(onClose);
   const isReady = workspace.status.kind === "ready";
-  const [pickingBlocker, setPickingBlocker] = useState(false);
 
   const wrap = (fn: () => void) => () => {
     fn();
@@ -806,49 +746,17 @@ function ContextMenu({
           Clear notification
         </button>
       )}
-      {workspace.blocked_by && (
-        <button
-          type="button"
-          role="menuitem"
-          onClick={wrap(() => onSetBlocker(workspace, null))}
-        >
-          Clear blocker
-        </button>
-      )}
-      {blockerOptions.length > 0 && (
-        <button
-          type="button"
-          role="menuitem"
-          aria-expanded={pickingBlocker}
-          onClick={() => setPickingBlocker((v) => !v)}
-        >
-          <span className={`disclosure${pickingBlocker ? " open" : ""}`}>▸</span>
-          Blocked by…
-        </button>
-      )}
-      {pickingBlocker && (
-        <div className="context-menu-picker" role="group">
-          {blockerOptions.map((candidate) => (
-            <button
-              key={candidate.id}
-              type="button"
-              role="menuitem"
-              className={
-                candidate.id === workspace.blocked_by ? "is-current" : undefined
-              }
-              title={candidate.branch}
-              onClick={wrap(() => onSetBlocker(workspace, candidate.id))}
-            >
-              {candidate.branch}
-            </button>
-          ))}
-        </div>
-      )}
       {isReady && <div className="context-menu-sep" />}
       <button
         type="button"
         role="menuitem"
         className="danger"
+        disabled={liveChildren > 0}
+        title={
+          liveChildren > 0
+            ? `Has ${liveChildren} ${liveChildren === 1 ? "child" : "children"}`
+            : undefined
+        }
         onClick={wrap(() => onDelete(workspace))}
       >
         {workspace.status.kind === "creation_failed" ? "Dismiss" : "Delete"}

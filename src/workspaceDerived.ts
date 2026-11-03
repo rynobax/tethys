@@ -3,7 +3,6 @@ import type {
   GithubPrStatus,
   RepoLink,
   Workspace,
-  WorkspaceId,
 } from "./types";
 
 /** Several missed 45s poller ticks: polling is wedged or backed off. */
@@ -69,9 +68,9 @@ export function prGroups(entries: LinkPr[]): PrGroup[] {
 
 export type WorkspaceRow = { workspace: Workspace; depth: number };
 
-/** Blocked only if the blocker is among `workspaces`, so deleting or moving a
- *  blocker un-nests its dependents without touching `blocked_by`. Hence one
- *  call per folder. */
+/** Nested only if the parent is among `workspaces`, so a child whose parent
+ *  is soft-deleted or gone draws at top level without touching `parent`.
+ *  Children sit oldest first, the order they were handed out in. */
 function workspaceTree(workspaces: Workspace[]): WorkspaceRow[] {
   const present = new Set(workspaces.map((w) => w.id));
   const childrenOf = new Map<string, Workspace[]>();
@@ -79,9 +78,7 @@ function workspaceTree(workspaces: Workspace[]): WorkspaceRow[] {
 
   for (const w of workspaces) {
     const parent =
-      w.blocked_by && w.blocked_by !== w.id && present.has(w.blocked_by)
-        ? w.blocked_by
-        : null;
+      w.parent && w.parent !== w.id && present.has(w.parent) ? w.parent : null;
     if (parent) {
       const siblings = childrenOf.get(parent);
       if (siblings) siblings.push(w);
@@ -97,7 +94,10 @@ function workspaceTree(workspaces: Workspace[]): WorkspaceRow[] {
     if (seen.has(w.id)) return;
     seen.add(w.id);
     out.push({ workspace: w, depth });
-    for (const child of childrenOf.get(w.id) ?? []) walk(child, depth + 1);
+    const children = [...(childrenOf.get(w.id) ?? [])].sort((a, b) =>
+      a.created_at.localeCompare(b.created_at),
+    );
+    for (const child of children) walk(child, depth + 1);
   };
   for (const root of roots) walk(root, 0);
 
@@ -126,27 +126,4 @@ export function folderSections(
       rows: workspaceTree(members(folder.id)),
     })),
   ];
-}
-
-/** Same folder only, since nesting is only drawn within one. Bounded because
- *  `state.json` may already hold a cycle. */
-export function blockerCandidates(
-  workspaces: Workspace[],
-  workspaceId: WorkspaceId,
-): Workspace[] {
-  const byId = new Map(workspaces.map((w) => [w.id, w]));
-  const folder = byId.get(workspaceId)?.folder ?? null;
-  const waitsOnTarget = (start: WorkspaceId): boolean => {
-    let cursor: WorkspaceId | null = start;
-    for (let hops = 0; hops <= workspaces.length; hops++) {
-      if (!cursor) return false;
-      if (cursor === workspaceId) return true;
-      cursor = byId.get(cursor)?.blocked_by ?? null;
-    }
-    return true;
-  };
-  return workspaces.filter(
-    (w) =>
-      w.id !== workspaceId && w.folder === folder && !waitsOnTarget(w.id),
-  );
 }

@@ -88,21 +88,13 @@ impl Store {
 
         // Drafts from a previous run have lost their progress stream; the
         // reconciler handles anything they left on disk.
-        let pruned = initial
+        let before = initial.workspaces.len();
+        initial
             .workspaces
-            .iter()
-            .filter(|w| !matches!(w.status, WorkspaceStatus::Ready))
-            .map(|w| w.id.clone())
-            .collect::<Vec<_>>();
-        if !pruned.is_empty() {
-            info!(count = pruned.len(), "pruning non-Ready workspaces from state");
-            initial
-                .workspaces
-                .retain(|w| matches!(w.status, WorkspaceStatus::Ready));
-            // `blocks_caller` makes drafts legal blockers.
-            for id in &pruned {
-                initial.clear_links_to(id);
-            }
+            .retain(|w| matches!(w.status, WorkspaceStatus::Ready));
+        let pruned = before - initial.workspaces.len();
+        if pruned > 0 {
+            info!(count = pruned, "pruning non-Ready workspaces from state");
         }
 
         let missing_pages: usize = initial
@@ -415,7 +407,8 @@ mod tests {
             folder: None,
             status,
             notes: String::new(),
-            blocked_by: None,
+            parent: None,
+            child_events: Vec::new(),
             artifacts: Vec::new(),
         }
     }

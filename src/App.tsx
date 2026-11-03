@@ -491,17 +491,6 @@ function App() {
     }
   }, []);
 
-  const handleSetBlocker = useCallback(
-    async (workspace: Workspace, blockerId: WorkspaceId | null) => {
-      try {
-        await api.setWorkspaceBlocker(workspace.id, blockerId);
-      } catch (e) {
-        setError(`could not set blocker: ${String(e)}`);
-      }
-    },
-    [],
-  );
-
   const handleReorder = useCallback(async (ids: WorkspaceId[]) => {
     // The only repaint: reorders emit nothing.
     setWorkspaces((prev) => {
@@ -584,7 +573,6 @@ function App() {
             onSetFolderCollapsed={handleSetFolderCollapsed}
             onDelete={handleDelete}
             onClearTurn={handleClearTurn}
-            onSetBlocker={handleSetBlocker}
             workspaceNeedsTurn={workspaceNeedsTurn}
             workspaceWorking={workspaceWorking}
           />

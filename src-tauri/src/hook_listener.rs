@@ -73,7 +73,7 @@ async fn handle_connection(
     debug!(event = %msg.event, token = ?msg.spawn_token, "hook event received");
     // Before handling the event: the agent is blocked on this reply.
     if tethys_hook::reply_event_name(&msg.event).is_some() {
-        let reply = supervisor.take_budget_notices(&msg).await.unwrap_or_default();
+        let reply = supervisor.take_hook_reply(&msg).await.unwrap_or_default();
         stream.write_all(&(reply.len() as u32).to_be_bytes()).await?;
         stream.write_all(reply.as_bytes()).await?;
     }

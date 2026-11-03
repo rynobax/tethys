@@ -259,7 +259,8 @@ mod tests {
             folder: None,
             status: WorkspaceStatus::Ready,
             notes: "private scratchpad".into(),
-            blocked_by: None,
+            parent: None,
+            child_events: Vec::new(),
             artifacts: Vec::new(),
         }
     }

@@ -54,7 +54,7 @@ pub struct CreateWorkspace {
     pub branch: String,
     pub brief: String,
     #[serde(default)]
-    pub blocks_caller: bool,
+    pub as_child: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,7 +170,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_frame_without_blocks_caller_parses_as_non_blocking() {
+    fn a_frame_without_as_child_makes_a_top_level_workspace() {
         let raw = r#"{
             "op": "create_workspace",
             "from_workspace": "ws-1",
@@ -182,7 +182,7 @@ mod tests {
         else {
             panic!("must parse as a create_workspace request")
         };
-        assert!(!req.blocks_caller);
+        assert!(!req.as_child);
         assert_eq!(req.from_session, None);
     }
 
