@@ -88,6 +88,16 @@ fn server_init_args() -> Vec<String> {
             "terminal-overrides",
             "linux*:AX@,*:smcup@:rmcup@",
         ],
+        // tmux drops OSC 8 hyperlinks unless the client's terminal has the
+        // `hyperlinks` feature, which the default `xterm*` entry lacks — so a
+        // link Claude renders as text arrived as plain text. The rest of the
+        // array is tmux's default, restated for the same reason as above.
+        &[
+            "set-option",
+            "-g",
+            "terminal-features",
+            "xterm*:clipboard:ccolour:cstyle:focus:title:hyperlinks,screen*:title,rxvt*:ignorefkeys",
+        ],
     ];
     commands
         .iter()
