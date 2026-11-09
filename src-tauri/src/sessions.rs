@@ -609,6 +609,10 @@ impl SessionSupervisor {
                     source = msg.source.as_deref().unwrap_or("?"),
                     "correlated SessionStart hook",
                 );
+                // Through the inbox rather than this hook's reply: a SessionStart
+                // reply lands in context without starting a turn, so a parent
+                // resumed after its child went would sit on the news.
+                crate::child_events::deliver(&self.store, &workspace_id).await;
             }
             Ok(false) => warn!(
                 %session_id,

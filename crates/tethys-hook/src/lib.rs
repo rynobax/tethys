@@ -8,7 +8,6 @@ const REPLYING_EVENTS: &[(&str, &str)] = &[
     ("post-tool", "PostToolUse"),
     ("post-tool-failure", "PostToolUseFailure"),
     ("user-submit", "UserPromptSubmit"),
-    ("session-start", "SessionStart"),
 ];
 
 pub fn reply_event_name(event: &str) -> Option<&'static str> {
