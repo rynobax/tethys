@@ -1796,6 +1796,112 @@ li.is-dragging {
   text-transform: none;
 }
 
+.shipping-area {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 8px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.shipping-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.shipping-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 26px);
+  gap: 5px;
+}
+
+.shipping-tile {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.shipping-tile .gh-sq-icon,
+.shipping-tile .gh-state-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.shipping-tile-glyph {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.shipping-tile.tone-green {
+  background: rgba(46, 160, 67, 0.22);
+  color: #2ea043;
+}
+
+.shipping-tile.tone-yellow {
+  background: rgba(214, 178, 91, 0.26);
+  color: #c69327;
+}
+
+.shipping-tile.tone-gray,
+.shipping-tile.tone-shipped {
+  background: rgba(125, 125, 125, 0.15);
+  color: var(--muted);
+}
+
+.shipping-tile:hover {
+  filter: brightness(1.12);
+}
+
+.shipping-tile.selected {
+  border-color: var(--accent);
+}
+
+/* The agent is fixing something a Nudge asked about. */
+.shipping-tile.working::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #2fb84d;
+  animation: shipping-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes shipping-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.ship-picker-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.ship-picker-option:hover {
+  background: rgba(125, 125, 125, 0.16);
+}
+
 .sidebar-newfolder {
   padding: 4px 8px 8px;
   border-top: 1px solid var(--border);

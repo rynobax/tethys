@@ -97,6 +97,16 @@ export type WorkspaceStatus =
   | { kind: "creating" }
   | { kind: "creation_failed"; error: string };
 
+export interface PrRef {
+  repo_key: string;
+  number: number;
+}
+
+/** `null` on the workspace: still being worked on. */
+export type Shipment =
+  | { kind: "shipping"; prs: PrRef[]; since: string }
+  | { kind: "shipped"; at: string };
+
 export interface Workspace {
   id: WorkspaceId;
   branch: string;
@@ -113,6 +123,7 @@ export interface Workspace {
   notes: string;
   /** Whether it nests is `workspaceTree`'s call, not this field's. */
   parent: WorkspaceId | null;
+  shipment: Shipment | null;
 }
 
 export interface SystemErrorEntry {

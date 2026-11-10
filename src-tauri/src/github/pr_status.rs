@@ -48,10 +48,21 @@ pub struct Discovery {
     pub number: u32,
 }
 
+/// A tracked PR's status before and after a poll that meaningfully changed it.
+#[derive(Debug, Clone)]
+pub struct StatusTransition {
+    pub workspace_id: WorkspaceId,
+    pub repo_key: String,
+    pub number: u32,
+    pub old: Option<GithubPrStatus>,
+    pub new: Option<GithubPrStatus>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Applied {
     pub changed: Vec<PollResult>,
     pub discovered: Vec<Discovery>,
+    pub transitions: Vec<StatusTransition>,
 }
 
 impl PollResult {
@@ -549,9 +560,16 @@ pub fn apply_results(state: &mut AppState, results: &[PollResult]) -> Applied {
                 let meaningful = is_meaningful_change(tracked.status.as_ref(), status.as_ref());
                 // Stored even when unchanged: staleness should flag a wedged
                 // poller, not an idle PR.
-                tracked.status = status.clone();
+                let old = std::mem::replace(&mut tracked.status, status.clone());
                 if meaningful {
                     applied.changed.push(result.clone());
+                    applied.transitions.push(StatusTransition {
+                        workspace_id: result.workspace_id.clone(),
+                        repo_key: result.repo_key.clone(),
+                        number: *number,
+                        old,
+                        new: status.clone(),
+                    });
                 }
             }
         }

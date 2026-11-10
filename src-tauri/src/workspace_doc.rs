@@ -262,7 +262,8 @@ mod tests {
             status: WorkspaceStatus::Ready,
             notes: "private scratchpad".into(),
             parent: None,
-            child_events: Vec::new(),
+            pending_messages: Vec::new(),
+            shipment: None,
             artifacts: Vec::new(),
         }
     }

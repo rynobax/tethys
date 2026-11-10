@@ -54,10 +54,12 @@ pub struct Workspace {
     /// existing; the frontend draws a child whose parent is gone at top level.
     #[serde(default)]
     pub parent: Option<WorkspaceId>,
-    /// News about this workspace's children its session hasn't been given
-    /// yet, oldest first.
+    /// Messages for this workspace's session it hasn't been given yet, oldest
+    /// first: news of its children and Nudges.
+    #[serde(default, alias = "child_events")]
+    pub pending_messages: Vec<String>,
     #[serde(default)]
-    pub child_events: Vec<String>,
+    pub shipment: Option<Shipment>,
     /// Oldest first.
     #[serde(default)]
     pub artifacts: Vec<Artifact>,
@@ -105,6 +107,26 @@ pub enum Origin {
         #[serde(default)]
         from_session: Option<SessionId>,
     },
+}
+
+/// Where a workspace stands once its work is done. `None` on the workspace is
+/// the ordinary case, still being worked on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Shipment {
+    Shipping {
+        /// Never empty: emptied, the workspace stops Shipping.
+        prs: Vec<PrRef>,
+        since: DateTime<Utc>,
+    },
+    /// Every Shipping PR closed, merged or not; waiting to be deleted.
+    Shipped { at: DateTime<Utc> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrRef {
+    pub repo_key: String,
+    pub number: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,7 +236,8 @@ impl Workspace {
             status: WorkspaceStatus::Creating,
             notes: String::new(),
             parent: None,
-            child_events: Vec::new(),
+            pending_messages: Vec::new(),
+            shipment: None,
             artifacts: Vec::new(),
         }
     }
@@ -240,6 +263,21 @@ impl Workspace {
 
     pub fn has_link(&self, repo_key: &str) -> bool {
         self.link(repo_key).is_some()
+    }
+
+    pub fn tracked_pr(&self, pr: &PrRef) -> Option<&TrackedPr> {
+        self.link(&pr.repo_key)?.tracked(pr.number)
+    }
+
+    pub fn is_shipping(&self) -> bool {
+        matches!(self.shipment, Some(Shipment::Shipping { .. }))
+    }
+
+    pub fn shipping_prs(&self) -> &[PrRef] {
+        match &self.shipment {
+            Some(Shipment::Shipping { prs, .. }) => prs,
+            _ => &[],
+        }
     }
 
     /// A late hook from a session killed by `switch_agent` must not land on
@@ -387,7 +425,8 @@ mod tests {
             status: WorkspaceStatus::Ready,
             notes: String::new(),
             parent: None,
-            child_events: Vec::new(),
+            pending_messages: Vec::new(),
+            shipment: None,
             artifacts: Vec::new(),
         }
     }

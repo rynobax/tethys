@@ -10,6 +10,7 @@ pub const TOOL_CREATE_WORKSPACE: &str = "create_workspace";
 pub const TOOL_LINK_PR: &str = "link_pr";
 pub const TOOL_ADD_REPOS: &str = "add_repos";
 pub const TOOL_REQUEST_MEMORY_BUDGET: &str = "request_memory_budget";
+pub const TOOL_LEAVE_SHIPPING: &str = "leave_shipping";
 
 /// Bare, as codex grants them.
 pub const TOOL_NAMES: &[&str] = &[
@@ -17,6 +18,7 @@ pub const TOOL_NAMES: &[&str] = &[
     TOOL_LINK_PR,
     TOOL_ADD_REPOS,
     TOOL_REQUEST_MEMORY_BUDGET,
+    TOOL_LEAVE_SHIPPING,
 ];
 
 /// Qualified, as Claude's `--allowed-tools` wants them. An unlisted tool
@@ -26,6 +28,7 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "mcp__tethys__link_pr",
     "mcp__tethys__add_repos",
     "mcp__tethys__request_memory_budget",
+    "mcp__tethys__leave_shipping",
 ];
 
 pub const ENV_SOCKET: &str = "TETHYS_MCP_SOCKET";
@@ -43,6 +46,7 @@ pub enum Request {
     LinkPr(LinkPr),
     AddRepos(AddRepos),
     RequestMemoryBudget(RequestMemoryBudget),
+    LeaveShipping(LeaveShipping),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +95,15 @@ pub struct RequestMemoryBudget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaveShipping {
+    /// Also the workspace taken out of Shipping, as with `LinkPr`.
+    pub from_workspace: String,
+    #[serde(default)]
+    pub from_session: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddedRepo {
     pub repo_key: String,
     pub worktree_path: String,
@@ -122,6 +135,7 @@ pub enum Response {
         until: String,
     },
     BudgetDenied,
+    LeftShipping,
     Rejected {
         message: String,
     },

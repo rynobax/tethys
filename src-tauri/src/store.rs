@@ -408,7 +408,8 @@ mod tests {
             status,
             notes: String::new(),
             parent: None,
-            child_events: Vec::new(),
+            pending_messages: Vec::new(),
+            shipment: None,
             artifacts: Vec::new(),
         }
     }

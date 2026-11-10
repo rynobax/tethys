@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{Mutex, Notify};
 use tracing::{info, info_span, trace, warn, Instrument};
 
@@ -13,6 +13,7 @@ use crate::github::pr_status::{
 use crate::github::status::GithubPrStatus;
 use crate::github::GithubSlug;
 use crate::registry::RegistryLoad;
+use crate::shipping::{self, Shipper};
 use crate::state::AppState;
 use crate::store::Store;
 
@@ -49,6 +50,8 @@ pub struct AuthSnapshot {
 pub trait PollerEvents: Send + Sync + 'static {
     fn auth_changed(&self, snapshot: &AuthSnapshot);
     fn status_changed(&self, event: &Value);
+    /// A Shipping workspace has a Nudge queued.
+    fn nudged(&self, workspace_id: &str);
 }
 
 pub struct TauriEvents(pub AppHandle);
@@ -60,6 +63,15 @@ impl PollerEvents for TauriEvents {
 
     fn status_changed(&self, event: &Value) {
         let _ = self.0.emit("github:status_changed", event);
+    }
+
+    fn nudged(&self, workspace_id: &str) {
+        let Some(shipper) = self.0.try_state::<Arc<Shipper>>() else {
+            return;
+        };
+        let shipper = shipper.inner().clone();
+        let workspace_id = workspace_id.to_string();
+        tauri::async_runtime::spawn(async move { shipper.wake(&workspace_id).await });
     }
 }
 
@@ -269,9 +281,13 @@ impl GithubPoller {
         trace!(data = %data, "github graphql response");
         let parsed = parse_response(targets, &data);
 
-        let applied = self
+        let (applied, shipped) = self
             .store
-            .mutate(|s| Ok(apply_results(s, &parsed)))
+            .mutate(|s| {
+                let applied = apply_results(s, &parsed);
+                let reaction = shipping::react(s, &applied.transitions);
+                Ok((applied, reaction))
+            })
             .await
             .unwrap_or_default();
 
@@ -279,6 +295,12 @@ impl GithubPoller {
             if let Some(event) = result.event() {
                 self.events.status_changed(&event);
             }
+        }
+        for id in &shipped.moved {
+            self.store.notify_changed(id);
+        }
+        for id in &shipped.nudged {
+            self.events.nudged(id);
         }
         Ok(applied)
     }
@@ -436,6 +458,7 @@ mod tests {
             self.auth.lock().unwrap().push(snapshot.state.clone());
         }
         fn status_changed(&self, _event: &Value) {}
+        fn nudged(&self, _workspace_id: &str) {}
     }
 
     async fn store(notifier: Box<dyn crate::store::WorkspaceNotifier>) -> Arc<Store> {

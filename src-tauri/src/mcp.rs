@@ -18,7 +18,8 @@ use crate::registry::RegistryLoad;
 use crate::store::Store;
 
 pub use tethys_mcp::{
-    AddRepos, AddedRepo, CreateWorkspace, LinkPr, Request, RequestMemoryBudget, Response,
+    AddRepos, AddedRepo, CreateWorkspace, LeaveShipping, LinkPr, Request, RequestMemoryBudget,
+    Response,
 };
 
 const TOOL_TIMEOUT_SECS: u32 = 60 * 60;
@@ -175,6 +176,7 @@ async fn serve_connection(mut stream: UnixStream, services: McpServices) -> AppR
         Request::LinkPr(req) => link_pr(&services, req).await,
         Request::AddRepos(req) => add_repos(&services, req).await,
         Request::RequestMemoryBudget(req) => request_memory_budget(&services, req).await,
+        Request::LeaveShipping(req) => leave_shipping(&services, req).await,
     };
     tethys_mcp::write_frame(&mut stream, &response).await?;
     Ok(())
@@ -270,6 +272,28 @@ async fn request_memory_budget(services: &McpServices, req: RequestMemoryBudget)
             until: until.format("%H:%M").to_string(),
         },
         Ok(Decision::Denied) => Response::BudgetDenied,
+        Err(e) => Response::Rejected {
+            message: e.to_string(),
+        },
+    }
+}
+
+async fn leave_shipping(services: &McpServices, req: LeaveShipping) -> Response {
+    let left = services
+        .store
+        .update_workspace(&req.from_workspace, |ws| {
+            if !ws.is_shipping() {
+                return Err(AppError::Other("this workspace isn't Shipping".into()));
+            }
+            ws.shipment = None;
+            Ok(())
+        })
+        .await;
+    match left {
+        Ok(()) => {
+            info!(workspace = %req.from_workspace, reason = %req.reason, "agent took workspace out of shipping");
+            Response::LeftShipping
+        }
         Err(e) => Response::Rejected {
             message: e.to_string(),
         },
@@ -389,7 +413,8 @@ mod tests {
         assert_eq!(
             args[1],
             "--allowed-tools=mcp__tethys__create_workspace,mcp__tethys__link_pr,\
-             mcp__tethys__add_repos,mcp__tethys__request_memory_budget"
+             mcp__tethys__add_repos,mcp__tethys__request_memory_budget,\
+             mcp__tethys__leave_shipping"
         );
     }
 }

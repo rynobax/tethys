@@ -4,7 +4,7 @@ import { isStale } from "./workspaceDerived";
 
 type SquareTone = "green" | "yellow" | "red" | "gray";
 
-function CiIcon() {
+export function CiIcon() {
   return (
     <svg className="gh-sq-icon" viewBox="0 0 16 16" aria-hidden="true">
       <circle
@@ -27,7 +27,7 @@ function CiIcon() {
   );
 }
 
-function ReviewIcon() {
+export function ReviewIcon() {
   return (
     <svg className="gh-sq-icon" viewBox="0 0 16 16" aria-hidden="true">
       <path
@@ -86,7 +86,7 @@ function BugbotIcon() {
   );
 }
 
-function MergeQueueIcon() {
+export function MergeQueueIcon() {
   return (
     <svg className="gh-state-icon" viewBox="0 0 16 16" aria-hidden="true">
       <path
@@ -112,7 +112,7 @@ function MergeQueueIcon() {
 }
 
 /** Octicon git-merge. */
-function MergedIcon() {
+export function MergedIcon() {
   return (
     <svg className="gh-state-icon" viewBox="0 0 16 16" aria-hidden="true">
       <path

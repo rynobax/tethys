@@ -32,7 +32,9 @@ mod reconcile;
 mod registry;
 mod repo_env;
 mod scrollback;
+mod session_inbox;
 mod sessions;
+mod shipping;
 mod setup;
 mod shell;
 mod state;
@@ -201,6 +203,16 @@ pub fn run() {
             let mcp_launch = mcp::McpLaunch::resolve(&paths, &registry);
             app.manage::<Option<mcp::McpLaunch>>(mcp_launch.clone());
 
+            let shipper = Arc::new(shipping::Shipper {
+                store: store.clone(),
+                supervisor: supervisor.clone(),
+                tmux_bin: tmux_bin_path.clone().unwrap_or_default(),
+                agent_bins: agent_bins.clone(),
+                paths: paths.clone(),
+                mcp: mcp_launch.clone(),
+            });
+            app.manage(shipper);
+
             let handoff = Arc::new(handoff::Handoff {
                 store: store.clone(),
                 registry: registry.clone(),
@@ -317,6 +329,8 @@ pub fn run() {
             commands::start_agent_session,
             commands::switch_agent,
             commands::set_workspace_notes,
+            commands::start_shipping,
+            commands::stop_shipping,
             commands::list_artifacts,
             commands::dismiss_artifact,
             commands::open_artifact,

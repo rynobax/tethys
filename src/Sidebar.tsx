@@ -22,11 +22,22 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
-import type { Folder, FolderId, Workspace, WorkspaceId } from "./types";
-import { GithubChip } from "./GithubChip";
+import type { Folder, FolderId, PrRef, Workspace, WorkspaceId } from "./types";
+import {
+  CiIcon,
+  GithubChip,
+  MergedIcon,
+  MergeQueueIcon,
+  ReviewIcon,
+} from "./GithubChip";
 import {
   folderSections,
   linkPrEntries,
+  shippablePrs,
+  shippingPrs,
+  shippingSignal,
+  shippingSummary,
+  type ShippingSignal,
   type WorkspaceRow as TreeRow,
 } from "./workspaceDerived";
 
@@ -48,6 +59,8 @@ type Props = {
   onSetFolderCollapsed: (id: FolderId, collapsed: boolean) => void;
   onDelete: (ws: Workspace) => void;
   onClearTurn: (ws: Workspace) => void;
+  onStartShipping: (ws: Workspace, prs: PrRef[]) => void;
+  onStopShipping: (ws: Workspace) => void;
   workspaceNeedsTurn: (ws: Workspace) => boolean;
   workspaceWorking: (ws: Workspace) => boolean;
 };
@@ -106,16 +119,32 @@ export function Sidebar({
   onSetFolderCollapsed,
   onDelete,
   onClearTurn,
+  onStartShipping,
+  onStopShipping,
   workspaceNeedsTurn,
   workspaceWorking,
 }: Props) {
+  // Shipping and Shipped workspaces live in their own area, not the list.
+  const listed = useMemo(
+    () => workspaces.filter((w) => !w.shipment),
+    [workspaces],
+  );
+  const shipping = useMemo(
+    () => workspaces.filter((w) => w.shipment?.kind === "shipping"),
+    [workspaces],
+  );
+  const shipped = useMemo(
+    () => workspaces.filter((w) => w.shipment?.kind === "shipped"),
+    [workspaces],
+  );
+
   const sections: Section[] = useMemo(
     () =>
-      folderSections(workspaces, folders).map((s) => ({
+      folderSections(listed, folders).map((s) => ({
         folder: s.folder,
         blocks: cutIntoBlocks(s.rows),
       })),
-    [workspaces, folders],
+    [listed, folders],
   );
 
   const placed: PlacedBlock[] = useMemo(
@@ -150,10 +179,10 @@ export function Sidebar({
     if (!activeDrag) return;
     const stillThere =
       activeDrag.type === "workspace"
-        ? workspaces.some((w) => w.id === activeDrag.id)
+        ? listed.some((w) => w.id === activeDrag.id)
         : folders.some((f) => f.id === activeDrag.id);
     if (!stillThere) setActiveDrag(null);
-  }, [activeDrag, workspaces, folders]);
+  }, [activeDrag, listed, folders]);
 
   useEffect(() => {
     if (!activeDrag) return;
@@ -249,8 +278,10 @@ export function Sidebar({
   return (
     <>
       <ul className="workspace-list">
-        {workspaces.length === 0 && (
-          <li className="empty">No workspaces yet.</li>
+        {listed.length === 0 && (
+          <li className="empty">
+            {workspaces.length === 0 ? "No workspaces yet." : "Nothing in progress."}
+          </li>
         )}
         <DndContext
           sensors={sensors}
@@ -335,6 +366,14 @@ export function Sidebar({
           </DragOverlay>
         </DndContext>
       </ul>
+      <ShippingArea
+        shipping={shipping}
+        shipped={shipped}
+        selectedId={selectedId}
+        workspaceWorking={workspaceWorking}
+        onSelect={onSelect}
+        onContextMenu={(ws, x, y) => setMenu({ ws, x, y })}
+      />
       <NewFolderRow onCreate={onCreateFolder} />
       {menu && (
         <ContextMenu
@@ -348,6 +387,8 @@ export function Sidebar({
           onClose={() => setMenu(null)}
           onDelete={onDelete}
           onClearTurn={onClearTurn}
+          onStartShipping={onStartShipping}
+          onStopShipping={onStopShipping}
         />
       )}
       {folderMenu && (
@@ -711,6 +752,8 @@ function ContextMenu({
   onClose,
   onDelete,
   onClearTurn,
+  onStartShipping,
+  onStopShipping,
 }: {
   x: number;
   y: number;
@@ -721,20 +764,43 @@ function ContextMenu({
   onClose: () => void;
   onDelete: (ws: Workspace) => void;
   onClearTurn: (ws: Workspace) => void;
+  onStartShipping: (ws: Workspace, prs: PrRef[]) => void;
+  onStopShipping: (ws: Workspace) => void;
 }) {
   const ref = useDismissOnOutsideClick(onClose);
   const isReady = workspace.status.kind === "ready";
+  const candidates = shippablePrs(workspace);
+  const [picking, setPicking] = useState(false);
 
   const wrap = (fn: () => void) => () => {
     fn();
     onClose();
   };
 
+  if (picking) {
+    return (
+      <div
+        ref={ref}
+        className="context-menu"
+        style={menuPosition(x, y, 60 + candidates.length * 28)}
+        role="menu"
+      >
+        <ShipPicker
+          candidates={candidates}
+          onShip={(prs) => {
+            onStartShipping(workspace, prs);
+            onClose();
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div
       ref={ref}
       className="context-menu"
-      style={menuPosition(x, y, 110)}
+      style={menuPosition(x, y, 140)}
       role="menu"
     >
       {hasTurn && (
@@ -744,6 +810,38 @@ function ContextMenu({
           onClick={wrap(() => onClearTurn(workspace))}
         >
           Clear notification
+        </button>
+      )}
+      {isReady && !workspace.shipment && (
+        <button
+          type="button"
+          role="menuitem"
+          disabled={candidates.length === 0}
+          title={candidates.length === 0 ? "No open PRs" : undefined}
+          onClick={
+            candidates.length > 1
+              ? () => setPicking(true)
+              : wrap(() =>
+                  onStartShipping(
+                    workspace,
+                    candidates.map((c) => ({
+                      repo_key: c.repoKey,
+                      number: c.status.pr_number,
+                    })),
+                  ),
+                )
+          }
+        >
+          {candidates.length > 1 ? "Ship…" : "Ship"}
+        </button>
+      )}
+      {workspace.shipment && (
+        <button
+          type="button"
+          role="menuitem"
+          onClick={wrap(() => onStopShipping(workspace))}
+        >
+          {workspace.shipment.kind === "shipping" ? "Stop shipping" : "Move back"}
         </button>
       )}
       {isReady && <div className="context-menu-sep" />}
@@ -761,6 +859,190 @@ function ContextMenu({
       >
         {workspace.status.kind === "creation_failed" ? "Dismiss" : "Delete"}
       </button>
+    </div>
+  );
+}
+
+function ShipPicker({
+  candidates,
+  onShip,
+}: {
+  candidates: ReturnType<typeof shippablePrs>;
+  onShip: (prs: PrRef[]) => void;
+}) {
+  const key = (c: (typeof candidates)[number]) =>
+    `${c.repoKey}#${c.status.pr_number}`;
+  const [chosen, setChosen] = useState<Set<string>>(new Set());
+  const toggle = (k: string) =>
+    setChosen((prev) => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
+  return (
+    <>
+      <div className="context-menu-label">Which PRs are shipping</div>
+      {candidates.map((c) => (
+        <label key={key(c)} className="ship-picker-option">
+          <input
+            type="checkbox"
+            checked={chosen.has(key(c))}
+            onChange={() => toggle(key(c))}
+          />
+          {key(c)}
+        </label>
+      ))}
+      <div className="context-menu-sep" />
+      <button
+        type="button"
+        role="menuitem"
+        disabled={chosen.size === 0}
+        onClick={() =>
+          onShip(
+            candidates
+              .filter((c) => chosen.has(key(c)))
+              .map((c) => ({ repo_key: c.repoKey, number: c.status.pr_number })),
+          )
+        }
+      >
+        Ship
+      </button>
+    </>
+  );
+}
+
+const TILE_TONE: Record<ShippingSignal, "green" | "yellow" | "gray"> = {
+  ready: "green",
+  merge_queue: "green",
+  review: "yellow",
+  ci_failing: "yellow",
+  conflict: "yellow",
+  ci_pending: "gray",
+  unknown: "gray",
+};
+
+function SignalIcon({ signal }: { signal: ShippingSignal }) {
+  switch (signal) {
+    case "ready":
+      return <CheckIcon />;
+    case "merge_queue":
+      return <MergeQueueIcon />;
+    case "review":
+      return <ReviewIcon />;
+    case "ci_failing":
+    case "ci_pending":
+      return <CiIcon />;
+    case "conflict":
+      return <ConflictIcon />;
+    case "unknown":
+      return <span className="shipping-tile-glyph">?</span>;
+  }
+}
+
+function CheckIcon() {
+  return (
+    <svg className="gh-sq-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M3.5 8.5 L6.6 11.5 L12.5 4.8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ConflictIcon() {
+  return (
+    <svg className="gh-sq-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M8 2.2 L14.2 13.2 H1.8 Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8 6.4 V9.4"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+      <circle cx="8" cy="11.3" r="0.9" fill="currentColor" />
+    </svg>
+  );
+}
+
+function ShippingArea({
+  shipping,
+  shipped,
+  selectedId,
+  workspaceWorking,
+  onSelect,
+  onContextMenu,
+}: {
+  shipping: Workspace[];
+  shipped: Workspace[];
+  selectedId: WorkspaceId | null;
+  workspaceWorking: (ws: Workspace) => boolean;
+  onSelect: (id: WorkspaceId) => void;
+  onContextMenu: (ws: Workspace, x: number, y: number) => void;
+}) {
+  if (shipping.length === 0 && shipped.length === 0) return null;
+
+  const tile = (w: Workspace, tone: string, title: string, icon: React.ReactNode) => (
+    <button
+      key={w.id}
+      type="button"
+      className={[
+        "shipping-tile",
+        `tone-${tone}`,
+        w.id === selectedId ? "selected" : "",
+        workspaceWorking(w) ? "working" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      title={title}
+      onClick={() => onSelect(w.id)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onContextMenu(w, e.clientX, e.clientY);
+      }}
+    >
+      {icon}
+    </button>
+  );
+
+  return (
+    <div className="shipping-area">
+      {shipping.length > 0 && (
+        <section>
+          <div className="shipping-label">Shipping</div>
+          <div className="shipping-grid">
+            {shipping.map((w) => {
+              const prs = shippingPrs(w);
+              const signal = shippingSignal(prs);
+              return tile(
+                w,
+                TILE_TONE[signal],
+                shippingSummary(w, prs),
+                <SignalIcon signal={signal} />,
+              );
+            })}
+          </div>
+        </section>
+      )}
+      {shipped.length > 0 && (
+        <section>
+          <div className="shipping-label">Shipped</div>
+          <div className="shipping-grid">
+            {shipped.map((w) => tile(w, "shipped", w.branch, <MergedIcon />))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

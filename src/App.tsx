@@ -14,6 +14,7 @@ import type {
   Folder,
   FolderId,
   JobEvent,
+  PrRef,
   RegistryStatus,
   Repo,
   SessionInfo,
@@ -422,6 +423,25 @@ function App() {
     }
   }, []);
 
+  const handleStartShipping = useCallback(
+    async (workspace: Workspace, prs: PrRef[]) => {
+      try {
+        await api.startShipping(workspace.id, prs);
+      } catch (e) {
+        setError(`could not ship: ${String(e)}`);
+      }
+    },
+    [],
+  );
+
+  const handleStopShipping = useCallback(async (workspace: Workspace) => {
+    try {
+      await api.stopShipping(workspace.id);
+    } catch (e) {
+      setError(`could not stop shipping: ${String(e)}`);
+    }
+  }, []);
+
   // Folder writes emit nothing; local state is mirrored by hand.
   const handleCreateFolder = useCallback(async (name: string) => {
     try {
@@ -563,6 +583,8 @@ function App() {
             onSetFolderCollapsed={handleSetFolderCollapsed}
             onDelete={handleDelete}
             onClearTurn={handleClearTurn}
+            onStartShipping={handleStartShipping}
+            onStopShipping={handleStopShipping}
             workspaceNeedsTurn={workspaceNeedsTurn}
             workspaceWorking={workspaceWorking}
           />

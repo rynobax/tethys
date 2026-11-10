@@ -14,6 +14,7 @@ import type {
   GithubAuthSnapshot,
   GithubPrStatus,
   JobEvent,
+  PrRef,
   RegistryStatus,
   SessionInfo,
   SystemErrorEntry,
@@ -43,6 +44,15 @@ export const setWorkspaceNotes = (workspaceId: WorkspaceId, notes: string) =>
   invoke<void>("set_workspace_notes", {
     args: { workspace_id: workspaceId, notes },
   });
+
+/** An empty `prs` ships the workspace's only open PR. */
+export const startShipping = (workspaceId: WorkspaceId, prs: PrRef[]) =>
+  invoke<void>("start_shipping", {
+    args: { workspace_id: workspaceId, prs },
+  });
+
+export const stopShipping = (workspaceId: WorkspaceId) =>
+  invoke<void>("stop_shipping", { workspaceId });
 
 export const listArtifacts = (workspaceId: WorkspaceId) =>
   invoke<Artifact[]>("list_artifacts", { workspaceId });

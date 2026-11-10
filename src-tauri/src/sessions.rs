@@ -631,9 +631,9 @@ impl SessionSupervisor {
                     "correlated SessionStart hook",
                 );
                 // Through the inbox rather than this hook's reply: a SessionStart
-                // reply lands in context without starting a turn, so a parent
-                // resumed after its child went would sit on the news.
-                crate::child_events::deliver(&self.store, &workspace_id).await;
+                // reply lands in context without starting a turn, so a session
+                // resumed to hear something would sit on it.
+                crate::session_inbox::deliver(&self.store, &workspace_id).await;
             }
             Ok(false) => warn!(
                 %session_id,
@@ -721,14 +721,14 @@ impl SessionSupervisor {
             .push(notice);
     }
 
-    /// What a replying hook hands back as context: budget notices and child
-    /// events. Claude only: codex's hooks haven't been checked for a way to
+    /// What a replying hook hands back as context: budget notices and pending
+    /// messages. Claude only: codex's hooks haven't been checked for a way to
     /// pass context back, so its notices wait until the session is forgotten.
     pub async fn take_hook_reply(&self, msg: &HookMessage) -> Option<String> {
         let nothing_waiting = self.budget_notices.lock().unwrap().is_empty()
             && self
                 .store
-                .read(|s| s.workspaces.iter().all(|w| w.child_events.is_empty()))
+                .read(|s| s.workspaces.iter().all(|w| w.pending_messages.is_empty()))
                 .await;
         if nothing_waiting {
             return None;
@@ -742,7 +742,7 @@ impl SessionSupervisor {
             return None;
         }
         let notices = self.budget_notices.lock().unwrap().remove(&sess_id);
-        let events = crate::child_events::take_for_reply(&self.store, &ws_id).await;
+        let events = crate::session_inbox::take_for_reply(&self.store, &ws_id).await;
         let parts: Vec<String> = notices.into_iter().flatten().chain(events).collect();
         (!parts.is_empty()).then(|| parts.join("\n\n"))
     }

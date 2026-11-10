@@ -20,9 +20,10 @@ use serde_json::json;
 use tokio::net::UnixStream;
 
 use tethys_mcp::{
-    read_frame, write_frame, AddRepos, CreateWorkspace, LinkPr, Request, RequestMemoryBudget,
-    Response, ENV_REPO_KEYS, ENV_SESSION_ID, ENV_SOCKET, ENV_WORKSPACE_ID, TOOL_ADD_REPOS,
-    TOOL_CREATE_WORKSPACE, TOOL_LINK_PR, TOOL_REQUEST_MEMORY_BUDGET,
+    read_frame, write_frame, AddRepos, CreateWorkspace, LeaveShipping, LinkPr, Request,
+    RequestMemoryBudget, Response, ENV_REPO_KEYS, ENV_SESSION_ID, ENV_SOCKET, ENV_WORKSPACE_ID,
+    TOOL_ADD_REPOS, TOOL_CREATE_WORKSPACE, TOOL_LEAVE_SHIPPING, TOOL_LINK_PR,
+    TOOL_REQUEST_MEMORY_BUDGET,
 };
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +51,11 @@ struct AddReposArgs {
 struct RequestMemoryBudgetArgs {
     gb: u64,
     minutes: u64,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LeaveShippingArgs {
     reason: String,
 }
 
@@ -302,6 +308,42 @@ impl TethysServer {
         )
     }
 
+    fn leave_shipping_schema(&self) -> JsonObject {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "One line, shown to Ryan: what needs his input.",
+                },
+            },
+            "required": ["reason"],
+            "additionalProperties": false,
+        });
+        schema
+            .as_object()
+            .cloned()
+            .expect("input schema literal is an object")
+    }
+
+    fn leave_shipping_tool(&self) -> Tool {
+        Tool::new(
+            Cow::Borrowed(TOOL_LEAVE_SHIPPING),
+            Cow::Borrowed(
+                "Take this workspace out of Shipping and hand it back to Ryan. \
+                 A workspace is Shipping once Ryan considers its work done: \
+                 Tethys watches its PRs until they merge and messages this \
+                 session about anything it should fix alone, like a merge \
+                 conflict or failing CI.\n\n\
+                 Call this when something needs Ryan's input instead: a design \
+                 question, a review comment he should weigh in on, anything you \
+                 can't settle alone. Then end your turn explaining what you need. \
+                 Only meaningful while the workspace is Shipping.",
+            ),
+            self.leave_shipping_schema(),
+        )
+    }
+
     /// Protocol `2026-07-28` requires `ttlMs`, which `with_all_items` omits;
     /// without it Claude Code retries until "tools fetch failed". Zero, since
     /// the `repos` enum is fixed at spawn.
@@ -311,6 +353,7 @@ impl TethysServer {
             self.link_pr_tool(),
             self.add_repos_tool(),
             self.request_memory_budget_tool(),
+            self.leave_shipping_tool(),
         ])
             .with_ttl_ms(0)
             .with_cache_scope(CacheScope::Private)
@@ -359,6 +402,7 @@ impl ServerHandler for TethysServer {
             TOOL_LINK_PR => self.link_pr(request.arguments).await,
             TOOL_ADD_REPOS => self.add_repos(request.arguments).await,
             TOOL_REQUEST_MEMORY_BUDGET => self.request_memory_budget(request.arguments).await,
+            TOOL_LEAVE_SHIPPING => self.leave_shipping(request.arguments).await,
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool: {other}"),
                 None,
@@ -528,6 +572,40 @@ impl TethysServer {
                 failed(format!("budget request refused, nothing changed: {message}"))
             }
             other => failed(format!("Tethys answered a budget request with {other:?}")),
+        })
+    }
+}
+
+impl TethysServer {
+    async fn leave_shipping(
+        &self,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let args: LeaveShippingArgs = parse_args(arguments)?;
+        let request = Request::LeaveShipping(LeaveShipping {
+            from_workspace: self.from_workspace.clone(),
+            from_session: self.from_session.clone(),
+            reason: args.reason,
+        });
+
+        let response = match self.send(&request).await {
+            Ok(response) => response,
+            Err(e) => return Ok(failed(format!(
+                "leaving Shipping failed, the workspace is still Shipping: {e}"
+            ))),
+        };
+
+        Ok(match response {
+            Response::LeftShipping => CallToolResult::success(vec![ContentBlock::text(
+                "The workspace is no longer Shipping and is back with Ryan. End your \
+                 turn telling him what you need."
+                    .to_string(),
+            )])
+            .into(),
+            Response::Rejected { message } => failed(format!(
+                "couldn't leave Shipping: {message}"
+            )),
+            other => failed(format!("Tethys answered leave_shipping with {other:?}")),
         })
     }
 }

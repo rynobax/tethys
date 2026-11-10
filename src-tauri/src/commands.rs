@@ -27,7 +27,8 @@ use crate::purge::Purger;
 use crate::reconcile::{self, Discrepancies};
 use crate::registry::{starter_template, RegistryLoad, Repo};
 use crate::sessions::{open_session, OpenSession, SessionInfo, SessionSupervisor};
-use crate::state::{Folder, FolderId, Origin, SystemErrorEntry, Workspace, WorkspaceId};
+use crate::shipping::{self, Shipper};
+use crate::state::{Folder, FolderId, Origin, PrRef, SystemErrorEntry, Workspace, WorkspaceId};
 use crate::store::Store;
 use crate::theme::Theme;
 use crate::tmux::{self, TmuxBin};
@@ -102,6 +103,7 @@ pub async fn detach_pr(
                 AppError::Other(format!("workspace has no worktree for {}", args.repo_key))
             })?;
             link.untrack(args.pr_number);
+            crate::shipping::settle_workspace(ws);
             Ok(())
         })
         .await?;
@@ -859,6 +861,43 @@ pub async fn set_workspace_notes(
             Ok(())
         })
         .await
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StartShippingArgs {
+    pub workspace_id: WorkspaceId,
+    /// Empty for the workspace's only open PR.
+    #[serde(default)]
+    pub prs: Vec<PrRef>,
+}
+
+#[tauri::command]
+pub async fn start_shipping(
+    store: State<'_, Arc<Store>>,
+    shipper: State<'_, Arc<Shipper>>,
+    args: StartShippingArgs,
+) -> AppResult<()> {
+    let nudged = store
+        .update_workspace(&args.workspace_id, |ws| shipping::start(ws, args.prs))
+        .await?;
+    if nudged {
+        let shipper = shipper.inner().clone();
+        tauri::async_runtime::spawn(async move { shipper.wake(&args.workspace_id).await });
+    }
+    Ok(())
+}
+
+/// Also takes a workspace out of Shipped, back among the ones being worked on.
+#[tauri::command]
+pub async fn stop_shipping(store: State<'_, Arc<Store>>, workspace_id: WorkspaceId) -> AppResult<()> {
+    store
+        .update_workspace(&workspace_id, |ws| {
+            ws.shipment = None;
+            Ok(())
+        })
+        .await?;
+    info!(%workspace_id, "workspace taken out of shipping");
+    Ok(())
 }
 
 #[tauri::command]

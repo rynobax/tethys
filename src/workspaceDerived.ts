@@ -127,3 +127,96 @@ export function folderSections(
     })),
   ];
 }
+
+/** Worst first: a tile shows the worst of its open Shipping PRs. */
+export type ShippingSignal =
+  | "conflict"
+  | "ci_failing"
+  | "unknown"
+  | "review"
+  | "ci_pending"
+  | "merge_queue"
+  | "ready";
+
+const SIGNAL_RANK: Record<ShippingSignal, number> = {
+  conflict: 6,
+  ci_failing: 5,
+  unknown: 4,
+  review: 3,
+  ci_pending: 2,
+  merge_queue: 1,
+  ready: 0,
+};
+
+const SIGNAL_WORDS: Record<ShippingSignal, string> = {
+  conflict: "merge conflicts",
+  ci_failing: "CI failing",
+  unknown: "no status yet",
+  review: "waiting for review",
+  ci_pending: "CI running",
+  merge_queue: "in the merge queue",
+  ready: "ready to merge",
+};
+
+function prSignal(status: GithubPrStatus | null): ShippingSignal {
+  if (!status) return "unknown";
+  if (status.has_merge_conflicts) return "conflict";
+  if (status.checks === "failure" || status.merge_queue === "unmergeable") {
+    return "ci_failing";
+  }
+  if (status.merge_queue) return "merge_queue";
+  if (status.review_decision !== "approved") return "review";
+  if (status.checks === "pending") return "ci_pending";
+  return "ready";
+}
+
+export type ShippingPr = {
+  repoKey: string;
+  number: number;
+  status: GithubPrStatus | null;
+  signal: ShippingSignal;
+};
+
+export function shippingPrs(w: Workspace): ShippingPr[] {
+  if (w.shipment?.kind !== "shipping") return [];
+  return w.shipment.prs.map(({ repo_key, number }) => {
+    const status =
+      w.repo_links
+        .find((l) => l.repo_key === repo_key)
+        ?.prs.find((p) => p.number === number)?.status ?? null;
+    return { repoKey: repo_key, number, status, signal: prSignal(status) };
+  });
+}
+
+/** Closed PRs are done and say nothing about what's left. */
+export function shippingSignal(prs: ShippingPr[]): ShippingSignal {
+  return prs
+    .filter((p) => p.status?.state !== "merged" && p.status?.state !== "closed")
+    .reduce<ShippingSignal>(
+      (worst, p) =>
+        SIGNAL_RANK[p.signal] > SIGNAL_RANK[worst] ? p.signal : worst,
+      "ready",
+    );
+}
+
+export function shippingSummary(w: Workspace, prs: ShippingPr[]): string {
+  const lines = prs.map((p) => {
+    const closed = p.status?.state === "merged" || p.status?.state === "closed";
+    const words = closed ? p.status!.state : SIGNAL_WORDS[p.signal];
+    const changes =
+      !closed && p.status?.review_decision === "changes_requested"
+        ? " (changes requested)"
+        : "";
+    return `${p.repoKey}#${p.number}: ${words}${changes}`;
+  });
+  return [w.branch, ...lines].join("\n");
+}
+
+/** Open PRs a workspace could ship, in tracking order. */
+export function shippablePrs(w: Workspace): { repoKey: string; status: GithubPrStatus }[] {
+  return w.repo_links.flatMap((link) =>
+    link.prs.flatMap((p) =>
+      p.status?.state === "open" ? [{ repoKey: link.repo_key, status: p.status }] : [],
+    ),
+  );
+}
