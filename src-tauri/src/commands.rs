@@ -925,7 +925,7 @@ pub async fn open_artifact(
         .find(|a| a.id == artifact_id)
         .and_then(|a| match a.kind {
             ArtifactKind::Page { path } => Some(path),
-            ArtifactKind::Diagram { .. } => None,
+            ArtifactKind::Diagram { .. } | ArtifactKind::Review { .. } => None,
         })
         .ok_or_else(|| AppError::Other("no such page".into()))?;
     std::process::Command::new("open")

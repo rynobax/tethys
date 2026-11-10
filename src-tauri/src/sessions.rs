@@ -396,11 +396,13 @@ impl SessionSupervisor {
             "user-submit" | "pre-tool" => self.handle_resume_working(msg).await,
             "post-tool" => {
                 self.record_page_if_written(&msg).await;
+                self.record_review_if_started(&msg).await;
                 self.handle_resume_working(msg).await
             }
-            // Registered only to carry a budget notice back. It also fires
-            // for a tool the user interrupted, so it says nothing about turns.
-            "post-tool-failure" => {}
+            // Registered to carry a budget notice back. It also fires for a
+            // tool the user interrupted, so it says nothing about turns. A
+            // sandboxed `open` of a page lands here rather than in post-tool.
+            "post-tool-failure" => self.record_page_if_written(&msg).await,
             // `interrupt` is codex's escape.
             "stop" | "stop-failure" | "interrupt" => self.handle_stop(msg).await,
             "notify" => self.handle_notify(msg).await,
@@ -423,6 +425,20 @@ impl SessionSupervisor {
         let Some(message) = msg.last_assistant_message.as_deref() else { return };
         let Some((ws_id, _)) = self.resolve_session(&msg).await else { return };
         self.artifacts.record_diagrams(&ws_id, message).await;
+        let pages = artifacts::pages_mentioned(message, msg.cwd.as_deref());
+        if pages.is_empty() {
+            return;
+        }
+        let Some(root) = self.workspace_root(&ws_id).await else { return };
+        for path in pages {
+            self.artifacts.record_page(&ws_id, &root, &path).await;
+        }
+    }
+
+    async fn workspace_root(&self, ws_id: &str) -> Option<PathBuf> {
+        self.store
+            .read(|s| s.find_workspace(ws_id).and_then(|w| w.root_buf()))
+            .await
     }
 
     async fn record_page_if_written(&self, msg: &HookMessage) {
@@ -434,12 +450,17 @@ impl SessionSupervisor {
         };
         let Some(path) = artifacts::page_written(&call) else { return };
         let Some((ws_id, _)) = self.resolve_session(msg).await else { return };
-        let root = self
-            .store
-            .read(|s| s.find_workspace(&ws_id).and_then(|w| w.root_buf()))
-            .await;
-        let Some(root) = root else { return };
+        let Some(root) = self.workspace_root(&ws_id).await else { return };
         self.artifacts.record_page(&ws_id, &root, &path).await;
+    }
+
+    async fn record_review_if_started(&self, msg: &HookMessage) {
+        let Some(review) = msg.tool_stdout.as_deref().and_then(artifacts::review_started) else {
+            return;
+        };
+        let Some((ws_id, _)) = self.resolve_session(msg).await else { return };
+        let Some(root) = self.workspace_root(&ws_id).await else { return };
+        self.artifacts.record_review(&ws_id, &root, review).await;
     }
 
     async fn handle_notify(&self, msg: HookMessage) {

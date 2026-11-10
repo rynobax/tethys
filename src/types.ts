@@ -257,7 +257,11 @@ export type Artifact = {
   label: string;
   /** Bumped on each re-sighting so a page tab reloads in place. */
   revision: number;
-} & ({ kind: "diagram"; source: string } | { kind: "page"; path: string });
+} & (
+  | { kind: "diagram"; source: string }
+  | { kind: "page"; path: string }
+  | { kind: "review"; url: string }
+);
 
 export interface ArtifactChangedEvent {
   workspace_id: WorkspaceId;

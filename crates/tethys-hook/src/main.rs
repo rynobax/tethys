@@ -21,6 +21,7 @@ struct HookInput {
     last_assistant_message: Option<String>,
     tool_name: Option<String>,
     tool_input: Option<ToolInput>,
+    tool_response: Option<serde_json::Value>,
 }
 
 #[derive(Default, Deserialize)]
@@ -54,6 +55,7 @@ fn run() -> io::Result<()> {
         tool_name: input.tool_name,
         tool_file_path: input.tool_input.as_ref().and_then(|t| t.file_path.clone()),
         tool_command: input.tool_input.and_then(|t| t.command),
+        tool_stdout: input.tool_response.as_ref().and_then(stdout_tail),
         spawn_token: spawn_token.or_else(|| env::var("TETHYS_SPAWN_TOKEN").ok()),
         messaging_socket: env::var("CLAUDE_CODE_MESSAGING_SOCKET").ok(),
         messaging_token: env::var("CLAUDE_CODE_MESSAGING_TOKEN").ok(),
@@ -90,6 +92,21 @@ fn run() -> io::Result<()> {
         println!("{output}");
     }
     Ok(())
+}
+
+/// Claude's Bash reply is `{stdout, …}`; codex's is a bare string. Only the
+/// tail crosses the socket, since what Tethys looks for is printed last.
+fn stdout_tail(response: &serde_json::Value) -> Option<String> {
+    const MAX: usize = 8 * 1024;
+    let out = response
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .or_else(|| response.as_str())?;
+    let mut start = out.len().saturating_sub(MAX);
+    while !out.is_char_boundary(start) {
+        start += 1;
+    }
+    Some(out[start..].to_string())
 }
 
 /// Length-prefixed like the request; empty means nothing to say.

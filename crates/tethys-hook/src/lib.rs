@@ -36,6 +36,8 @@ pub struct HookMessage {
     /// the socket.
     pub tool_file_path: Option<String>,
     pub tool_command: Option<String>,
+    /// The tail of a tool's stdout, read only for ummon's review URL.
+    pub tool_stdout: Option<String>,
     /// `None` for sessions Tethys didn't spawn.
     pub spawn_token: Option<String>,
     /// Claude's cross-session inbox, from `CLAUDE_CODE_MESSAGING_*`.

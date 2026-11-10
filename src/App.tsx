@@ -1,5 +1,4 @@
 import {
-  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -17,29 +16,21 @@ import type {
   JobEvent,
   RegistryStatus,
   Repo,
-  RepoLink,
   SessionInfo,
   Theme,
   Workspace,
   WorkspaceId,
 } from "./types";
 import { GithubAuthFooter } from "./GithubAuthFooter";
-import { GithubChip, PrDetachButton } from "./GithubChip";
 import { JobLogPane } from "./JobLogPane";
 import { SessionTerminal } from "./SessionTerminal";
 import { SidePanel } from "./SidePanel";
+import { TabContent, TabStrip, useWorkspaceTabs } from "./WorkspaceTabs";
 import { Sidebar } from "./Sidebar";
 import { SystemStatus } from "./SystemStatus";
 import { applyTheme, ThemeContext } from "./theme";
 import { useBackendJob, type JobState } from "./useBackendJob";
-import { useHorizontalScroll } from "./useHorizontalScroll";
 import { useAppEvent } from "./ipc/events";
-import {
-  linkPrEntries,
-  prGroups,
-  type LinkPr,
-  type PrGroup,
-} from "./workspaceDerived";
 import "./App.css";
 
 // The agent is stated, never derived from the binary name.
@@ -272,7 +263,9 @@ function App() {
       flushedDraftsRef.current.add(workspaceId);
       const sessionId = session.id;
       const bytes = Array.from(
-        new TextEncoder().encode(`${BRACKETED_PASTE_START}${prompt}${BRACKETED_PASTE_END}`),
+        new TextEncoder().encode(
+          `${BRACKETED_PASTE_START}${prompt}${BRACKETED_PASTE_END}`,
+        ),
       );
       const flush = async () => {
         await new Promise((resolve) =>
@@ -307,22 +300,19 @@ function App() {
     return ws;
   }, [workspaces, selectedId]);
 
-  const handleCreateSuccess = useCallback(
-    async (workspaceId: WorkspaceId) => {
-      setCreationRuns((prev) => {
-        if (!prev.has(workspaceId)) return prev;
-        const next = new Map(prev);
-        next.delete(workspaceId);
-        return next;
-      });
-      try {
-        await api.startAgentSession(workspaceId);
-      } catch (e) {
-        setError(`auto-start failed: ${String(e)}`);
-      }
-    },
-    [],
-  );
+  const handleCreateSuccess = useCallback(async (workspaceId: WorkspaceId) => {
+    setCreationRuns((prev) => {
+      if (!prev.has(workspaceId)) return prev;
+      const next = new Map(prev);
+      next.delete(workspaceId);
+      return next;
+    });
+    try {
+      await api.startAgentSession(workspaceId);
+    } catch (e) {
+      setError(`auto-start failed: ${String(e)}`);
+    }
+  }, []);
 
   const handleCreationDismiss = useCallback(
     async (workspaceId: WorkspaceId) => {
@@ -793,12 +783,20 @@ function WorkspaceDetail({
   const [busy, setBusy] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
   const [addingRepo, setAddingRepo] = useState(false);
-  const [attachingPr, setAttachingPr] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const addRepoBusy = addRepoRun?.state === "running";
   // Guards against a retry loop when the spawn fails; a manual Resume still retries.
   const autoOpenedRef = useRef<Set<string>>(new Set());
-  const prStripRef = useHorizontalScroll<HTMLDivElement>();
+  const tabs = useWorkspaceTabs(workspace);
+  const onChat = tabs.selected === "chat";
+  // A hidden terminal would otherwise keep eating keystrokes.
+  useEffect(() => {
+    const input = document.querySelector<HTMLTextAreaElement>(
+      ".session-terminal .xterm-helper-textarea",
+    );
+    if (onChat) input?.focus();
+    else input?.blur();
+  }, [onChat]);
 
   const meta = workspace.session;
 
@@ -873,67 +871,49 @@ function WorkspaceDetail({
               <code>{workspace.branch}</code>
             </h2>
             <div className="actions">
-            <BinaryMenu
-              current={workspace.agent_binary ?? AGENT_CHOICES[0].binary}
-              disabled={busy}
-              onSwitch={switchBinary}
-            />
-            <button type="button" onClick={() => setShowInfo(true)}>
-              Info
-            </button>
-            <button
-              type="button"
-              onClick={() => setAddingRepo(true)}
-              disabled={availableRepos.length === 0 || addRepoBusy}
-              title={
-                addRepoBusy
-                  ? "Already adding a repo to this workspace"
-                  : availableRepos.length === 0
-                    ? "Every repo in your registry is already in this workspace"
-                    : "Add another repo's worktree to this workspace"
-              }
-            >
-              Add repo
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                api.openInVscode(workspace.id).catch((e) => setError(String(e)))
-              }
-              disabled={workspace.repo_links.length === 0}
-              title="Open this workspace in VS Code, reusing the existing window"
-            >
-              Open in VS Code
-            </button>
-            <button
-              type="button"
-              className="danger"
-              onClick={onRequestDelete}
-              disabled={busy}
-            >
-              Delete
-            </button>
-          </div>
-          </div>
-          <div className="header-prs-row">
-            <div className="header-prs" ref={prStripRef}>
-              {workspace.repo_links.map((r) =>
-                r.prs.length > 0 ? (
-                  <span className="gh-chip-group" key={r.repo_key}>
-                    <RepoPrChips link={r} onDetach={detachPr} />
-                  </span>
-                ) : null,
-              )}
+              <BinaryMenu
+                current={workspace.agent_binary ?? AGENT_CHOICES[0].binary}
+                disabled={busy}
+                onSwitch={switchBinary}
+              />
+              <button type="button" onClick={() => setShowInfo(true)}>
+                Info
+              </button>
+              <button
+                type="button"
+                onClick={() => setAddingRepo(true)}
+                disabled={availableRepos.length === 0 || addRepoBusy}
+                title={
+                  addRepoBusy
+                    ? "Already adding a repo to this workspace"
+                    : availableRepos.length === 0
+                      ? "Every repo in your registry is already in this workspace"
+                      : "Add another repo's worktree to this workspace"
+                }
+              >
+                Add repo
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  api
+                    .openInVscode(workspace.id)
+                    .catch((e) => setError(String(e)))
+                }
+                disabled={workspace.repo_links.length === 0}
+                title="Open this workspace in VS Code, reusing the existing window"
+              >
+                Open in VS Code
+              </button>
+              <button
+                type="button"
+                className="danger"
+                onClick={onRequestDelete}
+                disabled={busy}
+              >
+                Delete
+              </button>
             </div>
-            <button
-              type="button"
-              className="gh-attach"
-              onClick={() => setAttachingPr(true)}
-              disabled={workspace.repo_links.length === 0}
-              title="Track another PR in this workspace (for a second branch you opened here)"
-            >
-              + PR
-            </button>
           </div>
         </header>
         {showInfo && (
@@ -953,106 +933,117 @@ function WorkspaceDetail({
             }}
           />
         )}
-        {attachingPr && (
-          <AttachPrDialog
-            workspace={workspace}
-            onClose={() => setAttachingPr(false)}
-          />
-        )}
 
-        <div className="session-pane">
-          {/* Floated so it can't resize the terminal. */}
-          {addRepoRun && (
-            <AddRepoPopup
-              branch={workspace.branch}
-              run={addRepoRun}
-              onDismiss={onDismissAddRepo}
-            />
-          )}
-          {error && <div className="error-banner">{error}</div>}
-          {budgetRequest && (
-            <div className="budget-request-banner">
-              <span>
-                {agentLabel} asks for a {budgetRequest.gb} GB memory budget for{" "}
-                {budgetRequest.minutes} min: {budgetRequest.reason}
-              </span>
-              <div className="actions">
-                <button type="button" onClick={() => decideBudget(false)}>
-                  Deny
-                </button>
+        <TabStrip
+          tabs={tabs}
+          chatAttention={!!session?.running && !session.working}
+          onDetachPr={detachPr}
+        />
+        {error && <div className="error-banner">{error}</div>}
+        {budgetRequest && (
+          <div className="budget-request-banner">
+            <span>
+              {agentLabel} asks for a {budgetRequest.gb} GB memory budget for{" "}
+              {budgetRequest.minutes} min: {budgetRequest.reason}
+            </span>
+            <div className="actions">
+              <button type="button" onClick={() => decideBudget(false)}>
+                Deny
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => decideBudget(true)}
+              >
+                Approve
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="main-body">
+          {/* Hidden rather than unmounted, so the terminal keeps its size. */}
+          <div className={`session-pane ${onChat ? "" : "tab-hidden"}`}>
+            {/* Floated so it can't resize the terminal. */}
+            {addRepoRun && (
+              <AddRepoPopup
+                branch={workspace.branch}
+                run={addRepoRun}
+                onDismiss={onDismissAddRepo}
+              />
+            )}
+            {session ? (
+              <>
+                {!session.running && (
+                  <div className="session-exit-banner">
+                    <span>
+                      {agentLabel} exited. Scrollback preserved below.
+                    </span>
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={openSession}
+                      disabled={busy}
+                    >
+                      {meta?.agent_session_id
+                        ? openLabel("Reconnect")
+                        : openLabel("Start again")}
+                    </button>
+                  </div>
+                )}
+                <SessionTerminal sessionId={session.id} />
+              </>
+            ) : meta ? (
+              <div className="session-dormant">
+                <p>
+                  This workspace's {agentLabel} session is dormant.{" "}
+                  {meta.agent_session_id
+                    ? "Resume re-opens the saved conversation."
+                    : "No conversation was saved, so Resume starts a fresh one."}
+                </p>
                 <button
                   type="button"
                   className="primary"
-                  onClick={() => decideBudget(true)}
+                  onClick={openSession}
+                  disabled={busy}
                 >
-                  Approve
+                  {openLabel("Resume")}
                 </button>
               </div>
-            </div>
-          )}
-          {session ? (
-            <>
-              {!session.running && (
-                <div className="session-exit-banner">
-                  <span>{agentLabel} exited. Scrollback preserved below.</span>
-                  <button
-                    type="button"
-                    className="primary"
-                    onClick={openSession}
-                    disabled={busy}
-                  >
-                    {meta?.agent_session_id
-                      ? openLabel("Reconnect")
-                      : openLabel("Start again")}
-                  </button>
-                </div>
-              )}
-              <SessionTerminal sessionId={session.id} />
-            </>
-          ) : meta ? (
-            <div className="session-dormant">
-              <p>
-                This workspace's {agentLabel} session is dormant.{" "}
-                {meta.agent_session_id
-                  ? "Resume re-opens the saved conversation."
-                  : "No conversation was saved, so Resume starts a fresh one."}
-              </p>
-              <button
-                type="button"
-                className="primary"
-                onClick={openSession}
-                disabled={busy}
-              >
-                {openLabel("Resume")}
-              </button>
-            </div>
-          ) : (
-            <div className="session-dormant">
-              <p className="muted">
-                No {agentLabel} session in this workspace yet.
-              </p>
-              <button
-                type="button"
-                className="primary"
-                onClick={openSession}
-                disabled={busy || workspace.repo_links.length === 0}
-                title={
-                  workspace.repo_links.length === 0
-                    ? `Add a repo first — there's nowhere to run ${agentLabel}`
-                    : undefined
-                }
-              >
-                {openLabel(`Start ${agentLabel}`)}
-              </button>
+            ) : (
+              <div className="session-dormant">
+                <p className="muted">
+                  No {agentLabel} session in this workspace yet.
+                </p>
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={openSession}
+                  disabled={busy || workspace.repo_links.length === 0}
+                  title={
+                    workspace.repo_links.length === 0
+                      ? `Add a repo first — there's nowhere to run ${agentLabel}`
+                      : undefined
+                  }
+                >
+                  {openLabel(`Start ${agentLabel}`)}
+                </button>
+              </div>
+            )}
+          </div>
+          {!onChat && (
+            <div className="main-tab-body">
+              <TabContent workspaceId={workspace.id} tabs={tabs} />
             </div>
           )}
         </div>
       </div>
-      <SidePanel
-        workspace={workspace}
-        notes={notes}
-        onNotesChange={onNotesChange}
-      />
+      {onChat && (
+        <SidePanel
+          workspace={workspace}
+          notes={notes}
+          onNotesChange={onNotesChange}
+        />
+      )}
     </div>
   );
 }
@@ -1164,176 +1155,6 @@ function WorkspaceInfoDialog({
             Close
           </button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-function stackTitle(group: PrGroup): string {
-  const stack = group.stack!;
-  const members = group.prs
-    .map((e) => `#${e.status.pr_number} (${e.status.stack!.position})`)
-    .join(" → ");
-  return `Stack #${stack.number}, ${stack.size} PRs, base-first: ${members}`;
-}
-
-function RepoPrChips({
-  link,
-  onDetach,
-}: {
-  link: RepoLink;
-  onDetach: (repoKey: string, prNumber: number) => void;
-}) {
-  const chip = ({ status, number }: LinkPr) => (
-    <GithubChip
-      status={status}
-      onDetach={() => onDetach(link.repo_key, number)}
-    />
-  );
-
-  return (
-    <>
-      {prGroups(linkPrEntries(link)).map((group) =>
-        group.stack ? (
-          <span
-            key={`stack-${group.stack.number}`}
-            className="gh-stack"
-            title={stackTitle(group)}
-          >
-            {group.prs.map((entry, i) => (
-              <Fragment key={entry.status.pr_number}>
-                {i > 0 && (
-                  <span className="gh-stack-sep" aria-hidden="true">
-                    ›
-                  </span>
-                )}
-                {chip(entry)}
-              </Fragment>
-            ))}
-            {group.prs.length < group.stack.size && (
-              <span className="gh-stack-count">
-                {group.prs.map((e) => e.status.stack!.position).join(", ")} of{" "}
-                {group.stack.size}
-              </span>
-            )}
-          </span>
-        ) : (
-          <Fragment key={group.prs[0].status.pr_number}>
-            {chip(group.prs[0])}
-          </Fragment>
-        ),
-      )}
-      {link.prs
-        .filter((pr) => !pr.status)
-        .map((pr) => (
-          <span
-            key={pr.number}
-            className="gh-chip gh-chip-missing"
-            title={`PR #${pr.number} in ${link.repo_key} couldn't be fetched`}
-          >
-            <span className="gh-pr">{pr.number}</span>
-            <span className="gh-note-badge">no data</span>
-            <PrDetachButton
-              prNumber={pr.number}
-              onDetach={() => onDetach(link.repo_key, pr.number)}
-            />
-          </span>
-        ))}
-    </>
-  );
-}
-
-function AttachPrDialog({
-  workspace,
-  onClose,
-}: {
-  workspace: Workspace;
-  onClose: () => void;
-}) {
-  const [reference, setReference] = useState("");
-  // `null` lets the backend infer it.
-  const [repoKey, setRepoKey] = useState<string | null>(
-    workspace.repo_links.length === 1 ? workspace.repo_links[0].repo_key : null,
-  );
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!reference.trim()) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.attachPr(workspace.id, repoKey, reference.trim());
-      onClose();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
-      <div
-        className="modal"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-      >
-        <form onSubmit={submit}>
-          <h3>
-            Attach a PR to <code>{workspace.branch}</code>
-          </h3>
-          <p className="muted">
-            Tethys tracks the PR for this workspace's own branch automatically.
-            Attach anything you opened from a second branch here.
-          </p>
-          <label>
-            PR
-            <input
-              value={reference}
-              onChange={(e) => setReference(e.target.value)}
-              placeholder="https://github.com/owner/repo/pull/123 or 123"
-              autoFocus
-            />
-          </label>
-          {workspace.repo_links.length > 1 && (
-            <label>
-              Repo
-              <select
-                value={repoKey ?? ""}
-                onChange={(e) => setRepoKey(e.target.value || null)}
-              >
-                <option value="">Infer from PR URL</option>
-                {workspace.repo_links.map((r) => (
-                  <option key={r.repo_key} value={r.repo_key}>
-                    {r.repo_key}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {error && <div className="error-banner">{error}</div>}
-          <div className="modal-actions">
-            <button type="button" onClick={onClose} disabled={busy}>
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="primary"
-              disabled={busy || !reference.trim()}
-            >
-              {busy ? (
-                <>
-                  <Spinner /> Attaching…
-                </>
-              ) : (
-                "Attach"
-              )}
-            </button>
-          </div>
-        </form>
       </div>
     </div>
   );

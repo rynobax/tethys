@@ -1,5 +1,6 @@
 //! Things a session produced that Tethys can show: mermaid **Diagrams** from
-//! the `Stop` hook's reply, and HTML **Pages** from `PostToolUse`.
+//! the `Stop` hook's reply, HTML **Pages** from `PostToolUse`, and ummon
+//! **Reviews** from the output of a Bash call that ran `ummon`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,6 +21,7 @@ const LABEL_MAX_CHARS: usize = 18;
 pub enum ArtifactKind {
     Diagram { source: String },
     Page { path: PathBuf },
+    Review { url: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -87,6 +89,24 @@ impl ArtifactStore {
             .await;
     }
 
+    pub async fn record_review(&self, workspace_id: &str, workspace_root: &Path, review: Review) {
+        if !crate::reconcile::is_under(workspace_root, &review.repo) {
+            debug!(
+                workspace_id,
+                repo = %review.repo.display(),
+                "ignoring an ummon review outside the workspace"
+            );
+            return;
+        }
+        let label = review
+            .repo
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "review".to_string());
+        self.record(workspace_id, label, ArtifactKind::Review { url: review.url })
+            .await;
+    }
+
     pub async fn dismiss(&self, workspace_id: &str, artifact_id: &str) {
         let result = self
             .store
@@ -129,7 +149,7 @@ pub fn prune_missing_pages(artifacts: &mut Vec<Artifact>) -> usize {
     let before = artifacts.len();
     artifacts.retain(|a| match &a.kind {
         ArtifactKind::Page { path } => path.exists(),
-        ArtifactKind::Diagram { .. } => true,
+        ArtifactKind::Diagram { .. } | ArtifactKind::Review { .. } => true,
     });
     before - artifacts.len()
 }
@@ -182,6 +202,44 @@ pub fn page_written(call: &ToolCall<'_>) -> Option<PathBuf> {
         }
         _ => None,
     }
+}
+
+pub struct Review {
+    pub repo: PathBuf,
+    pub url: String,
+}
+
+/// ummon prints `ummon is reviewing <repo> at <url>` once it has registered a
+/// workspace; the last such line wins.
+pub fn review_started(stdout: &str) -> Option<Review> {
+    stdout.lines().rev().find_map(|line| {
+        let rest = line.trim().strip_prefix("ummon is reviewing ")?;
+        let (repo, url) = rest.rsplit_once(" at ")?;
+        let url = url.trim();
+        (url.starts_with("http://localhost:") || url.starts_with("http://127.0.0.1:"))
+            .then(|| Review {
+                repo: PathBuf::from(repo),
+                url: url.to_string(),
+            })
+    })
+}
+
+/// A sandboxed session can't `open` a page itself, so it asks Ryan to, in
+/// prose: "To view the page: ! open /abs/page.html." Those are pages too.
+pub fn pages_mentioned(message: &str, cwd: Option<&str>) -> Vec<PathBuf> {
+    const OPENING: &[char] = &['`', '\'', '"', '(', '['];
+    const CLOSING: &[char] = &['`', '\'', '"', ')', ']', '.', ',', ';', ':', '?', '!'];
+    let unwrap = |w: &str| w.trim_start_matches(OPENING).trim_end_matches(CLOSING).to_string();
+    let words: Vec<&str> = message.split_whitespace().collect();
+    words
+        .windows(2)
+        .filter(|w| unwrap(w[0]) == "open")
+        .filter_map(|w| html_path(PathBuf::from(unwrap(w[1]))))
+        .map(|path| match cwd {
+            Some(cwd) if path.is_relative() => Path::new(cwd).join(path),
+            _ => path,
+        })
+        .collect()
 }
 
 fn html_path(path: PathBuf) -> Option<PathBuf> {
@@ -362,6 +420,37 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_the_agent_asks_ryan_to_open_is_found() {
+        let msg = "**To view the page:** `! open /w/x/settings-after.html`. The sandbox stops me.\n\
+                   Or open ./b.htm, but not open the door or the src/index.html I edited.";
+        assert_eq!(
+            pages_mentioned(msg, Some("/w/x")),
+            vec![
+                PathBuf::from("/w/x/settings-after.html"),
+                PathBuf::from("/w/x/./b.htm"),
+            ]
+        );
+        assert_eq!(
+            pages_mentioned("! open /w/x/a.html.", None),
+            vec![PathBuf::from("/w/x/a.html")]
+        );
+    }
+
+    #[test]
+    fn a_review_is_read_off_ummons_output() {
+        let out = "Restacked x.\nummon is reviewing /w/a b/repo at http://localhost:7337/w/abc123\nQuestions ...\n";
+        let review = review_started(out).unwrap();
+        assert_eq!(review.repo, PathBuf::from("/w/a b/repo"));
+        assert_eq!(review.url, "http://localhost:7337/w/abc123");
+    }
+
+    #[test]
+    fn only_a_local_url_is_a_review() {
+        assert!(review_started("ummon is reviewing /r at https://evil.example/w/1").is_none());
+        assert!(review_started("nothing to see").is_none());
+    }
 
     const SCREENSHOT: &str = r#"**Today.** Every clip is its own round trip to the original recording.
 
