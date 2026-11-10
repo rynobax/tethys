@@ -130,6 +130,7 @@ export function folderSections(
 
 /** Worst first: a tile shows the worst of its open Shipping PRs. */
 export type ShippingSignal =
+  | "no_reviewer"
   | "conflict"
   | "ci_failing"
   | "unknown"
@@ -138,7 +139,9 @@ export type ShippingSignal =
   | "merge_queue"
   | "ready";
 
+// Nobody asked for a review is first: it's the one only Ryan can fix.
 const SIGNAL_RANK: Record<ShippingSignal, number> = {
+  no_reviewer: 7,
   conflict: 6,
   ci_failing: 5,
   unknown: 4,
@@ -149,6 +152,7 @@ const SIGNAL_RANK: Record<ShippingSignal, number> = {
 };
 
 const SIGNAL_WORDS: Record<ShippingSignal, string> = {
+  no_reviewer: "no review requested",
   conflict: "merge conflicts",
   ci_failing: "CI failing",
   unknown: "no status yet",
@@ -165,6 +169,14 @@ function prSignal(status: GithubPrStatus | null): ShippingSignal {
     return "ci_failing";
   }
   if (status.merge_queue) return "merge_queue";
+  // Changes requested means someone has reviewed it.
+  if (
+    (status.review_decision === "none" ||
+      status.review_decision === "review_required") &&
+    !status.review_requested
+  ) {
+    return "no_reviewer";
+  }
   if (status.review_decision !== "approved") return "review";
   if (status.checks === "pending") return "ci_pending";
   return "ready";

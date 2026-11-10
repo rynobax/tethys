@@ -936,7 +936,8 @@ function ShipPicker({
   );
 }
 
-const TILE_TONE: Record<ShippingSignal, "green" | "yellow" | "gray"> = {
+const TILE_TONE: Record<ShippingSignal, "green" | "yellow" | "red" | "gray"> = {
+  no_reviewer: "red",
   ready: "green",
   merge_queue: "green",
   review: "yellow",
@@ -954,6 +955,8 @@ function SignalIcon({ signal }: { signal: ShippingSignal }) {
       return <MergeQueueIcon />;
     case "review":
       return <ReviewIcon />;
+    case "no_reviewer":
+      return <NoReviewerIcon />;
     case "ci_failing":
     case "ci_pending":
       return <CiIcon />;
@@ -962,6 +965,27 @@ function SignalIcon({ signal }: { signal: ShippingSignal }) {
     case "unknown":
       return <span className="shipping-tile-glyph">?</span>;
   }
+}
+
+function NoReviewerIcon() {
+  return (
+    <svg className="gh-sq-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M1.5 8 C 3.5 4.5, 5.5 3, 8 3 C 10.5 3, 12.5 4.5, 14.5 8 C 12.5 11.5, 10.5 13, 8 13 C 5.5 13, 3.5 11.5, 1.5 8 Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+      <circle cx="8" cy="8" r="2.2" fill="currentColor" />
+      <path
+        d="M2.5 2.5 L13.5 13.5"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
 }
 
 function CheckIcon() {

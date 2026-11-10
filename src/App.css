@@ -1906,6 +1906,11 @@ li.is-dragging {
   color: #c69327;
 }
 
+.shipping-tile.tone-red {
+  background: rgba(248, 81, 73, 0.2);
+  color: #e5534b;
+}
+
 .shipping-tile.tone-gray {
   background: rgba(125, 125, 125, 0.15);
   color: var(--muted);
