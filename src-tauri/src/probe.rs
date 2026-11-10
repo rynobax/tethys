@@ -39,11 +39,13 @@ fn sessions_dir() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".claude").join("sessions"))
 }
 
-/// `None` defers to the hooks. That includes `shell`, which is also reported
-/// while a backgrounded shell lingers under an idle agent.
+/// `None` defers to the hooks. `shell` is a turn that ended with a background
+/// shell still running; the agent wakes when it finishes, so it isn't Ryan's
+/// turn yet. A backgrounded dev server never finishes and so reads as working
+/// for as long as it runs.
 pub fn state_from_status(status: &str) -> Option<SessionRuntimeState> {
     match status {
-        "busy" => Some(SessionRuntimeState::Working),
+        "busy" | "shell" => Some(SessionRuntimeState::Working),
         "waiting" => Some(SessionRuntimeState::WaitingInput),
         "idle" => Some(SessionRuntimeState::Idle),
         _ => None,
@@ -92,10 +94,11 @@ pub fn spawn(supervisor: Arc<SessionSupervisor>) {
 #[cfg(test)]
 mod tests {
     use super::state_from_status;
+    use crate::state::SessionRuntimeState;
 
     #[test]
-    fn shell_is_not_authoritative() {
-        assert_eq!(state_from_status("shell"), None);
+    fn a_background_shell_is_still_working() {
+        assert_eq!(state_from_status("shell"), Some(SessionRuntimeState::Working));
     }
 
 }
