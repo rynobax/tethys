@@ -11,6 +11,7 @@ import type {
   Discrepancies,
   Folder,
   FolderId,
+  GithubAuthSnapshot,
   GithubPrStatus,
   JobEvent,
   RegistryStatus,
@@ -132,6 +133,12 @@ export const sendInput = (sessionId: string, data: number[]) =>
 
 export const resizeSession = (sessionId: string, cols: number, rows: number) =>
   invoke<void>("resize_session", { sessionId, cols, rows });
+
+export const githubAuthStatus = () =>
+  invoke<GithubAuthSnapshot>("github_auth_status");
+
+export const githubReprobeAuth = () =>
+  invoke<GithubAuthSnapshot>("github_reprobe_auth");
 
 export const attachPr = (
   workspaceId: WorkspaceId,

@@ -15,6 +15,7 @@ use crate::branch_name;
 use crate::budget::{Budgets, OverrideRequest};
 use crate::agent_bin::{self, AgentBins};
 use crate::error::{AppError, AppResult};
+use crate::github::poller::{AuthSnapshot, GithubPoller};
 use crate::github::{self, GithubPrStatus};
 use crate::inprogress::InProgressWorkspaces;
 use crate::job::{JobEvent, JobTx};
@@ -39,6 +40,21 @@ pub async fn list_workspaces(store: State<'_, Arc<Store>>) -> AppResult<Vec<Work
 #[tauri::command]
 pub fn registry_status(registry: State<'_, Arc<RegistryLoad>>) -> RegistryLoad {
     (**registry).clone()
+}
+
+#[tauri::command]
+pub async fn github_auth_status(
+    poller: State<'_, Arc<GithubPoller>>,
+) -> AppResult<AuthSnapshot> {
+    Ok(poller.auth_snapshot().await)
+}
+
+#[tauri::command]
+pub async fn github_reprobe_auth(
+    poller: State<'_, Arc<GithubPoller>>,
+) -> AppResult<AuthSnapshot> {
+    poller.probe_login().await;
+    Ok(poller.auth_snapshot().await)
 }
 
 #[derive(Debug, Deserialize)]

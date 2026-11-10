@@ -1,6 +1,7 @@
 import { useTauriEvent } from "../useTauriEvent";
 import type {
   ArtifactChangedEvent,
+  GithubAuthSnapshot,
   GithubStatusChangedEvent,
   Theme,
   TurnChangedEvent,
@@ -17,6 +18,7 @@ export interface AppEvents {
   };
   "session:turn_changed": TurnChangedEvent;
   "session:budget_requests_changed": null;
+  "github:auth_changed": GithubAuthSnapshot;
   "github:status_changed": GithubStatusChangedEvent;
   "system_status:changed": null;
   "theme:changed": Theme | null;

@@ -302,6 +302,8 @@ pub fn run() {
             commands::list_system_errors,
             commands::dismiss_system_error,
             commands::registry_status,
+            commands::github_auth_status,
+            commands::github_reprobe_auth,
             commands::attach_pr,
             commands::detach_pr,
             commands::open_config_location,
