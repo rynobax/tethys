@@ -474,13 +474,13 @@ function PrView({
   repoKey: string;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const modalOpen = useModalOpen();
+  const covered = useCovered(hostRef);
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    // A native view sits above every DOM layer, dialogs included.
-    if (modalOpen) {
+    // A native view sits above every DOM layer, dialogs and menus included.
+    if (covered) {
       api.hidePrView().catch(() => {});
       return;
     }
@@ -511,7 +511,7 @@ function PrView({
       observer.disconnect();
       window.removeEventListener("resize", sync);
     };
-  }, [url, modalOpen]);
+  }, [url, covered]);
 
   // Separate from the sync effect so switching PR tabs never flashes hidden.
   useEffect(() => {
@@ -543,15 +543,27 @@ function PrView({
   );
 }
 
-function useModalOpen(): boolean {
-  const query = () => document.querySelector(".modal-backdrop") !== null;
-  const [open, setOpen] = useState(query);
+/** A dialog anywhere, or a context menu reaching over the host: either would
+ *  be drawn underneath the native view. */
+function useCovered(hostRef: React.RefObject<HTMLElement | null>): boolean {
+  const query = useCallback(() => {
+    if (document.querySelector(".modal-backdrop")) return true;
+    const host = hostRef.current;
+    if (!host) return false;
+    const h = host.getBoundingClientRect();
+    return Array.from(document.querySelectorAll(".context-menu")).some((m) => {
+      const r = m.getBoundingClientRect();
+      return r.right > h.left && r.left < h.right && r.bottom > h.top && r.top < h.bottom;
+    });
+  }, [hostRef]);
+  const [covered, setCovered] = useState(false);
   useEffect(() => {
-    const observer = new MutationObserver(() => setOpen(query()));
+    setCovered(query());
+    const observer = new MutationObserver(() => setCovered(query()));
     observer.observe(document.body, { childList: true, subtree: true });
     return () => observer.disconnect();
-  }, []);
-  return open;
+  }, [query]);
+  return covered;
 }
 
 function errorText(e: unknown): string {
