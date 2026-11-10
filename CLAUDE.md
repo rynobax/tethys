@@ -79,6 +79,8 @@ Two things needed the escape hatches. Codex asks *"do you trust the contents of 
 
 The other one turned out not to be codex-specific at all. `PtyProcess::attach` handed a newly-mounted xterm.js the raw scrollback ring, and recorded output contains the *queries* a program asked the terminal at startup (`ESC[6n`, `ESC]11;?`, `ESC[c`, `ESC[>c`). A terminal answers a question whenever it reads one, so every workspace switch replayed those questions into a fresh emulator, which sent stale replies up the PTY into whatever the program was showing — in codex, `0;276;0c` typed into the composer. `scrollback::strip_queries` takes the queries out of the *replayed* copy only; live bytes stream through untouched, since a query asked now is one something is waiting on. A query renders nothing, so nothing is lost on screen.
 
+The replay had the opposite problem too: it can lose things the terminal *needs*. tmux turns mouse reporting on when its client attaches and on a resize, never while output streams, so once a busy session has pushed 2MB through the ring the switch is gone, and a freshly mounted xterm keeps the wheel for its own buffer instead of sending it to tmux — scrolling dead until a window resize made tmux say it again. `scrollback::TermModes` watches the live stream for the DEC private modes that matter (mouse protocols, focus, bracketed paste, cursor keys and visibility — not the alternate screen) and `attach` re-asserts their last state after the replay.
+
 Deliberately absent for codex: model selection (set `model` in `~/.codex/config.toml`), a third agent, per-agent terminal tuning, and any visual mark in the sidebar distinguishing a codex workspace.
 
 ## The session's MCP tools

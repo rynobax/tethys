@@ -9,6 +9,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tracing::{debug, info, warn};
 
 use crate::error::{AppError, AppResult};
+use crate::scrollback::TermModes;
 use crate::tmux;
 
 const READ_BUF: usize = 4096;
@@ -37,6 +38,8 @@ pub struct PtyProcess {
     master: Box<dyn MasterPty + Send>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     ring: Ring,
+    /// Outlives what the ring holds; see `scrollback`.
+    modes: Arc<Mutex<TermModes>>,
     subscribers: Arc<Mutex<Vec<Channel<InvokeResponseBody>>>>,
     running: Arc<Mutex<bool>>,
     tui_ready: Arc<AtomicBool>,
@@ -87,6 +90,8 @@ impl PtyProcess {
 
         let ring: Ring = Arc::new(Mutex::new(VecDeque::with_capacity(RING_CAPACITY)));
         append_to_ring(&ring, seed_bytes, RING_CAPACITY);
+        let modes = Arc::new(Mutex::new(TermModes::default()));
+        modes.lock().unwrap().observe(seed_bytes);
         let subscribers: Arc<Mutex<Vec<Channel<InvokeResponseBody>>>> =
             Arc::new(Mutex::new(Vec::new()));
         let running = Arc::new(Mutex::new(true));
@@ -95,6 +100,7 @@ impl PtyProcess {
         spawn_reader_thread(ReaderThread {
             reader,
             ring: ring.clone(),
+            modes: modes.clone(),
             subscribers: subscribers.clone(),
             tui_ready: tui_ready.clone(),
             on_ready,
@@ -112,6 +118,7 @@ impl PtyProcess {
             master: pair.master,
             writer: Arc::new(Mutex::new(writer)),
             ring,
+            modes,
             subscribers,
             running,
             tui_ready,
@@ -120,8 +127,12 @@ impl PtyProcess {
 
     pub fn attach(&self, channel: Channel<InvokeResponseBody>) -> Vec<u8> {
         let raw: Vec<u8> = self.ring.lock().unwrap().iter().copied().collect();
-        let scrollback = crate::scrollback::strip_queries(&raw);
-        self.subscribers.lock().unwrap().push(channel);
+        let mut scrollback = crate::scrollback::strip_queries(&raw);
+        // Under the subscriber lock, so no chunk lands between the restore and
+        // the first live byte.
+        let mut subscribers = self.subscribers.lock().unwrap();
+        scrollback.extend(self.modes.lock().unwrap().restore());
+        subscribers.push(channel);
         scrollback
     }
 
@@ -219,6 +230,7 @@ fn append_to_ring(ring: &Ring, data: &[u8], capacity: usize) {
 struct ReaderThread {
     reader: Box<dyn Read + Send>,
     ring: Ring,
+    modes: Arc<Mutex<TermModes>>,
     subscribers: Arc<Mutex<Vec<Channel<InvokeResponseBody>>>>,
     tui_ready: Arc<AtomicBool>,
     on_ready: OnReady,
@@ -228,6 +240,7 @@ fn spawn_reader_thread(thread: ReaderThread) {
     let ReaderThread {
         mut reader,
         ring,
+        modes,
         subscribers,
         tui_ready,
         on_ready,
@@ -245,6 +258,7 @@ fn spawn_reader_thread(thread: ReaderThread) {
                 Ok(n) => {
                     let chunk = &buf[..n];
                     append_to_ring(&ring, chunk, RING_CAPACITY);
+                    modes.lock().unwrap().observe(chunk);
                     if watch.observe(chunk) {
                         debug!("pty reader: program enabled bracketed paste — TUI is up");
                         tui_ready.store(true, Ordering::Release);
