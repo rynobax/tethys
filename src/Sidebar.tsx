@@ -268,11 +268,33 @@ export function Sidebar({
       ? folders.find((f) => f.id === activeDrag.id) ?? null
       : null;
 
+  // Children that left the list for Shipping, shown on the parent instead.
+  const shippingChildren = (w: Workspace) => {
+    const kids = workspaces.filter((k) => k.parent === w.id && k.shipment);
+    if (kids.length === 0) return undefined;
+    return (
+      <div className="workspace-shipping-children">
+        {kids.map((k) => (
+          <ShippingTile
+            key={k.id}
+            workspace={k}
+            mini
+            selected={k.id === selectedId}
+            working={k.shipment?.kind === "shipping" && workspaceWorking(k)}
+            onSelect={() => onSelect(k.id)}
+            onContextMenu={(x, y) => setMenu({ ws: k, x, y })}
+          />
+        ))}
+      </div>
+    );
+  };
+
   const rowProps = (w: Workspace) => ({
     workspace: w,
     selected: w.id === selectedId,
     needsTurn: workspaceNeedsTurn(w),
     working: workspaceWorking(w),
+    shippingChildren: shippingChildren(w),
   });
 
   return (
@@ -545,6 +567,7 @@ function SortableWorkspaceRow({
   selected,
   needsTurn,
   working,
+  shippingChildren,
   onSelect,
   onContextMenu,
 }: {
@@ -552,6 +575,7 @@ function SortableWorkspaceRow({
   selected: boolean;
   needsTurn: boolean;
   working: boolean;
+  shippingChildren?: React.ReactNode;
   onSelect: () => void;
   onContextMenu: (x: number, y: number) => void;
 }) {
@@ -570,6 +594,7 @@ function SortableWorkspaceRow({
       selected={selected}
       needsTurn={needsTurn}
       working={working}
+      shippingChildren={shippingChildren}
       isDragging={isDragging}
       onSelect={onSelect}
       onContextMenu={onContextMenu}
@@ -595,6 +620,7 @@ function WorkspaceRow({
   selected,
   needsTurn,
   working,
+  shippingChildren,
   isDragging,
   depth = 0,
   onSelect,
@@ -605,6 +631,7 @@ function WorkspaceRow({
   selected: boolean;
   needsTurn: boolean;
   working: boolean;
+  shippingChildren?: React.ReactNode;
   isDragging: boolean;
   depth?: number;
   onSelect: () => void;
@@ -679,6 +706,7 @@ function WorkspaceRow({
           ))}
         </div>
       )}
+      {status === "ready" && shippingChildren}
     </li>
   );
 }
@@ -976,6 +1004,65 @@ function ConflictIcon() {
   );
 }
 
+function ShippingTile({
+  workspace,
+  selected,
+  working,
+  mini = false,
+  onSelect,
+  onContextMenu,
+}: {
+  workspace: Workspace;
+  selected: boolean;
+  working: boolean;
+  /** Drawn inside a parent's row, where a click mustn't reach the row. */
+  mini?: boolean;
+  onSelect: () => void;
+  onContextMenu: (x: number, y: number) => void;
+}) {
+  let tone: string;
+  let title: string;
+  let icon: React.ReactNode;
+  if (workspace.shipment?.kind === "shipping") {
+    const prs = shippingPrs(workspace);
+    const signal = shippingSignal(prs);
+    tone = TILE_TONE[signal];
+    title = shippingSummary(workspace, prs);
+    icon = <SignalIcon signal={signal} />;
+  } else {
+    tone = "shipped";
+    title = `${workspace.branch}\nshipped`;
+    icon = <MergedIcon />;
+  }
+  return (
+    <button
+      type="button"
+      className={[
+        "shipping-tile",
+        `tone-${tone}`,
+        mini ? "mini" : "",
+        selected ? "selected" : "",
+        working ? "working" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      title={title}
+      onPointerDown={mini ? (e) => e.stopPropagation() : undefined}
+      onClick={(e) => {
+        e.stopPropagation();
+        onSelect();
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onContextMenu(e.clientX, e.clientY);
+      }}
+    >
+      {icon}
+    </button>
+  );
+}
+
 function ShippingArea({
   shipping,
   shipped,
@@ -993,45 +1080,22 @@ function ShippingArea({
 }) {
   if (shipping.length === 0 && shipped.length === 0) return null;
 
-  const tile = (w: Workspace, tone: string, title: string, icon: React.ReactNode) => (
-    <button
-      key={w.id}
-      type="button"
-      className={[
-        "shipping-tile",
-        `tone-${tone}`,
-        w.id === selectedId ? "selected" : "",
-        workspaceWorking(w) ? "working" : "",
-      ]
-        .filter(Boolean)
-        .join(" ")}
-      title={title}
-      onClick={() => onSelect(w.id)}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        onContextMenu(w, e.clientX, e.clientY);
-      }}
-    >
-      {icon}
-    </button>
-  );
-
   return (
     <div className="shipping-area">
       {shipping.length > 0 && (
         <section>
           <div className="shipping-label">Shipping</div>
           <div className="shipping-grid">
-            {shipping.map((w) => {
-              const prs = shippingPrs(w);
-              const signal = shippingSignal(prs);
-              return tile(
-                w,
-                TILE_TONE[signal],
-                shippingSummary(w, prs),
-                <SignalIcon signal={signal} />,
-              );
-            })}
+            {shipping.map((w) => (
+              <ShippingTile
+                key={w.id}
+                workspace={w}
+                selected={w.id === selectedId}
+                working={workspaceWorking(w)}
+                onSelect={() => onSelect(w.id)}
+                onContextMenu={(x, y) => onContextMenu(w, x, y)}
+              />
+            ))}
           </div>
         </section>
       )}
@@ -1039,7 +1103,16 @@ function ShippingArea({
         <section>
           <div className="shipping-label">Shipped</div>
           <div className="shipping-grid">
-            {shipped.map((w) => tile(w, "shipped", w.branch, <MergedIcon />))}
+            {shipped.map((w) => (
+              <ShippingTile
+                key={w.id}
+                workspace={w}
+                selected={w.id === selectedId}
+                working={false}
+                onSelect={() => onSelect(w.id)}
+                onContextMenu={(x, y) => onContextMenu(w, x, y)}
+              />
+            ))}
           </div>
         </section>
       )}

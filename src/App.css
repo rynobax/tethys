@@ -1838,6 +1838,34 @@ li.is-dragging {
   height: 14px;
 }
 
+.workspace-shipping-children {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 4px;
+}
+
+.shipping-tile.mini {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+}
+
+.shipping-tile.mini .gh-sq-icon,
+.shipping-tile.mini .gh-state-icon {
+  width: 11px;
+  height: 11px;
+}
+
+.shipping-tile.mini .shipping-tile-glyph {
+  font-size: 9px;
+}
+
+.shipping-tile.mini.working::after {
+  width: 5px;
+  height: 5px;
+}
+
 .shipping-tile-glyph {
   font-size: 12px;
   font-weight: 700;
