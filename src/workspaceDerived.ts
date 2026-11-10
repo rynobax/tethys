@@ -162,13 +162,9 @@ const SIGNAL_WORDS: Record<ShippingSignal, string> = {
   ready: "ready to merge",
 };
 
+/** Checked in `SIGNAL_RANK` order, so a PR shows the worst thing about it. */
 function prSignal(status: GithubPrStatus | null): ShippingSignal {
   if (!status) return "unknown";
-  if (status.has_merge_conflicts) return "conflict";
-  if (status.checks === "failure" || status.merge_queue === "unmergeable") {
-    return "ci_failing";
-  }
-  if (status.merge_queue) return "merge_queue";
   // Changes requested means someone has reviewed it.
   if (
     (status.review_decision === "none" ||
@@ -177,6 +173,11 @@ function prSignal(status: GithubPrStatus | null): ShippingSignal {
   ) {
     return "no_reviewer";
   }
+  if (status.has_merge_conflicts) return "conflict";
+  if (status.checks === "failure" || status.merge_queue === "unmergeable") {
+    return "ci_failing";
+  }
+  if (status.merge_queue) return "merge_queue";
   if (status.review_decision !== "approved") return "review";
   if (status.checks === "pending") return "ci_pending";
   return "ready";
