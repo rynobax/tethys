@@ -124,17 +124,13 @@ export function Sidebar({
   workspaceNeedsTurn,
   workspaceWorking,
 }: Props) {
-  // Shipping and Shipped workspaces live in their own area, not the list.
+  // Shipping and Shipped workspaces share their own grid, not the list.
   const listed = useMemo(
     () => workspaces.filter((w) => !w.shipment),
     [workspaces],
   );
   const shipping = useMemo(
-    () => workspaces.filter((w) => w.shipment?.kind === "shipping"),
-    [workspaces],
-  );
-  const shipped = useMemo(
-    () => workspaces.filter((w) => w.shipment?.kind === "shipped"),
+    () => workspaces.filter((w) => w.shipment),
     [workspaces],
   );
 
@@ -390,7 +386,6 @@ export function Sidebar({
       </ul>
       <ShippingArea
         shipping={shipping}
-        shipped={shipped}
         selectedId={selectedId}
         workspaceWorking={workspaceWorking}
         onSelect={onSelect}
@@ -1031,7 +1026,7 @@ function ShippingTile({
     icon = <SignalIcon signal={signal} />;
   } else {
     tone = "shipped";
-    title = `${workspace.branch}\nshipped`;
+    title = `${workspace.branch}\nshipped, ready to delete`;
     icon = <MergedIcon />;
   }
   return (
@@ -1065,57 +1060,34 @@ function ShippingTile({
 
 function ShippingArea({
   shipping,
-  shipped,
   selectedId,
   workspaceWorking,
   onSelect,
   onContextMenu,
 }: {
   shipping: Workspace[];
-  shipped: Workspace[];
   selectedId: WorkspaceId | null;
   workspaceWorking: (ws: Workspace) => boolean;
   onSelect: (id: WorkspaceId) => void;
   onContextMenu: (ws: Workspace, x: number, y: number) => void;
 }) {
-  if (shipping.length === 0 && shipped.length === 0) return null;
+  if (shipping.length === 0) return null;
 
   return (
     <div className="shipping-area">
-      {shipping.length > 0 && (
-        <section>
-          <div className="shipping-label">Shipping</div>
-          <div className="shipping-grid">
-            {shipping.map((w) => (
-              <ShippingTile
-                key={w.id}
-                workspace={w}
-                selected={w.id === selectedId}
-                working={workspaceWorking(w)}
-                onSelect={() => onSelect(w.id)}
-                onContextMenu={(x, y) => onContextMenu(w, x, y)}
-              />
-            ))}
-          </div>
-        </section>
-      )}
-      {shipped.length > 0 && (
-        <section>
-          <div className="shipping-label">Shipped</div>
-          <div className="shipping-grid">
-            {shipped.map((w) => (
-              <ShippingTile
-                key={w.id}
-                workspace={w}
-                selected={w.id === selectedId}
-                working={false}
-                onSelect={() => onSelect(w.id)}
-                onContextMenu={(x, y) => onContextMenu(w, x, y)}
-              />
-            ))}
-          </div>
-        </section>
-      )}
+      <div className="shipping-label">Shipping</div>
+      <div className="shipping-grid">
+        {shipping.map((w) => (
+          <ShippingTile
+            key={w.id}
+            workspace={w}
+            selected={w.id === selectedId}
+            working={w.shipment?.kind === "shipping" && workspaceWorking(w)}
+            onSelect={() => onSelect(w.id)}
+            onContextMenu={(x, y) => onContextMenu(w, x, y)}
+          />
+        ))}
+      </div>
     </div>
   );
 }

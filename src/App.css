@@ -1882,10 +1882,15 @@ li.is-dragging {
   color: #c69327;
 }
 
-.shipping-tile.tone-gray,
-.shipping-tile.tone-shipped {
+.shipping-tile.tone-gray {
   background: rgba(125, 125, 125, 0.15);
   color: var(--muted);
+}
+
+/* Every Shipping PR closed: solid, where ready-to-merge is only tinted. */
+.shipping-tile.tone-shipped {
+  background: #2ea043;
+  color: #fff;
 }
 
 .shipping-tile:hover {

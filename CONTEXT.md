@@ -98,7 +98,7 @@ A Tracked PR the user named as the one being shipped when moving a workspace to 
 A message Tethys sends a Shipping workspace's session telling it to fix something on its own, such as a merge conflict, failing CI or a merge-queue failure.
 
 **Shipped**:
-Where a Shipping workspace goes once all its Shipping PRs are closed, merged or not, so the user can delete it. A workspace with any other PR still open goes back among the workspaces being worked on instead.
+What a Shipping workspace becomes once all its Shipping PRs are closed, merged or not: still shown with the Shipping ones, marked done, waiting for the user to delete it. A workspace with any other PR still open goes back among the workspaces being worked on instead.
 
 ### Workspace tabs
 
