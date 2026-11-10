@@ -179,6 +179,30 @@ html,
   white-space: nowrap;
 }
 
+.workspace-progress {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.workspace-progress-bar {
+  width: 22px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(125, 125, 125, 0.25);
+  overflow: hidden;
+}
+
+.workspace-progress-bar > span {
+  display: block;
+  height: 100%;
+  background: #2ea043;
+}
+
 .workspace-list > li.pending {
   opacity: 0.85;
 }

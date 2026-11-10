@@ -44,6 +44,9 @@ _Avoid_: Sub-workspace, blocker, dependent
 **Parent**:
 The workspace a child was handed out from. It can't be deleted while any of its children are still live, and it hears only about its own children, not theirs.
 
+**Progress**:
+How far a parent's agent says it is through the work it's handing out, as a count done out of a total. Reported by the agent, never worked out from its children.
+
 ### Lifecycle
 
 **Soft Delete**:

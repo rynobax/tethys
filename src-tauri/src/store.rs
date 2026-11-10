@@ -410,6 +410,7 @@ mod tests {
             parent: None,
             pending_messages: Vec::new(),
             shipment: None,
+            progress: None,
             artifacts: Vec::new(),
         }
     }

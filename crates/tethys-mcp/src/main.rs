@@ -21,9 +21,9 @@ use tokio::net::UnixStream;
 
 use tethys_mcp::{
     read_frame, write_frame, AddRepos, CreateWorkspace, LeaveShipping, LinkPr, Request,
-    RequestMemoryBudget, Response, ENV_REPO_KEYS, ENV_SESSION_ID, ENV_SOCKET, ENV_WORKSPACE_ID,
-    TOOL_ADD_REPOS, TOOL_CREATE_WORKSPACE, TOOL_LEAVE_SHIPPING, TOOL_LINK_PR,
-    TOOL_REQUEST_MEMORY_BUDGET,
+    RequestMemoryBudget, Response, SetProgress, ENV_REPO_KEYS, ENV_SESSION_ID, ENV_SOCKET,
+    ENV_WORKSPACE_ID, TOOL_ADD_REPOS, TOOL_CREATE_WORKSPACE, TOOL_LEAVE_SHIPPING, TOOL_LINK_PR,
+    TOOL_REQUEST_MEMORY_BUDGET, TOOL_SET_PROGRESS,
 };
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +52,12 @@ struct RequestMemoryBudgetArgs {
     gb: u64,
     minutes: u64,
     reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetProgressArgs {
+    done: u32,
+    total: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -344,6 +350,44 @@ impl TethysServer {
         )
     }
 
+    fn set_progress_schema(&self) -> JsonObject {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "done": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "How many of the items are finished.",
+                },
+                "total": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "How many items there are in all. 0 clears the progress.",
+                },
+            },
+            "required": ["done", "total"],
+            "additionalProperties": false,
+        });
+        schema
+            .as_object()
+            .cloned()
+            .expect("input schema literal is an object")
+    }
+
+    fn set_progress_tool(&self) -> Tool {
+        Tool::new(
+            Cow::Borrowed(TOOL_SET_PROGRESS),
+            Cow::Borrowed(
+                "Only use if orchestrating multiple child workspaces. Reports how \
+                 far through the list of work you're handing out you are, as done \
+                 out of total, and Tethys shows it on this workspace's row. Each \
+                 call replaces the last; call it whenever the count changes, and \
+                 with total 0 to clear it.",
+            ),
+            self.set_progress_schema(),
+        )
+    }
+
     /// Protocol `2026-07-28` requires `ttlMs`, which `with_all_items` omits;
     /// without it Claude Code retries until "tools fetch failed". Zero, since
     /// the `repos` enum is fixed at spawn.
@@ -354,6 +398,7 @@ impl TethysServer {
             self.add_repos_tool(),
             self.request_memory_budget_tool(),
             self.leave_shipping_tool(),
+            self.set_progress_tool(),
         ])
             .with_ttl_ms(0)
             .with_cache_scope(CacheScope::Private)
@@ -403,6 +448,7 @@ impl ServerHandler for TethysServer {
             TOOL_ADD_REPOS => self.add_repos(request.arguments).await,
             TOOL_REQUEST_MEMORY_BUDGET => self.request_memory_budget(request.arguments).await,
             TOOL_LEAVE_SHIPPING => self.leave_shipping(request.arguments).await,
+            TOOL_SET_PROGRESS => self.set_progress(request.arguments).await,
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool: {other}"),
                 None,
@@ -606,6 +652,39 @@ impl TethysServer {
                 "couldn't leave Shipping: {message}"
             )),
             other => failed(format!("Tethys answered leave_shipping with {other:?}")),
+        })
+    }
+}
+
+impl TethysServer {
+    async fn set_progress(
+        &self,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let args: SetProgressArgs = parse_args(arguments)?;
+        let request = Request::SetProgress(SetProgress {
+            from_workspace: self.from_workspace.clone(),
+            from_session: self.from_session.clone(),
+            done: args.done,
+            total: args.total,
+        });
+
+        let response = match self.send(&request).await {
+            Ok(response) => response,
+            Err(e) => return Ok(failed(format!("progress not recorded: {e}"))),
+        };
+
+        Ok(match response {
+            Response::ProgressSet => CallToolResult::success(vec![ContentBlock::text(
+                if args.total == 0 {
+                    "Progress cleared.".to_string()
+                } else {
+                    format!("Progress recorded: {}/{}.", args.done, args.total)
+                },
+            )])
+            .into(),
+            Response::Rejected { message } => failed(format!("progress not recorded: {message}")),
+            other => failed(format!("Tethys answered set_progress with {other:?}")),
         })
     }
 }

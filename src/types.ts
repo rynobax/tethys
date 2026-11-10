@@ -124,6 +124,8 @@ export interface Workspace {
   /** Whether it nests is `workspaceTree`'s call, not this field's. */
   parent: WorkspaceId | null;
   shipment: Shipment | null;
+  /** Reported by an agent orchestrating children. */
+  progress: { done: number; total: number } | null;
 }
 
 export interface SystemErrorEntry {

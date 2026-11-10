@@ -679,6 +679,7 @@ function WorkspaceRow({
         <span className="workspace-name-text" title={workspace.branch}>
           {workspace.branch}
         </span>
+        {workspace.progress && <Progress {...workspace.progress} />}
       </div>
       {status === "creating" && <div className="pending-label">creating…</div>}
       {status === "queued" && (
@@ -1089,6 +1090,17 @@ function ShippingArea({
         ))}
       </div>
     </div>
+  );
+}
+
+function Progress({ done, total }: { done: number; total: number }) {
+  return (
+    <span className="workspace-progress" title={`${done} of ${total} done`}>
+      <span className="workspace-progress-bar">
+        <span style={{ width: `${(100 * done) / total}%` }} />
+      </span>
+      {done}/{total}
+    </span>
   );
 }
 

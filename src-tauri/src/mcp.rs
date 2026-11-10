@@ -15,11 +15,12 @@ use crate::paths::Paths;
 use crate::provision::{self, RepoAddition};
 use crate::provision_queue::ProvisionQueue;
 use crate::registry::RegistryLoad;
+use crate::state::Progress;
 use crate::store::Store;
 
 pub use tethys_mcp::{
     AddRepos, AddedRepo, CreateWorkspace, LeaveShipping, LinkPr, Request, RequestMemoryBudget,
-    Response,
+    Response, SetProgress,
 };
 
 const TOOL_TIMEOUT_SECS: u32 = 60 * 60;
@@ -177,6 +178,7 @@ async fn serve_connection(mut stream: UnixStream, services: McpServices) -> AppR
         Request::AddRepos(req) => add_repos(&services, req).await,
         Request::RequestMemoryBudget(req) => request_memory_budget(&services, req).await,
         Request::LeaveShipping(req) => leave_shipping(&services, req).await,
+        Request::SetProgress(req) => set_progress(&services, req).await,
     };
     tethys_mcp::write_frame(&mut stream, &response).await?;
     Ok(())
@@ -300,6 +302,34 @@ async fn leave_shipping(services: &McpServices, req: LeaveShipping) -> Response 
     }
 }
 
+async fn set_progress(services: &McpServices, req: SetProgress) -> Response {
+    if req.done > req.total {
+        return Response::Rejected {
+            message: format!("done ({}) can't exceed total ({})", req.done, req.total),
+        };
+    }
+    let progress = (req.total > 0).then_some(Progress {
+        done: req.done,
+        total: req.total,
+    });
+    let set = services
+        .store
+        .update_workspace(&req.from_workspace, |ws| {
+            ws.progress = progress;
+            Ok(())
+        })
+        .await;
+    match set {
+        Ok(()) => {
+            debug!(workspace = %req.from_workspace, progress = ?progress, "progress set");
+            Response::ProgressSet
+        }
+        Err(e) => Response::Rejected {
+            message: e.to_string(),
+        },
+    }
+}
+
 /// A repo already linked is reported back rather than refused, so an agent
 /// retrying an interrupted call gets its paths instead of an error.
 async fn add_missing_repos(services: &McpServices, req: &AddRepos) -> AppResult<Response> {
@@ -414,7 +444,7 @@ mod tests {
             args[1],
             "--allowed-tools=mcp__tethys__create_workspace,mcp__tethys__link_pr,\
              mcp__tethys__add_repos,mcp__tethys__request_memory_budget,\
-             mcp__tethys__leave_shipping"
+             mcp__tethys__leave_shipping,mcp__tethys__set_progress"
         );
     }
 }

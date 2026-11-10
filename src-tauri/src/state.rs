@@ -60,6 +60,9 @@ pub struct Workspace {
     pub pending_messages: Vec<String>,
     #[serde(default)]
     pub shipment: Option<Shipment>,
+    /// Set by the workspace's own agent while it orchestrates children.
+    #[serde(default)]
+    pub progress: Option<Progress>,
     /// Oldest first.
     #[serde(default)]
     pub artifacts: Vec<Artifact>,
@@ -121,6 +124,13 @@ pub enum Shipment {
     },
     /// Every Shipping PR closed, merged or not; waiting to be deleted.
     Shipped { at: DateTime<Utc> },
+}
+
+/// How far an orchestrating agent says it is through the work it's handing out.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Progress {
+    pub done: u32,
+    pub total: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -238,6 +248,7 @@ impl Workspace {
             parent: None,
             pending_messages: Vec::new(),
             shipment: None,
+            progress: None,
             artifacts: Vec::new(),
         }
     }
@@ -427,6 +438,7 @@ mod tests {
             parent: None,
             pending_messages: Vec::new(),
             shipment: None,
+            progress: None,
             artifacts: Vec::new(),
         }
     }

@@ -11,6 +11,7 @@ pub const TOOL_LINK_PR: &str = "link_pr";
 pub const TOOL_ADD_REPOS: &str = "add_repos";
 pub const TOOL_REQUEST_MEMORY_BUDGET: &str = "request_memory_budget";
 pub const TOOL_LEAVE_SHIPPING: &str = "leave_shipping";
+pub const TOOL_SET_PROGRESS: &str = "set_progress";
 
 /// Bare, as codex grants them.
 pub const TOOL_NAMES: &[&str] = &[
@@ -19,6 +20,7 @@ pub const TOOL_NAMES: &[&str] = &[
     TOOL_ADD_REPOS,
     TOOL_REQUEST_MEMORY_BUDGET,
     TOOL_LEAVE_SHIPPING,
+    TOOL_SET_PROGRESS,
 ];
 
 /// Qualified, as Claude's `--allowed-tools` wants them. An unlisted tool
@@ -29,6 +31,7 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "mcp__tethys__add_repos",
     "mcp__tethys__request_memory_budget",
     "mcp__tethys__leave_shipping",
+    "mcp__tethys__set_progress",
 ];
 
 pub const ENV_SOCKET: &str = "TETHYS_MCP_SOCKET";
@@ -47,6 +50,7 @@ pub enum Request {
     AddRepos(AddRepos),
     RequestMemoryBudget(RequestMemoryBudget),
     LeaveShipping(LeaveShipping),
+    SetProgress(SetProgress),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +108,17 @@ pub struct LeaveShipping {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetProgress {
+    /// Also the workspace whose progress is set, as with `LinkPr`.
+    pub from_workspace: String,
+    #[serde(default)]
+    pub from_session: Option<String>,
+    pub done: u32,
+    /// Zero clears it.
+    pub total: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddedRepo {
     pub repo_key: String,
     pub worktree_path: String,
@@ -136,6 +151,7 @@ pub enum Response {
     },
     BudgetDenied,
     LeftShipping,
+    ProgressSet,
     Rejected {
         message: String,
     },
@@ -249,6 +265,20 @@ mod tests {
         };
         assert_eq!(req.repos, vec!["nl-backend".to_string()]);
         assert_eq!(req.from_session, None);
+    }
+
+    #[test]
+    fn a_progress_frame_parses_under_its_own_tag() {
+        let raw = r#"{
+            "op": "set_progress",
+            "from_workspace": "ws-1",
+            "done": 3,
+            "total": 7
+        }"#;
+        let Request::SetProgress(req) = serde_json::from_str(raw).expect("must deserialize") else {
+            panic!("must parse as a set_progress request")
+        };
+        assert_eq!((req.done, req.total), (3, 7));
     }
 
     #[tokio::test]
