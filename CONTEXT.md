@@ -77,17 +77,36 @@ The instruction an agent writes for the session it hands work to. Unlike Notes, 
 
 ### Pull requests
 
-**Branch PR**:
-The pull request open on a workspace's own branch. Tethys finds it by itself, by branch name, and there is at most one per repo link.
+**Tracked PR**:
+A pull request a workspace shows and keeps polling, in one list per repo link. The PR on the workspace's own branch is found and added automatically; any other (a follow-up, something cut off main in the same worktree) is linked by an agent. Tracking ends only when the user detaches it.
+_Avoid_: Branch PR, attached PR, extra PR
 
-**Attached PR**:
-Any other pull request a workspace should show — a stacked PR, a follow-up, something cut off main in the same worktree. Named by the user in the attach dialog or by an agent linking one it opened, since nothing about the workspace implies it.
-_Avoid_: Extra PR, secondary PR
+**Stack**:
+Pull requests GitHub knows to be one `gh stack`, drawn together in base-first order. Tethys recognizes stacks and never creates or restacks them.
+_Avoid_: Chain, PR train
 
-### Side panel
+### Shipping
+
+**Shipping**:
+The state the user puts a workspace with at least one Tracked PR in once its work is done and its Shipping PRs only need to get merged. It sits apart from the workspaces still being worked on, its session fixes what it can without the user, and it asks for the user's attention once every Shipping PR is approved and passing. It stays Shipping until its Shipping PRs are all closed, or until the user takes it out or the agent says it needs the user, either of which sends it back among the workspaces being worked on. Talking to its session doesn't change that. A workspace that isn't Shipping or Shipped has no special name.
+_Avoid_: Landing, Outbox, Shippable, Ready, Parked
+
+**Shipping PR**:
+A Tracked PR the user named as the one being shipped when moving a workspace to Shipping. A workspace's only PR is its Shipping PR without asking. Its other Tracked PRs play no part in Shipping, and being in a Stack makes no difference.
+
+**Nudge**:
+A message Tethys sends a Shipping workspace's session telling it to fix something on its own, such as a merge conflict, failing CI or a merge-queue failure.
+
+**Shipped**:
+Where a Shipping workspace goes once all its Shipping PRs are closed, merged or not, so the user can delete it. A workspace with any other PR still open goes back among the workspaces being worked on instead.
+
+### Workspace tabs
+
+**Tab**:
+One full-pane view of a ready workspace: the Chat (the session's terminal), one per Tracked PR, and one per Artifact.
 
 **Side Panel**:
-The collapsible pane on the right of a workspace, holding its Notes and its Artifacts, one tab each.
+The collapsible pane beside the Chat that holds the workspace's Notes.
 _Avoid_: Inspector, drawer, right pane
 
 **Artifact**:
@@ -99,3 +118,6 @@ An Artifact that is a Mermaid diagram, taken from the source a session wrote in 
 
 **Page**:
 An Artifact that is an HTML file a session wrote inside the workspace, shown as the file currently on disk.
+
+**Review**:
+An Artifact that is an ummon review a session started on one of the workspace's repos.
