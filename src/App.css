@@ -1828,13 +1828,85 @@ li.is-dragging {
   border-top: 1px solid var(--border);
 }
 
+.shipping-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
 .shipping-label {
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--muted);
-  margin-bottom: 4px;
+}
+
+.shipping-toggle {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.shipping-toggle:hover {
+  color: var(--fg);
+  background: rgba(125, 125, 125, 0.16);
+}
+
+.shipping-area.expanded {
+  max-height: 50vh;
+  min-height: 0;
+}
+
+.shipping-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.shipping-rows > li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.shipping-rows > li:hover {
+  background: rgba(125, 125, 125, 0.08);
+}
+
+.shipping-rows > li.selected {
+  background: rgba(125, 125, 125, 0.14);
+}
+
+.shipping-row-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-family: "SF Mono", ui-monospace, monospace;
+}
+
+.shipping-row-branch {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shipping-row-prs {
+  font-size: 10px;
+  color: var(--muted);
 }
 
 .shipping-grid {

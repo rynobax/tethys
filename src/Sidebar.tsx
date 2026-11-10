@@ -1083,6 +1083,8 @@ function ShippingTile({
   );
 }
 
+const SHIPPING_EXPANDED_KEY = "tethys.shippingExpanded";
+
 function ShippingArea({
   shipping,
   selectedId,
@@ -1096,25 +1098,82 @@ function ShippingArea({
   onSelect: (id: WorkspaceId) => void;
   onContextMenu: (ws: Workspace, x: number, y: number) => void;
 }) {
+  // Expanded names each workspace and its PRs, for finding a particular one.
+  const [expanded, setExpanded] = useState(
+    () => localStorage.getItem(SHIPPING_EXPANDED_KEY) === "1",
+  );
+  const toggle = () =>
+    setExpanded((prev) => {
+      localStorage.setItem(SHIPPING_EXPANDED_KEY, prev ? "0" : "1");
+      return !prev;
+    });
+
   if (shipping.length === 0) return null;
 
+  const tile = (w: Workspace) => (
+    <ShippingTile
+      workspace={w}
+      selected={w.id === selectedId}
+      working={w.shipment?.kind === "shipping" && workspaceWorking(w)}
+      onSelect={() => onSelect(w.id)}
+      onContextMenu={(x, y) => onContextMenu(w, x, y)}
+    />
+  );
+
   return (
-    <div className="shipping-area">
-      <div className="shipping-label">Shipping</div>
-      <div className="shipping-grid">
-        {shipping.map((w) => (
-          <ShippingTile
-            key={w.id}
-            workspace={w}
-            selected={w.id === selectedId}
-            working={w.shipment?.kind === "shipping" && workspaceWorking(w)}
-            onSelect={() => onSelect(w.id)}
-            onContextMenu={(x, y) => onContextMenu(w, x, y)}
-          />
-        ))}
+    <div className={`shipping-area${expanded ? " expanded" : ""}`}>
+      <div className="shipping-header">
+        <span className="shipping-label">Shipping</span>
+        <button
+          type="button"
+          className="shipping-toggle"
+          title={expanded ? "Minimize" : "Maximize"}
+          aria-label={expanded ? "Minimize" : "Maximize"}
+          onClick={toggle}
+        >
+          {expanded ? "−" : "+"}
+        </button>
       </div>
+      {expanded ? (
+        <ul className="shipping-rows">
+          {shipping.map((w) => (
+            <li
+              key={w.id}
+              className={w.id === selectedId ? "selected" : undefined}
+              onClick={() => onSelect(w.id)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                onContextMenu(w, e.clientX, e.clientY);
+              }}
+            >
+              {tile(w)}
+              <span className="shipping-row-text">
+                <span className="shipping-row-branch" title={w.branch}>
+                  {w.branch}
+                </span>
+                <span className="shipping-row-prs">{prNumbers(w)}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="shipping-grid">
+          {shipping.map((w) => (
+            <Fragment key={w.id}>{tile(w)}</Fragment>
+          ))}
+        </div>
+      )}
     </div>
   );
+}
+
+/** A Shipped workspace no longer names its Shipping PRs; its tracked ones stand in. */
+function prNumbers(w: Workspace): string {
+  const numbers =
+    w.shipment?.kind === "shipping"
+      ? w.shipment.prs.map((p) => p.number)
+      : w.repo_links.flatMap((l) => l.prs.map((p) => p.number));
+  return numbers.map((n) => `#${n}`).join(" ");
 }
 
 function Progress({ done, total }: { done: number; total: number }) {
