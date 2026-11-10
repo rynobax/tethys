@@ -679,8 +679,8 @@ function WorkspaceRow({
         <span className="workspace-name-text" title={workspace.branch}>
           {workspace.branch}
         </span>
-        {workspace.progress && <Progress {...workspace.progress} />}
       </div>
+      {workspace.progress && <Progress {...workspace.progress} />}
       {status === "creating" && <div className="pending-label">creating…</div>}
       {status === "queued" && (
         <div className="pending-label" title="Tethys sets up one workspace at a time">
