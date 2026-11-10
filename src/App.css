@@ -1334,10 +1334,20 @@ button.danger.primary:hover:not(:disabled) {
 
 .session-terminal {
   flex: 1;
+  width: 100%;
+  max-width: 800px;
+  align-self: center;
   min-height: 240px;
   overflow: hidden;
   margin-bottom: -24px;
   background: var(--bg);
+}
+
+/* tmux stays in xterm's normal buffer, so xterm keeps a scrollback of raw
+   tmux redraws. Claude scrolls its own view, so that bar only misleads; the
+   wheel still reaches xterm's scrollback for panes that don't take the mouse. */
+.session-terminal .xterm-scrollable-element > .scrollbar {
+  display: none;
 }
 
 .spinner {
