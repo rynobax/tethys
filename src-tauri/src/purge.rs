@@ -13,7 +13,6 @@ use crate::error::{AppError, AppResult};
 use crate::git;
 use crate::job::JobTx;
 use crate::paths::Paths;
-use crate::pending_permissions;
 use crate::reconcile;
 use crate::registry::{RegistryLoad, Repo};
 use crate::repo_env;
@@ -32,15 +31,6 @@ async fn purge_workspace(
     registry: &Arc<RegistryLoad>,
     workspace: &Workspace,
 ) -> AppResult<()> {
-    // Best-effort: failing here must not leave a workspace that can't be torn down.
-    if let Err(e) = pending_permissions::capture_for_purge(workspace, paths).await {
-        warn!(
-            workspace = %workspace.id,
-            error = %e,
-            "failed to capture pending permissions before purge"
-        );
-    }
-
     let tx = JobTx::silent();
     let reg = registry.require().ok();
 
@@ -100,9 +90,9 @@ async fn purge_workspace(
         .await
 }
 
-/// Best-effort, like the permission capture: a broken teardown must not leave
-/// a workspace that can't be purged. The script gets the repo's rendered env,
-/// so it addresses this worktree's resources even if its `.env` never had them.
+/// Best-effort: a broken teardown must not leave a workspace that can't be
+/// purged. The script gets the repo's rendered env, so it addresses this
+/// worktree's resources even if its `.env` never had them.
 async fn run_teardown(repo: &Repo, worktree_path: &Path, tx: &JobTx) {
     let Some(script) = repo
         .teardown_script
@@ -215,7 +205,6 @@ impl Purger {
         }
 
         let _ = self.app.emit("system_status:changed", &());
-        let _ = self.app.emit("pending_permissions:changed", &());
     }
 }
 

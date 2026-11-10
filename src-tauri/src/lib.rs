@@ -7,7 +7,6 @@ mod child_env;
 mod agent_bin;
 mod agent_cmd;
 mod claude_local;
-mod claude_settings;
 mod codex_trust;
 mod commands;
 mod error;
@@ -23,7 +22,6 @@ mod logging;
 mod mcp;
 mod memwatch;
 mod paths;
-mod pending_permissions;
 mod pr_view;
 mod probe;
 mod provision;
@@ -303,9 +301,6 @@ pub fn run() {
             commands::run_purge_now,
             commands::list_system_errors,
             commands::dismiss_system_error,
-            commands::list_pending_permissions,
-            commands::apply_pending_permission,
-            commands::dismiss_pending_permission,
             commands::registry_status,
             commands::github_auth_status,
             commands::github_reprobe_auth,

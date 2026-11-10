@@ -64,9 +64,6 @@ _Avoid_: Orphan, zombie, leak
 How much memory everything a session started may hold at once, the agent CLI itself aside. A session over it loses its biggest job, and the agent is told why. The user can raise it for a while when an agent asks.
 _Avoid_: Quota, memory limit, cap
 
-**Pending Permissions**:
-Workspace-local Claude permission grants captured at purge (Claude only — codex has no equivalent to capture) for the user to later fold into the shared per-repo settings or discard.
-
 ### Handoff
 
 **Handoff**:

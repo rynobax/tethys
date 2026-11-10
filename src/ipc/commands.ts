@@ -14,7 +14,6 @@ import type {
   GithubAuthSnapshot,
   GithubPrStatus,
   JobEvent,
-  PendingPermission,
   RegistryStatus,
   SessionInfo,
   SystemErrorEntry,
@@ -173,17 +172,6 @@ export const listSystemErrors = () =>
 
 export const dismissSystemError = (id: string) =>
   invoke<void>("dismiss_system_error", { id });
-
-export const listPendingPermissions = () =>
-  invoke<PendingPermission[]>("list_pending_permissions");
-
-export const applyPendingPermission = (id: string, targetRepoKeys: string[]) =>
-  invoke<void>("apply_pending_permission", {
-    args: { id, target_repo_keys: targetRepoKeys },
-  });
-
-export const dismissPendingPermission = (id: string) =>
-  invoke<void>("dismiss_pending_permission", { id });
 
 export const removeOrphanDir = (path: string) =>
   invoke<void>("remove_orphan_dir", { path });

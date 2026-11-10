@@ -21,7 +21,6 @@ export interface AppEvents {
   "github:auth_changed": GithubAuthSnapshot;
   "github:status_changed": GithubStatusChangedEvent;
   "system_status:changed": null;
-  "pending_permissions:changed": null;
   "theme:changed": Theme | null;
   "artifact:changed": ArtifactChangedEvent;
 }

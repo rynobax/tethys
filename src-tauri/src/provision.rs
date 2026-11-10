@@ -67,8 +67,6 @@ pub async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLi
         )
         .await?;
 
-        claude_local::install_symlink(ctx.worktree_path, ctx.paths, ctx.tx, &ctx.repo.key).await?;
-
         copy_configured_files(
             &clone_path,
             ctx.worktree_path,
@@ -496,8 +494,7 @@ async fn extend_workspace_root_settings(
         return;
     };
     if let Err(e) =
-        claude_local::append_repo_to_workspace_root_settings(&workspace_root, repo_key, paths)
-            .await
+        claude_local::grant_git_dirs(&workspace_root, &[repo_key.to_string()], paths).await
     {
         warn!(
             workspace = %workspace.id,
@@ -537,7 +534,7 @@ async fn seed_workspace_root(
         .map(|r| r.repo_key.clone())
         .collect();
     if let Err(e) =
-        claude_local::write_workspace_root_settings(&workspace_root, &repo_keys, paths).await
+        claude_local::grant_git_dirs(&workspace_root, &repo_keys, paths).await
     {
         warn!(
             workspace = %workspace.id,

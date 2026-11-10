@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import * as api from "./ipc/commands";
 
 import type {
   Discrepancies,
-  PendingPermission,
   RegistryStatus,
   SystemErrorEntry,
   Workspace,
@@ -20,7 +19,6 @@ type Props = {
 };
 
 const HOUR_MS = 60 * 60 * 1000;
-type TabId = "status" | "pending_permissions";
 
 export function SystemStatus({
   allWorkspaces,
@@ -29,9 +27,7 @@ export function SystemStatus({
   onDiscrepancyChange,
 }: Props) {
   const [errors, setErrors] = useState<SystemErrorEntry[]>([]);
-  const [pending, setPending] = useState<PendingPermission[]>([]);
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<TabId>("status");
 
   const refreshErrors = useCallback(async () => {
     try {
@@ -42,31 +38,18 @@ export function SystemStatus({
     }
   }, []);
 
-  const refreshPending = useCallback(async () => {
-    try {
-      const list = await api.listPendingPermissions();
-      setPending(list);
-    } catch (e) {
-      console.error("list_pending_permissions:", e);
-    }
-  }, []);
-
   useEffect(() => {
     refreshErrors();
-    refreshPending();
-  }, [refreshErrors, refreshPending]);
+  }, [refreshErrors]);
 
   useAppEvent("system_status:changed", () => refreshErrors());
-  useAppEvent("pending_permissions:changed", () => refreshPending());
 
   const pendingDeletes = allWorkspaces.filter((w) => w.deleted_at !== null);
   const hasErrors = errors.length > 0;
-  const hasPending = pending.length > 0;
+  // Pending deletions are routine, so they don't warn.
   const hasDiscrepancies =
     (discrepancies?.orphaned_dirs.length ?? 0) > 0 ||
     (discrepancies?.missing_worktrees.length ?? 0) > 0;
-  // Pending deletions are routine, so they don't warn.
-  const hasWarnings = hasPending || hasDiscrepancies;
 
   return (
     <>
@@ -78,23 +61,19 @@ export function SystemStatus({
       >
         <span
           className={`status-dot ${
-            hasErrors ? "red" : hasWarnings ? "yellow" : "green"
+            hasErrors ? "red" : hasDiscrepancies ? "yellow" : "green"
           }`}
         />
         Status
       </button>
       {open && (
         <SystemStatusModal
-          tab={tab}
-          onTabChange={setTab}
           errors={errors}
           pendingDeletes={pendingDeletes}
-          pendingPermissions={pending}
           discrepancies={discrepancies}
           registry={registry}
           onClose={() => setOpen(false)}
           onRefreshErrors={refreshErrors}
-          onRefreshPending={refreshPending}
           onDiscrepancyChange={onDiscrepancyChange}
         />
       )}
@@ -103,28 +82,20 @@ export function SystemStatus({
 }
 
 function SystemStatusModal({
-  tab,
-  onTabChange,
   errors,
   pendingDeletes,
-  pendingPermissions,
   discrepancies,
   registry,
   onClose,
   onRefreshErrors,
-  onRefreshPending,
   onDiscrepancyChange,
 }: {
-  tab: TabId;
-  onTabChange: (t: TabId) => void;
   errors: SystemErrorEntry[];
   pendingDeletes: Workspace[];
-  pendingPermissions: PendingPermission[];
   discrepancies: Discrepancies | null;
   registry: RegistryStatus | null;
   onClose: () => void;
   onRefreshErrors: () => void;
-  onRefreshPending: () => void;
   onDiscrepancyChange: () => void;
 }) {
   return (
@@ -135,41 +106,16 @@ function SystemStatusModal({
         role="dialog"
         aria-modal="true"
       >
-        <div className="modal-tabs">
-          <button
-            type="button"
-            className={`modal-tab${tab === "status" ? " active" : ""}`}
-            onClick={() => onTabChange("status")}
-          >
-            Status
-          </button>
-          <button
-            type="button"
-            className={`modal-tab${tab === "pending_permissions" ? " active" : ""}`}
-            onClick={() => onTabChange("pending_permissions")}
-          >
-            Pending permissions
-            {pendingPermissions.length > 0 && (
-              <span className="tab-badge">{pendingPermissions.length}</span>
-            )}
-          </button>
-        </div>
+        <h3>System status</h3>
 
-        {tab === "status" ? (
-          <StatusTab
-            errors={errors}
-            pendingDeletes={pendingDeletes}
-            discrepancies={discrepancies}
-            registry={registry}
-            onRefresh={onRefreshErrors}
-            onDiscrepancyChange={onDiscrepancyChange}
-          />
-        ) : (
-          <PendingPermissionsTab
-            entries={pendingPermissions}
-            onRefresh={onRefreshPending}
-          />
-        )}
+        <StatusSections
+          errors={errors}
+          pendingDeletes={pendingDeletes}
+          discrepancies={discrepancies}
+          registry={registry}
+          onRefresh={onRefreshErrors}
+          onDiscrepancyChange={onDiscrepancyChange}
+        />
 
         <div className="modal-actions">
           <button type="button" onClick={onClose} autoFocus>
@@ -181,7 +127,7 @@ function SystemStatusModal({
   );
 }
 
-function StatusTab({
+function StatusSections({
   errors,
   pendingDeletes,
   discrepancies,
@@ -386,145 +332,6 @@ function PathRow({
       </button>
       <code>{path}</code>
     </div>
-  );
-}
-
-function PendingPermissionsTab({
-  entries,
-  onRefresh,
-}: {
-  entries: PendingPermission[];
-  onRefresh: () => void;
-}) {
-  return (
-    <section>
-      <div className="section-header">
-        <h4>Captured workspace-root grants</h4>
-      </div>
-      {entries.length === 0 ? (
-        <p className="muted">
-          No pending entries. When a workspace is purged, any permissions
-          Claude approved at the workspace-root level — that aren&apos;t already
-          in the per-repo settings — get captured here for review.
-        </p>
-      ) : (
-        <ul className="status-list pending-permissions-list">
-          {entries.map((entry) => (
-            <PendingPermissionRow
-              key={entry.id}
-              entry={entry}
-              onChanged={onRefresh}
-            />
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-function PendingPermissionRow({
-  entry,
-  onChanged,
-}: {
-  entry: PendingPermission;
-  onChanged: () => void;
-}) {
-  const initialSelection = useMemo(() => {
-    const set = new Set<string>();
-    if (entry.suggested_repo_key) set.add(entry.suggested_repo_key);
-    return set;
-  }, [entry.suggested_repo_key]);
-  const [selected, setSelected] = useState<Set<string>>(initialSelection);
-  const [busy, setBusy] = useState(false);
-
-  const toggle = (key: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
-
-  const apply = async () => {
-    if (selected.size === 0) return;
-    setBusy(true);
-    try {
-      await api.applyPendingPermission(entry.id, Array.from(selected));
-      onChanged();
-    } catch (e) {
-      alert(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const dismiss = async () => {
-    setBusy(true);
-    try {
-      await api.dismissPendingPermission(entry.id);
-      onChanged();
-    } catch (e) {
-      alert(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const displayEntry =
-    entry.suggested_repo_key &&
-    selected.size === 1 &&
-    selected.has(entry.suggested_repo_key) &&
-    entry.stripped_entry
-      ? entry.stripped_entry
-      : entry.raw_entry;
-
-  return (
-    <li className="pending-permission-row">
-      <div className="status-row">
-        <span className={`permission-category ${entry.category}`}>
-          {entry.category}
-        </span>
-        <code className="permission-entry">{displayEntry}</code>
-      </div>
-      <div className="muted permission-meta">
-        from <code>{entry.workspace_branch}</code> ·{" "}
-        {new Date(entry.captured_at).toLocaleString()}
-      </div>
-      <div className="permission-repo-picker">
-        <span className="muted">Apply to:</span>
-        {entry.workspace_repo_keys.length === 0 ? (
-          <span className="muted">(no repos recorded)</span>
-        ) : (
-          entry.workspace_repo_keys.map((key) => (
-            <label key={key} className="permission-repo-option">
-              <input
-                type="checkbox"
-                checked={selected.has(key)}
-                onChange={() => toggle(key)}
-                disabled={busy}
-              />
-              {key}
-              {key === entry.suggested_repo_key && (
-                <span className="muted"> (suggested)</span>
-              )}
-            </label>
-          ))
-        )}
-      </div>
-      <div className="permission-actions">
-        <button
-          type="button"
-          onClick={apply}
-          disabled={busy || selected.size === 0}
-        >
-          Apply
-        </button>
-        <button type="button" onClick={dismiss} disabled={busy}>
-          Dismiss
-        </button>
-      </div>
-    </li>
   );
 }
 

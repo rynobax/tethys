@@ -1,70 +1,23 @@
-//! Each repo has one shared `settings.local.json`, symlinked into every
-//! worktree of it so a permission granted in one workspace applies to all.
+//! The workspace root's `.claude/settings.local.json`, which Tethys touches
+//! only to let a sandboxed session run git: a worktree's metadata lives in its
+//! clone's `.git` under the data dir, outside anything the sandbox lets a
+//! session write by default.
 //!
-//! The workspace root gets its own, seeded from the union of its repos' files.
-//! After seeding it's the workspace's to edit; Tethys only ever extends it.
+//! Everything else in the file is the session's, so it's read, extended and
+//! written back with every key Tethys doesn't own left as it was.
 
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::fs;
 use tracing::warn;
 
-use crate::claude_settings::{PermissionCategory, SettingsDoc};
-
 use crate::error::{AppError, AppResult};
-use crate::job::JobTx;
 use crate::paths::Paths;
 
-const SEEDED_MARKER: &str = "tethys (seeded on workspace create; safe to edit)";
-
-/// A real file at the link path is one the repo tracks, so it's left alone.
-pub async fn install_symlink(
-    worktree_path: &Path,
-    paths: &Paths,
-    tx: &JobTx,
-    repo_key: &str,
-) -> AppResult<()> {
-    let shared_path = paths.repo_shared_claude_local(repo_key);
-    let mut shared = SettingsDoc::read(&shared_path).await?;
-    // Retire an older grant of the whole repos dir, which left clone sources
-    // writable.
-    shared.revoke_write(&paths.repos_clone_dir());
-    shared.allow_write(&paths.repo_git_dir(repo_key));
-    shared.write_atomic(&shared_path).await?;
-
-    let claude_dir = worktree_path.join(".claude");
-    fs::create_dir_all(&claude_dir).await?;
-    let link_path = claude_dir.join("settings.local.json");
-
-    match fs::symlink_metadata(&link_path).await {
-        Ok(_) => {
-            warn!(
-                path = %link_path.display(),
-                "settings.local.json already exists in worktree; skipping symlink"
-            );
-            tx.status(
-                "settings.local.json already present; leaving as-is",
-                Some(repo_key),
-            );
-            return Ok(());
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(AppError::Io(e)),
-    }
-
-    fs::symlink(&shared_path, &link_path).await?;
-    tx.status(
-        format!(
-            "linked .claude/settings.local.json -> {}",
-            shared_path.display()
-        ),
-        Some(repo_key),
-    );
-    Ok(())
-}
-
-pub async fn write_workspace_root_settings(
+/// Grants write access to each repo's clone `.git` dir. Idempotent, so the
+/// same call covers a new workspace and a repo added to an existing one.
+pub async fn grant_git_dirs(
     workspace_root: &Path,
     repo_keys: &[String],
     paths: &Paths,
@@ -72,273 +25,169 @@ pub async fn write_workspace_root_settings(
     if !fs::try_exists(workspace_root).await? {
         return Ok(());
     }
-
-    let mut root = SettingsDoc::new();
-    root.set("_seededBy", Value::String(SEEDED_MARKER.into()));
-
+    let file_path = workspace_root.join(".claude").join("settings.local.json");
+    let mut doc = read(&file_path).await?;
+    // Claude Code deep-merges sandbox config across scopes, so contribute only
+    // these entries.
+    let allow_write = array_at(
+        object_at(object_at(&mut doc, "sandbox"), "filesystem"),
+        "allowWrite",
+    );
     for repo_key in repo_keys {
-        let repo_doc = SettingsDoc::read_lossy(&paths.repo_shared_claude_local(repo_key)).await;
-        for category in PermissionCategory::ALL {
-            for entry in repo_doc.permissions(category) {
-                root.add_permission(category, &entry.scoped_to_repo(repo_key));
-            }
+        let text = paths.repo_git_dir(repo_key).to_string_lossy().into_owned();
+        if !allow_write.iter().any(|v| v.as_str() == Some(&text)) {
+            allow_write.push(Value::String(text));
         }
     }
+    write_atomic(&doc, &file_path).await
+}
 
-    for repo_key in repo_keys {
-        root.allow_write(&paths.repo_git_dir(repo_key));
+/// Missing or malformed reads as empty.
+async fn read(path: &Path) -> AppResult<Map<String, Value>> {
+    let raw = match fs::read_to_string(path).await {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+        Err(e) => return Err(AppError::Io(e)),
+    };
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(Value::Object(m)) => Ok(m),
+        _ => {
+            warn!(path = %path.display(), "settings.local.json is not a JSON object — treating as empty");
+            Ok(Map::new())
+        }
     }
+}
 
-    let file_path = workspace_root.join(".claude").join("settings.local.json");
-    root.write_atomic(&file_path).await?;
+async fn write_atomic(doc: &Map<String, Value>, path: &Path) -> AppResult<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    let mut content = serde_json::to_string_pretty(doc)
+        .map_err(|e| AppError::Other(format!("serializing settings.local.json: {e}")))?;
+    content.push('\n');
+
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, content).await?;
+    fs::rename(&tmp, path).await?;
     Ok(())
 }
 
-pub async fn append_repo_to_workspace_root_settings(
-    workspace_root: &Path,
-    repo_key: &str,
-    paths: &Paths,
-) -> AppResult<()> {
-    if !fs::try_exists(workspace_root).await? {
-        return Ok(());
+/// Replaces a non-object value.
+fn object_at<'a>(map: &'a mut Map<String, Value>, key: &str) -> &'a mut Map<String, Value> {
+    let entry = map
+        .entry(key.to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !entry.is_object() {
+        *entry = Value::Object(Map::new());
     }
-    let file_path = workspace_root.join(".claude").join("settings.local.json");
-    let mut root = SettingsDoc::read(&file_path).await?;
+    entry.as_object_mut().expect("just made an object")
+}
 
-    let repo_doc = SettingsDoc::read_lossy(&paths.repo_shared_claude_local(repo_key)).await;
-    for category in PermissionCategory::ALL {
-        for entry in repo_doc.permissions(category) {
-            root.add_permission(category, &entry.scoped_to_repo(repo_key));
-        }
+/// Replaces a non-array value.
+fn array_at<'a>(map: &'a mut Map<String, Value>, key: &str) -> &'a mut Vec<Value> {
+    let entry = map
+        .entry(key.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !entry.is_array() {
+        *entry = Value::Array(Vec::new());
     }
-    root.allow_write(&paths.repo_git_dir(repo_key));
-
-    root.set("_seededBy", Value::String(SEEDED_MARKER.into()));
-    root.remove("_generatedBy");
-
-    root.write_atomic(&file_path).await?;
-    Ok(())
+    entry.as_array_mut().expect("just made an array")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn merges_dedupes_and_writes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path().to_path_buf();
-        let paths = Paths {
-            data_dir: data_dir.clone(),
-        };
+    fn paths(tmp: &tempfile::TempDir) -> Paths {
+        Paths {
+            data_dir: tmp.path().to_path_buf(),
+        }
+    }
 
-        let frontend_settings = paths.repo_shared_claude_local("frontend");
-        let backend_settings = paths.repo_shared_claude_local("backend");
-        fs::create_dir_all(frontend_settings.parent().unwrap())
+    async fn allow_write(workspace_root: &Path) -> Vec<String> {
+        let raw = fs::read_to_string(workspace_root.join(".claude/settings.local.json"))
             .await
             .unwrap();
-        fs::create_dir_all(backend_settings.parent().unwrap())
-            .await
-            .unwrap();
-        fs::write(
-            &frontend_settings,
-            r#"{"permissions":{"allow":["Bash(grep:*)","Read(./src/**)"],"deny":["Bash(rm:*)"]}}"#,
-        )
-        .await
-        .unwrap();
-        fs::write(
-            &backend_settings,
-            r#"{"permissions":{"allow":["Bash(grep:*)","Bash(pytest:*)"]}}"#,
-        )
-        .await
-        .unwrap();
-
-        let workspace_root = data_dir.join("ws");
-        fs::create_dir_all(&workspace_root).await.unwrap();
-        write_workspace_root_settings(
-            &workspace_root,
-            &["frontend".into(), "backend".into()],
-            &paths,
-        )
-        .await
-        .unwrap();
-
-        let written =
-            fs::read_to_string(workspace_root.join(".claude/settings.local.json"))
-                .await
-                .unwrap();
-        let parsed: Value = serde_json::from_str(&written).unwrap();
-        let allow = parsed["permissions"]["allow"].as_array().unwrap();
-        let allow_strs: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
-        assert_eq!(
-            allow_strs,
-            vec![
-                "Bash(grep:*)",
-                "Read(./frontend/src/**)",
-                "Bash(pytest:*)",
-            ],
-            "dedupes Bash(grep:*) across repos and rewrites ./ paths"
-        );
-        let deny = parsed["permissions"]["deny"].as_array().unwrap();
-        assert_eq!(deny.len(), 1);
-        assert_eq!(deny[0].as_str(), Some("Bash(rm:*)"));
-        assert!(!parsed["_seededBy"].as_str().unwrap_or("").is_empty());
-
-        let allow_write = parsed["sandbox"]["filesystem"]["allowWrite"]
+        let parsed: Value = serde_json::from_str(&raw).unwrap();
+        parsed["sandbox"]["filesystem"]["allowWrite"]
             .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn git_dir(paths: &Paths, key: &str) -> String {
+        paths.repo_git_dir(key).to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn grants_each_repos_git_dir_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(&tmp);
+        let root = tmp.path().join("ws");
+        fs::create_dir_all(&root).await.unwrap();
+
+        grant_git_dirs(&root, &["frontend".into()], &paths).await.unwrap();
+        grant_git_dirs(&root, &["frontend".into(), "backend".into()], &paths)
+            .await
             .unwrap();
-        let allow_write_strs: Vec<&str> =
-            allow_write.iter().filter_map(|v| v.as_str()).collect();
+
         assert_eq!(
-            allow_write_strs,
-            vec![
-                paths.repo_git_dir("frontend").to_string_lossy().as_ref(),
-                paths.repo_git_dir("backend").to_string_lossy().as_ref(),
-            ],
-            "each repo's clone .git dir is granted — not the source-bearing repos dir"
+            allow_write(&root).await,
+            vec![git_dir(&paths, "frontend"), git_dir(&paths, "backend")]
         );
+    }
+
+    #[tokio::test]
+    async fn keys_tethys_does_not_own_survive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(&tmp);
+        let root = tmp.path().join("ws");
+        let file = root.join(".claude/settings.local.json");
+        fs::create_dir_all(file.parent().unwrap()).await.unwrap();
+        fs::write(
+            &file,
+            r#"{"model":"opus","permissions":{"allow":["Read(./a)"]},"sandbox":{"network":{"allowedDomains":["x.com"]}}}"#,
+        )
+        .await
+        .unwrap();
+
+        grant_git_dirs(&root, &["api".into()], &paths).await.unwrap();
+
+        let back: Value =
+            serde_json::from_str(&fs::read_to_string(&file).await.unwrap()).unwrap();
+        assert_eq!(back["model"], "opus");
+        assert_eq!(back["permissions"]["allow"], serde_json::json!(["Read(./a)"]));
+        assert_eq!(
+            back["sandbox"]["network"]["allowedDomains"],
+            serde_json::json!(["x.com"])
+        );
+        assert_eq!(allow_write(&root).await, vec![git_dir(&paths, "api")]);
+        assert!(!file.with_extension("json.tmp").exists());
+    }
+
+    #[tokio::test]
+    async fn a_malformed_file_is_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(&tmp);
+        let root = tmp.path().join("ws");
+        let file = root.join(".claude/settings.local.json");
+        fs::create_dir_all(file.parent().unwrap()).await.unwrap();
+        fs::write(&file, "{ not json").await.unwrap();
+
+        grant_git_dirs(&root, &["api".into()], &paths).await.unwrap();
+
+        assert_eq!(allow_write(&root).await, vec![git_dir(&paths, "api")]);
     }
 
     #[tokio::test]
     async fn skips_when_workspace_root_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            data_dir: tmp.path().to_path_buf(),
-        };
         let missing = tmp.path().join("does-not-exist");
-        write_workspace_root_settings(&missing, &["any".into()], &paths)
+        grant_git_dirs(&missing, &["any".into()], &paths(&tmp))
             .await
             .unwrap();
         assert!(!missing.exists());
-    }
-
-    #[tokio::test]
-    async fn missing_per_repo_files_are_skipped() {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            data_dir: tmp.path().to_path_buf(),
-        };
-        let workspace_root = tmp.path().join("ws");
-        fs::create_dir_all(&workspace_root).await.unwrap();
-        write_workspace_root_settings(
-            &workspace_root,
-            &["never-symlinked".into()],
-            &paths,
-        )
-        .await
-        .unwrap();
-        let written =
-            fs::read_to_string(workspace_root.join(".claude/settings.local.json"))
-                .await
-                .unwrap();
-        let parsed: Value = serde_json::from_str(&written).unwrap();
-        assert!(parsed.get("permissions").is_none());
-        let allow_write = parsed["sandbox"]["filesystem"]["allowWrite"]
-            .as_array()
-            .unwrap();
-        assert_eq!(allow_write.len(), 1);
-        assert_eq!(
-            allow_write[0].as_str(),
-            Some(paths.repo_git_dir("never-symlinked").to_string_lossy().as_ref())
-        );
-    }
-
-    #[tokio::test]
-    async fn appending_a_repo_grants_its_git_dir_too() {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            data_dir: tmp.path().to_path_buf(),
-        };
-        let workspace_root = tmp.path().join("ws");
-        fs::create_dir_all(&workspace_root).await.unwrap();
-        write_workspace_root_settings(&workspace_root, &["frontend".into()], &paths)
-            .await
-            .unwrap();
-
-        append_repo_to_workspace_root_settings(&workspace_root, "backend", &paths)
-            .await
-            .unwrap();
-
-        let written =
-            fs::read_to_string(workspace_root.join(".claude/settings.local.json"))
-                .await
-                .unwrap();
-        let parsed: Value = serde_json::from_str(&written).unwrap();
-        let allow_write: Vec<&str> = parsed["sandbox"]["filesystem"]["allowWrite"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
-        assert_eq!(
-            allow_write,
-            vec![
-                paths.repo_git_dir("frontend").to_string_lossy().as_ref(),
-                paths.repo_git_dir("backend").to_string_lossy().as_ref(),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn install_symlink_seeds_sandbox_git_dir_grant() {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            data_dir: tmp.path().to_path_buf(),
-        };
-        let worktree = tmp.path().join("wt");
-        fs::create_dir_all(&worktree).await.unwrap();
-        let job_tx = JobTx::silent();
-
-        install_symlink(&worktree, &paths, &job_tx, "backend")
-            .await
-            .unwrap();
-
-        let shared = paths.repo_shared_claude_local("backend");
-        let parsed: Value =
-            serde_json::from_str(&fs::read_to_string(&shared).await.unwrap()).unwrap();
-        let allow_write = parsed["sandbox"]["filesystem"]["allowWrite"]
-            .as_array()
-            .unwrap();
-        assert_eq!(allow_write.len(), 1);
-        assert_eq!(
-            allow_write[0].as_str(),
-            Some(paths.repo_git_dir("backend").to_string_lossy().as_ref())
-        );
-
-        let link = worktree.join(".claude/settings.local.json");
-        assert_eq!(fs::read_link(&link).await.unwrap(), shared);
-    }
-
-    #[tokio::test]
-    async fn install_symlink_retires_old_repos_dir_grant() {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            data_dir: tmp.path().to_path_buf(),
-        };
-        let shared = paths.repo_shared_claude_local("backend");
-        fs::create_dir_all(shared.parent().unwrap()).await.unwrap();
-        let mut root = SettingsDoc::new();
-        root.allow_write(&paths.repos_clone_dir());
-        root.write_atomic(&shared).await.unwrap();
-
-        let worktree = tmp.path().join("wt");
-        fs::create_dir_all(&worktree).await.unwrap();
-        install_symlink(&worktree, &paths, &JobTx::silent(), "backend")
-            .await
-            .unwrap();
-
-        let parsed: Value =
-            serde_json::from_str(&fs::read_to_string(&shared).await.unwrap()).unwrap();
-        let allow_write: Vec<&str> = parsed["sandbox"]["filesystem"]["allowWrite"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
-        assert_eq!(
-            allow_write,
-            vec![paths.repo_git_dir("backend").to_string_lossy().as_ref()],
-            "the broad repos-dir grant is replaced by the scoped .git grant"
-        );
     }
 }
