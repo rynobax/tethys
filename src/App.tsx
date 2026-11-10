@@ -21,7 +21,6 @@ import type {
   Workspace,
   WorkspaceId,
 } from "./types";
-import { GithubAuthFooter } from "./GithubAuthFooter";
 import { JobLogPane } from "./JobLogPane";
 import { SessionTerminal } from "./SessionTerminal";
 import { SidePanel } from "./SidePanel";
@@ -573,7 +572,6 @@ function App() {
               discrepancies={discrepancies}
               onDiscrepancyChange={refresh}
             />
-            <GithubAuthFooter />
           </div>
         </aside>
 

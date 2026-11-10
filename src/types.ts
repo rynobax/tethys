@@ -214,17 +214,6 @@ export interface GithubStatusChangedEvent {
   status: GithubPrStatus | null;
 }
 
-export type GithubAuthState =
-  | "unknown"
-  | "authenticated"
-  | "not_authenticated"
-  | "disabled";
-
-export interface GithubAuthSnapshot {
-  state: GithubAuthState;
-  login: string | null;
-}
-
 export interface ThemeColors {
   background: string;
   foreground: string;

@@ -943,51 +943,6 @@ button.danger.primary:hover:not(:disabled) {
   white-space: nowrap;
 }
 
-.gh-auth-footer {
-  border: none;
-  border-top: 1px solid var(--border);
-  border-radius: 0;
-  background: transparent;
-  padding: 8px 14px;
-  font-size: 11px;
-  color: var(--muted);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  text-align: left;
-  width: 100%;
-}
-
-.gh-auth-footer:hover:not(:disabled) {
-  background: rgba(125, 125, 125, 0.08);
-  color: var(--fg);
-}
-
-.gh-auth-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  display: inline-block;
-}
-
-.gh-auth-dot-ok {
-  background: #2ea043;
-}
-
-.gh-auth-dot-warn {
-  background: #d6b25b;
-}
-
-.gh-auth-dot-off {
-  background: var(--muted);
-  opacity: 0.5;
-}
-
-.gh-auth-label {
-  font-family: "SF Mono", ui-monospace, monospace;
-}
-
 .inline-confirm {
   background: color-mix(in oklab, var(--danger) 10%, var(--bg));
   border: 1px solid color-mix(in oklab, var(--danger) 40%, transparent);
@@ -1892,10 +1847,6 @@ li.is-dragging {
   flex-direction: column;
   border-top: 1px solid var(--border);
   margin-top: auto;
-}
-
-.sidebar-footer .gh-auth-footer {
-  border-top: none;
 }
 
 .system-status-button {
