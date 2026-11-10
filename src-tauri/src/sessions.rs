@@ -455,12 +455,19 @@ impl SessionSupervisor {
     }
 
     async fn record_review_if_started(&self, msg: &HookMessage) {
-        let Some(review) = msg.tool_stdout.as_deref().and_then(artifacts::review_started) else {
+        let reviews = msg
+            .tool_stdout
+            .as_deref()
+            .map(artifacts::reviews_started)
+            .unwrap_or_default();
+        if reviews.is_empty() {
             return;
-        };
+        }
         let Some((ws_id, _)) = self.resolve_session(msg).await else { return };
         let Some(root) = self.workspace_root(&ws_id).await else { return };
-        self.artifacts.record_review(&ws_id, &root, review).await;
+        for review in reviews {
+            self.artifacts.record_review(&ws_id, &root, review).await;
+        }
     }
 
     async fn handle_notify(&self, msg: HookMessage) {

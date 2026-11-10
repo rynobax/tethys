@@ -210,18 +210,26 @@ pub struct Review {
 }
 
 /// ummon prints `ummon is reviewing <repo> at <url>` once it has registered a
-/// workspace; the last such line wins.
-pub fn review_started(stdout: &str) -> Option<Review> {
-    stdout.lines().rev().find_map(|line| {
-        let rest = line.trim().strip_prefix("ummon is reviewing ")?;
-        let (repo, url) = rest.rsplit_once(" at ")?;
+/// workspace. One command can register several repos, so every line counts.
+pub fn reviews_started(stdout: &str) -> Vec<Review> {
+    let mut out: Vec<Review> = Vec::new();
+    for line in stdout.lines() {
+        let Some(rest) = line.trim().strip_prefix("ummon is reviewing ") else {
+            continue;
+        };
+        let Some((repo, url)) = rest.rsplit_once(" at ") else {
+            continue;
+        };
         let url = url.trim();
-        (url.starts_with("http://localhost:") || url.starts_with("http://127.0.0.1:"))
-            .then(|| Review {
+        let local = url.starts_with("http://localhost:") || url.starts_with("http://127.0.0.1:");
+        if local && !out.iter().any(|r| r.url == url) {
+            out.push(Review {
                 repo: PathBuf::from(repo),
                 url: url.to_string(),
-            })
-    })
+            });
+        }
+    }
+    out
 }
 
 /// A sandboxed session can't `open` a page itself, so it asks Ryan to, in
@@ -441,15 +449,28 @@ mod tests {
     #[test]
     fn a_review_is_read_off_ummons_output() {
         let out = "Restacked x.\nummon is reviewing /w/a b/repo at http://localhost:7337/w/abc123\nQuestions ...\n";
-        let review = review_started(out).unwrap();
-        assert_eq!(review.repo, PathBuf::from("/w/a b/repo"));
-        assert_eq!(review.url, "http://localhost:7337/w/abc123");
+        let reviews = reviews_started(out);
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].repo, PathBuf::from("/w/a b/repo"));
+        assert_eq!(reviews[0].url, "http://localhost:7337/w/abc123");
+    }
+
+    #[test]
+    fn one_command_registering_two_repos_starts_two_reviews() {
+        let out = "ummon is reviewing /w/nl-frontend at http://localhost:7337/w/b47d\n\
+                   ummon is reviewing /w/nl-backend at http://localhost:7337/w/b519\n\
+                   ummon is reviewing /w/nl-backend at http://localhost:7337/w/b519\n";
+        let repos: Vec<PathBuf> = reviews_started(out).into_iter().map(|r| r.repo).collect();
+        assert_eq!(
+            repos,
+            vec![PathBuf::from("/w/nl-frontend"), PathBuf::from("/w/nl-backend")]
+        );
     }
 
     #[test]
     fn only_a_local_url_is_a_review() {
-        assert!(review_started("ummon is reviewing /r at https://evil.example/w/1").is_none());
-        assert!(review_started("nothing to see").is_none());
+        assert!(reviews_started("ummon is reviewing /r at https://evil.example/w/1").is_empty());
+        assert!(reviews_started("nothing to see").is_empty());
     }
 
     const SCREENSHOT: &str = r#"**Today.** Every clip is its own round trip to the original recording.
