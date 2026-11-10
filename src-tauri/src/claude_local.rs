@@ -148,7 +148,7 @@ mod tests {
         fs::create_dir_all(file.parent().unwrap()).await.unwrap();
         fs::write(
             &file,
-            r#"{"model":"opus","permissions":{"allow":["Read(./a)"]},"sandbox":{"network":{"allowedDomains":["x.com"]}}}"#,
+            r#"{"model":"opus","env":{"FOO":"bar"},"sandbox":{"network":{"allowedDomains":["x.com"]}}}"#,
         )
         .await
         .unwrap();
@@ -158,7 +158,7 @@ mod tests {
         let back: Value =
             serde_json::from_str(&fs::read_to_string(&file).await.unwrap()).unwrap();
         assert_eq!(back["model"], "opus");
-        assert_eq!(back["permissions"]["allow"], serde_json::json!(["Read(./a)"]));
+        assert_eq!(back["env"]["FOO"], "bar");
         assert_eq!(
             back["sandbox"]["network"]["allowedDomains"],
             serde_json::json!(["x.com"])
