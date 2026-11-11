@@ -149,7 +149,7 @@ The poller drives it. `apply_results` records each meaningful old → new status
 
 A Nudge goes through the same queue and inbox as child events, and names the fix: rebase for a conflict, `/monitor-ci` for red CI, find-fix-requeue for the merge queue. Every one also says the agent can call `mcp__tethys__leave_shipping` when something needs Ryan instead, which sets `shipment` back to `None`. Shipping sessions are the ones nobody is watching, so idle-close gets them first; `Shipper::wake` resumes the session before delivering, and a freshly spawned one picks the queue up at its SessionStart.
 
-When every Shipping PR is closed, merged or not, the workspace is **Shipped** — its tile stays in the grid, solid green with the merge icon, waiting to be deleted — unless another of its PRs is still open, in which case it goes back to the list. Detaching every Shipping PR calls the shipment off. Ryan can take a workspace out of the grid from its context menu; typing into a Shipping session doesn't.
+When every Shipping PR is closed, merged or not, the workspace is **Shipped** — its tile stays in the grid, solid purple with the merge icon, waiting to be deleted — unless another of its PRs is still open, in which case it goes back to the list. Detaching every Shipping PR calls the shipment off. Ryan can take a workspace out of the grid from its context menu; typing into a Shipping session doesn't.
 
 Deliberately absent: Nudges for codex (no inbox, so a codex workspace can ship but is never told anything), Nudges for review comments or requested changes, merging or enqueueing anything itself, and any notification beyond the tile turning green.
 

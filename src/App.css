@@ -1989,9 +1989,9 @@ li.is-dragging {
   color: var(--muted);
 }
 
-/* Every Shipping PR closed: solid, where ready-to-merge is only tinted. */
+/* Every Shipping PR closed: GitHub's merged purple. */
 .shipping-tile.tone-shipped {
-  background: #2ea043;
+  background: #8957e5;
   color: #fff;
 }
 
