@@ -13,7 +13,14 @@ import * as api from "../ipc/commands";
 import { useAppEvent } from "../ipc/events";
 import { useTheme } from "../theme";
 import type { SessionInfo, Workspace, WorkspaceId } from "../types";
-import { Character, DIMS, HAT_ROOM, type CharacterHandlers } from "./Character";
+import {
+  Character,
+  DIMS,
+  HAT_ROOM,
+  type Anchors,
+  type CharacterHandlers,
+} from "./Character";
+import { Leash } from "./Leash";
 import { toResidents, type Resident } from "./residents";
 import { DUSK, MEADOW, Scenery, type Environment } from "./Scenery";
 import { Sim } from "./sim";
@@ -290,6 +297,7 @@ export default function FunWorld({
   const env = useEnvironment();
   const sim = useMemo(() => new Sim(), []);
   const labels = useRef(new Map<string, HTMLDivElement>());
+  const anchors = useRef<Anchors>(new Map());
   const [hovered, setHovered] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(
     null,
@@ -321,6 +329,14 @@ export default function FunWorld({
     };
   }, [hovered]);
 
+  // A child's collar and leash are in its parent's colours.
+  const byId = useMemo(
+    () => new Map(residents.map((r) => [r.id, r])),
+    [residents],
+  );
+  const leashColor = (r: Resident) =>
+    r.parentId ? (byId.get(r.parentId)?.spec.accent_color ?? null) : null;
+
   const handlers: CharacterHandlers = useMemo(
     () => ({
       onSelect,
@@ -346,8 +362,29 @@ export default function FunWorld({
         <SimDriver sim={sim} />
         {stage && <Scenery stage={stage} env={env} />}
         {residents.map((r) => (
-          <Character key={r.id} resident={r} sim={sim} handlers={handlers} />
+          <Character
+            key={r.id}
+            resident={r}
+            sim={sim}
+            handlers={handlers}
+            anchors={anchors.current}
+            collarColor={leashColor(r)}
+          />
         ))}
+        {/* After every Character, so both ends have been posed this frame. */}
+        {residents.map((r) => {
+          const color = leashColor(r);
+          return r.parentId && color ? (
+            <Leash
+              key={r.id}
+              parentId={r.parentId}
+              childId={r.id}
+              sim={sim}
+              anchors={anchors.current}
+              color={color}
+            />
+          ) : null;
+        })}
         <LabelProjector sim={sim} residents={residents} labels={labels} />
       </Canvas>
       <div className="fun-labels">

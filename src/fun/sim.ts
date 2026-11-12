@@ -78,6 +78,10 @@ const FOLLOW_ARRIVE = 0.35;
 /** No closer to the target in this long and it gives up. */
 const STUCK_SECONDS = 1.2;
 const FOLLOW_CHANCE = 0.75;
+/** How far a child can get from the parent holding its leash. */
+export const LEASH_LENGTH = 3;
+/** Children pick spots this far in, so the leash usually hangs slack. */
+const LEASH_REACH = LEASH_LENGTH * 0.7;
 const WANDER_RADIUS = 4;
 const CANDIDATES = 8;
 
@@ -141,10 +145,54 @@ export class Sim {
       this.move(a, dt, hurry ? SPEED_HURRY : SPEED_STROLL + (1 - a.size));
     }
     this.separate();
+    this.tug();
   }
 
   time() {
     return this.now;
+  }
+
+  /**
+   * Whether a child is on its parent's leash right now: both in the right
+   * meadow, both out and about. The left meadow is spots, not walks.
+   */
+  leashed(childId: string, parentId: string): boolean {
+    const child = this.agents.get(childId);
+    const parent = this.agents.get(parentId);
+    if (!child || !parent || !child.placed || !parent.placed) return false;
+    if (this.residents.get(childId)?.parentId !== parentId) return false;
+    const free = (a: Agent) =>
+      a.side === "right" &&
+      a.activity !== "egg" &&
+      a.activity !== "portal_out" &&
+      a.activity !== "portal_in";
+    return free(child) && free(parent);
+  }
+
+  /** The parent on the other end of this agent's leash, if it's on one. */
+  private holder(a: Agent): Agent | undefined {
+    const parent = this.parentOf(a);
+    return parent && this.leashed(a.id, parent.id) ? parent : undefined;
+  }
+
+  /**
+   * A parent that walks off drags its children along, whatever they're doing.
+   * Parents first, so a grandchild is pulled after its own parent moved.
+   */
+  private tug() {
+    const byDepth = [...this.agents.values()].sort((a, b) => b.size - a.size);
+    for (const child of byDepth) {
+      const parent = this.holder(child);
+      if (!parent) continue;
+      const dx = child.pos.x - parent.pos.x;
+      const dz = child.pos.z - parent.pos.z;
+      const d = Math.hypot(dx, dz);
+      if (d <= LEASH_LENGTH) continue;
+      child.pos.x = parent.pos.x + (dx / d) * LEASH_LENGTH;
+      child.pos.z = parent.pos.z + (dz / d) * LEASH_LENGTH;
+      // Dragged off its station: it sets up again within reach.
+      if (child.activity === "work") child.spot = null;
+    }
   }
 
   private region(side: Side): Region | null {
@@ -356,7 +404,10 @@ export class Sim {
       }
       case "working":
         if (!a.spot || this.stuck(a)) {
-          a.spot = this.spacedPoint(a.id, a.side, region, a.pos, 3);
+          const parent = this.holder(a);
+          a.spot = parent
+            ? this.spacedPoint(a.id, a.side, region, parent.pos, LEASH_REACH)
+            : this.spacedPoint(a.id, a.side, region, a.pos, 3);
         }
         this.head(a, a.spot, "work");
         return;
@@ -426,7 +477,11 @@ export class Sim {
     if (parentRoams && Math.random() < FOLLOW_CHANCE) {
       this.walkTo(a, this.behind(parent, a), "follow");
     } else {
-      this.walkTo(a, this.spacedPoint(a.id, a.side, region, a.pos), "wander");
+      const holder = this.holder(a);
+      const target = holder
+        ? this.spacedPoint(a.id, a.side, region, holder.pos, LEASH_REACH)
+        : this.spacedPoint(a.id, a.side, region, a.pos);
+      this.walkTo(a, target, "wander");
     }
   }
 

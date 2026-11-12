@@ -639,15 +639,39 @@ export interface CharacterHandlers {
   onMenu: (id: string, x: number, y: number) => void;
 }
 
+/** Where a leash ties on, per resident, for `Leash` to read each frame. */
+export type Anchors = Map<
+  string,
+  { hand?: THREE.Object3D; collar?: THREE.Object3D }
+>;
+
+function anchor(
+  anchors: Anchors,
+  id: string,
+  kind: "hand" | "collar",
+): (o: THREE.Object3D | null) => void {
+  return (o) => {
+    const entry = anchors.get(id) ?? {};
+    if (o) entry[kind] = o;
+    else delete entry[kind];
+    anchors.set(id, entry);
+  };
+}
+
 /** One resident, posed every frame from its agent in the sim. */
 export function Character({
   resident,
   sim,
   handlers,
+  anchors,
+  collarColor,
 }: {
   resident: Resident;
   sim: Sim;
   handlers: CharacterHandlers;
+  anchors: Anchors;
+  /** Its parent's colour, for a child; `null` wears no collar. */
+  collarColor: string | null;
 }) {
   const spec: AvatarSpec = resident.spec;
   const d = DIMS[spec.body];
@@ -875,6 +899,18 @@ export function Character({
             d={d}
             accent={spec.accent_color}
           />
+          {collarColor && (
+            <group position-y={d.neck}>
+              <mesh rotation-x={Math.PI / 2}>
+                <torusGeometry args={[d.hw * 0.96, 0.045, 6, 16]} />
+                <Mat color={collarColor} />
+              </mesh>
+              <group
+                ref={anchor(anchors, resident.id, "collar")}
+                position={[0, -0.02, d.faceZ * 0.95]}
+              />
+            </group>
+          )}
           <group ref={armL} position={[-(d.hw + 0.03), d.shoulder, 0]}>
             <mesh position-y={-0.15}>
               <capsuleGeometry args={[0.065, 0.18, 3, 6]} />
@@ -894,6 +930,10 @@ export function Character({
             <group ref={tool} position-y={-0.3}>
               <Tool work={spec.work} />
             </group>
+            <group
+              ref={anchor(anchors, resident.id, "hand")}
+              position-y={-0.3}
+            />
           </group>
           <group
             ref={book}
