@@ -219,7 +219,12 @@ const SAMPLES: Sample[] = [
     mood: "working",
   },
   { id: "c", branch: "worklist-n-plus-1", design: "perf", mood: "working" },
-  { id: "d", branch: "upload-traversal", design: "security", mood: "idle" },
+  {
+    id: "d",
+    branch: "upload-traversal",
+    design: "security",
+    mood: "needs_you",
+  },
   {
     id: "e",
     branch: "lint-rollout",
@@ -231,6 +236,14 @@ const SAMPLES: Sample[] = [
   { id: "e2", branch: "lint-exhaustive-deps", mood: "working", parent: "e" },
   { id: "e3", branch: "lint-no-shadow", mood: "idle", parent: "e" },
   { id: "f", branch: "old-experiment", mood: "asleep" },
+  { id: "k", branch: "metadata-prefetch-cache", mood: "needs_you" },
+  { id: "l", branch: "acr-score-form-insert-via-intent", mood: "needs_you" },
+  {
+    id: "m",
+    branch: "reporter-settings-menu",
+    design: "migration",
+    mood: "needs_you",
+  },
   { id: "g", branch: "new-thing", mood: "creating" },
   { id: "h", branch: "next-in-line", mood: "queued" },
   { id: "i", branch: "ship-the-thing", design: "perf", mood: "shipping" },
