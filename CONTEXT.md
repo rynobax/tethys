@@ -124,3 +124,12 @@ An Artifact that is an HTML file a session wrote inside the workspace, shown as 
 
 **Review**:
 An Artifact that is an ummon review a session started on one of the workspace's repos.
+
+### Fun mode
+
+**Resident**:
+A workspace as fun mode draws it: a small character in the world beside the terminal whose behaviour shows what the workspace is doing.
+_Avoid_: Sprite, pet, mascot
+
+**Avatar**:
+What a resident looks like, designed from how the workspace's work began. A description of parts and colours rather than a picture, so any art style can draw it.

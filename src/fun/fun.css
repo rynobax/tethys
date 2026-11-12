@@ -1,0 +1,142 @@
+.fun-world {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+}
+
+.fun-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.fun-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  pointer-events: auto;
+  cursor: pointer;
+  will-change: transform;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.fun-label.hovered,
+.fun-label.selected {
+  z-index: 2;
+}
+
+.fun-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #2a2a2e;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+
+.fun-label.child .fun-pill {
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.fun-label.selected .fun-pill {
+  background: #ffffff;
+  outline: 2px solid var(--accent);
+  font-weight: 600;
+}
+
+.fun-label.mood-asleep .fun-pill,
+.fun-label.mood-queued .fun-pill {
+  opacity: 0.7;
+}
+
+.fun-progress {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: #5b45c9;
+}
+
+.fun-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.fun-label.mood-needs_you .fun-badge {
+  background: #ffd54f;
+  color: #3d2f00;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  animation: fun-bounce 0.9s ease-in-out infinite;
+}
+
+.fun-label.mood-asleep .fun-badge {
+  color: rgba(255, 255, 255, 0.9);
+  font-style: italic;
+  animation: fun-drift 2.6s ease-in-out infinite;
+}
+
+.fun-label.mood-hatching .fun-badge,
+.fun-label.mood-failed .fun-badge {
+  background: rgba(255, 255, 255, 0.82);
+  color: #2a2a2e;
+}
+
+.fun-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 5px 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #2a2a2e;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+}
+
+.fun-card-name {
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.fun-card-tagline {
+  color: #5c5c66;
+}
+
+@keyframes fun-bounce {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes fun-drift {
+  0% {
+    transform: translate(0, 0);
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(6px, -8px);
+    opacity: 0;
+  }
+}

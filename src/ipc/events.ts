@@ -23,6 +23,7 @@ export interface AppEvents {
   "system_status:changed": null;
   "theme:changed": Theme | null;
   "artifact:changed": ArtifactChangedEvent;
+  "avatar:changed": { workspace_id: string };
 }
 
 export type AppEventName = keyof AppEvents;

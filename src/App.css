@@ -2281,3 +2281,64 @@ li.is-dragging {
   color: var(--fg);
   text-decoration-style: solid;
 }
+
+/* ── Fun mode ─────────────────────────────────────────────────────────────
+   The world is a fixed canvas behind everything; the detail pane floats over
+   its middle. No transform on the pane, so fixed-position modals inside it
+   still cover the window. */
+
+.app.fun {
+  display: block;
+  position: relative;
+}
+
+.app.fun .detail {
+  --fun-panel-width: clamp(560px, 64vw, 1280px);
+  position: absolute;
+  z-index: 1;
+  top: 12px;
+  bottom: 12px;
+  left: calc(50% - var(--fun-panel-width) / 2);
+  width: var(--fun-panel-width);
+  box-sizing: border-box;
+  background: var(--bg);
+  border-radius: 12px;
+  box-shadow:
+    0 10px 40px rgba(0, 0, 0, 0.35),
+    0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+
+.fun-controls {
+  position: fixed;
+  right: 10px;
+  bottom: 10px;
+  z-index: 3;
+  display: flex;
+  gap: 6px;
+}
+
+.fun-control {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+.fun-control:hover:not(:disabled),
+.fun-controls.on .fun-control {
+  opacity: 1;
+  color: var(--fg);
+}
+
+.fun-control:disabled {
+  cursor: default;
+  opacity: 0.35;
+}

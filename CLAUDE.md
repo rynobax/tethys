@@ -234,6 +234,18 @@ Pages render in a sandboxed iframe (`allow-scripts`, no `allow-same-origin`) ove
 
 Deliberately absent: keyboard shortcuts, close-all, zoom/pan on diagrams, filtering by session, reading the transcript for earlier text blocks, a way to attach a PR from the UI, and an `open` shim on the session's `PATH` — feasible, since Tethys owns the spawn env, but it would shadow a system command for every subprocess in the session to save the browser tab the hook already lets us observe.
 
+## Fun mode
+
+A toggle in the bottom-right corner swaps the sidebar for a little 3D world (`src/fun/`): the terminal pane floats in the middle, and the ground either side of it is two meadows joined by a portal each, where every workspace is a small character — a **resident** — going about its day. Working ones set up a station and work, one that needs you walks to the edge nearest the terminal and waves, a closed session sleeps, a workspace still being provisioned is an egg, a child is smaller and trails its parent like a duckling. Clicking one selects its workspace; right-click redesigns its avatar. It's whimsy, so the rule is that it costs the real app nothing: three.js loads only when the toggle is first switched on, and nothing outside `src/fun/` and `avatar.rs` knows it exists.
+
+It's three layers so the look can change without the rest. `residents.ts` reads Tethys state into a mood per workspace; `sim.ts` decides where everyone is and what they're doing on flat ground, and knows nothing about drawing; the scene (`Character.tsx`, `Scenery.tsx`) draws it with react-three-fiber. An isometric 2D version would be a new scene reading the same sim. There's no renderer interface yet, for the same reason there's no agent abstraction. The camera is orthographic and looks straight ahead, so screen x is world x and the meadows are measured straight off the panel's rectangle (`stage.ts`). The environment — palette, lights, fireflies — is one object, `MEADOW` or `DUSK`, picked from the terminal theme's brightness. It renders on a 30fps timer (15 unfocused, none hidden) rather than every display frame, since the machine is short on memory.
+
+An **avatar** is a description, never a picture: body, colours, eyes, hat, accessory, what it mimes while working, and one prop built from up to 8 primitives. Any renderer can draw that in its own style, and it can raise its arm, which a generated image can't. `avatar.rs` designs one with `claude -p --model haiku --json-schema`, where the schema *is* the vocabulary, and `spec.ts` normalizes every field anyway. It's designed after the session's first **turn**, not its first prompt — Ryan's first message is often just a Slack link, and by the first `Stop` the transcript holds the agent's reply too, so `read_opening` feeds both. Opening fun mode designs one for every workspace that has a transcript and no avatar. The run uses the workspace's own Claude binary (so `claude-hipaa` stays hipaa), with hooks disabled and a cwd outside every workspace so Tethys's own turn tracking never sees it. Avatars live in `avatars.json`, not `state.json`, and entries for workspaces that no longer exist are dropped at boot rather than at purge. A failed design isn't retried until restart, or until a redesign asks.
+
+`fun-preview.html` renders the world in a plain browser with every mood on screen and real designs, through Tauri's `mockIPC`: `pnpm vite --port 5199` and open it. Use it to iterate on the look without touching a live session.
+
+Deliberately absent: folders, drag, delete and Ship in fun mode (toggle back for those), a way to edit an avatar by hand, and any sound.
+
 ## Logging & diagnostics
 
 Two log sinks, filtered independently (`logging.rs`):

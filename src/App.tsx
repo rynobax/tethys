@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -32,7 +34,11 @@ import { SystemStatus } from "./SystemStatus";
 import { applyTheme, ThemeContext } from "./theme";
 import { useBackendJob, type JobState } from "./useBackendJob";
 import { useAppEvent } from "./ipc/events";
+import { FunControls, useFunMode } from "./fun/FunToggle";
 import "./App.css";
+
+// three.js is only fetched once fun mode is first switched on.
+const FunWorld = lazy(() => import("./fun/FunWorld"));
 
 // The agent is stated, never derived from the binary name.
 const AGENT_CHOICES = [
@@ -97,6 +103,8 @@ function App() {
   );
   const flushedDraftsRef = useRef<Set<WorkspaceId>>(new Set());
   const [theme, setTheme] = useState<Theme | null>(null);
+  const [funMode, toggleFunMode] = useFunMode();
+  const detailRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     api
@@ -553,53 +561,75 @@ function App() {
 
   return (
     <ThemeContext.Provider value={theme}>
-      <div className="app">
-        <aside className="sidebar">
-          <div className="sidebar-header">
-            <button
-              className="new-workspace"
-              onClick={() => setCreating(true)}
-              type="button"
-              disabled={!registryOk}
-              title={!registryOk ? "Configure repos.toml first" : undefined}
-            >
-              <span className="new-workspace-plus" aria-hidden="true">
-                +
-              </span>
-              New workspace
-            </button>
-          </div>
-          <Sidebar
-            workspaces={visibleWorkspaces}
-            folders={folders}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            onReorder={handleReorder}
-            onMoveToFolder={handleMoveToFolder}
-            onReorderFolders={handleReorderFolders}
-            onCreateFolder={handleCreateFolder}
-            onRenameFolder={handleRenameFolder}
-            onDeleteFolder={handleDeleteFolder}
-            onSetFolderCollapsed={handleSetFolderCollapsed}
-            onDelete={handleDelete}
-            onClearTurn={handleClearTurn}
-            onStartShipping={handleStartShipping}
-            onStopShipping={handleStopShipping}
-            workspaceNeedsTurn={workspaceNeedsTurn}
-            workspaceWorking={workspaceWorking}
-          />
-          <div className="sidebar-footer">
-            <SystemStatus
-              allWorkspaces={workspaces}
-              registry={registry}
-              discrepancies={discrepancies}
-              onDiscrepancyChange={refresh}
+      <div className={funMode ? "app fun" : "app"}>
+        {funMode && (
+          <Suspense fallback={null}>
+            <FunWorld
+              workspaces={visibleWorkspaces}
+              sessions={sessionByWorkspace}
+              needsTurn={workspaceNeedsTurn}
+              working={workspaceWorking}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              panelRef={detailRef}
             />
-            <GithubAuthFooter />
-          </div>
-        </aside>
+          </Suspense>
+        )}
+        {!funMode && (
+          <aside className="sidebar">
+            <div className="sidebar-header">
+              <button
+                className="new-workspace"
+                onClick={() => setCreating(true)}
+                type="button"
+                disabled={!registryOk}
+                title={!registryOk ? "Configure repos.toml first" : undefined}
+              >
+                <span className="new-workspace-plus" aria-hidden="true">
+                  +
+                </span>
+                New workspace
+              </button>
+            </div>
+            <Sidebar
+              workspaces={visibleWorkspaces}
+              folders={folders}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              onReorder={handleReorder}
+              onMoveToFolder={handleMoveToFolder}
+              onReorderFolders={handleReorderFolders}
+              onCreateFolder={handleCreateFolder}
+              onRenameFolder={handleRenameFolder}
+              onDeleteFolder={handleDeleteFolder}
+              onSetFolderCollapsed={handleSetFolderCollapsed}
+              onDelete={handleDelete}
+              onClearTurn={handleClearTurn}
+              onStartShipping={handleStartShipping}
+              onStopShipping={handleStopShipping}
+              workspaceNeedsTurn={workspaceNeedsTurn}
+              workspaceWorking={workspaceWorking}
+            />
+            <div className="sidebar-footer">
+              <SystemStatus
+                allWorkspaces={workspaces}
+                registry={registry}
+                discrepancies={discrepancies}
+                onDiscrepancyChange={refresh}
+              />
+              <GithubAuthFooter />
+            </div>
+          </aside>
+        )}
 
-        <main className="detail">
+        <FunControls
+          on={funMode}
+          onToggle={toggleFunMode}
+          onNewWorkspace={() => setCreating(true)}
+          canCreate={registryOk}
+        />
+
+        <main className="detail" ref={detailRef}>
           {error && <div className="error-banner">{error}</div>}
           {registry && !registryOk && (
             <RegistryNotice registry={registry} onChanged={refresh} />

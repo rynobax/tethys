@@ -11,6 +11,7 @@ use tauri::ipc::InvokeResponseBody;
 
 use crate::agent::Agent;
 use crate::artifacts::{Artifact, ArtifactKind, ArtifactStore};
+use crate::avatar::{Avatar, Avatars};
 use crate::branch_name;
 use crate::budget::{Budgets, OverrideRequest};
 use crate::agent_bin::{self, AgentBins};
@@ -898,6 +899,28 @@ pub async fn stop_shipping(store: State<'_, Arc<Store>>, workspace_id: Workspace
         .await?;
     info!(%workspace_id, "workspace taken out of shipping");
     Ok(())
+}
+
+#[tauri::command]
+pub async fn list_avatars(
+    avatars: State<'_, Arc<Avatars>>,
+) -> AppResult<std::collections::HashMap<WorkspaceId, Avatar>> {
+    Ok(avatars.list().await)
+}
+
+/// Fun mode asks on open, so workspaces from before it existed get one too.
+#[tauri::command]
+pub async fn ensure_avatars(avatars: State<'_, Arc<Avatars>>) -> AppResult<()> {
+    avatars.ensure_all().await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reroll_avatar(
+    avatars: State<'_, Arc<Avatars>>,
+    workspace_id: WorkspaceId,
+) -> AppResult<()> {
+    avatars.reroll(&workspace_id).await
 }
 
 #[tauri::command]

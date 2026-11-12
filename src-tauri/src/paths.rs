@@ -67,6 +67,11 @@ impl Paths {
         self.data_dir.join("codex-config.lock")
     }
 
+    /// Fun mode's, kept out of `state.json` so the core model never sees them.
+    pub fn avatars_file(&self) -> PathBuf {
+        self.data_dir.join("avatars.json")
+    }
+
     pub fn theme_file(&self) -> PathBuf {
         self.data_dir.join("theme.json")
     }

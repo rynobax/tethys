@@ -6,6 +6,7 @@ export { Channel, convertFileSrc };
 import type {
   Agent,
   Artifact,
+  Avatar,
   BudgetRequest,
   CreateWorkspaceArgs,
   Discrepancies,
@@ -53,6 +54,14 @@ export const startShipping = (workspaceId: WorkspaceId, prs: PrRef[]) =>
 
 export const stopShipping = (workspaceId: WorkspaceId) =>
   invoke<void>("stop_shipping", { workspaceId });
+
+export const listAvatars = () =>
+  invoke<Record<WorkspaceId, Avatar>>("list_avatars");
+
+export const ensureAvatars = () => invoke<void>("ensure_avatars");
+
+export const rerollAvatar = (workspaceId: WorkspaceId) =>
+  invoke<void>("reroll_avatar", { workspaceId });
 
 export const listArtifacts = (workspaceId: WorkspaceId) =>
   invoke<Artifact[]>("list_artifacts", { workspaceId });
