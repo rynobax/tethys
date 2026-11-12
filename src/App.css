@@ -18,6 +18,8 @@ html,
 }
 
 :root {
+  /* The session's column cap, which fun mode's floating pane wraps. */
+  --terminal-width: 800px;
   --bg: #fafafa;
   --fg: #1a1a1a;
   --muted: #666;
@@ -1361,7 +1363,7 @@ button.danger.primary:hover:not(:disabled) {
 .session-terminal {
   flex: 1;
   width: 100%;
-  max-width: 800px;
+  max-width: var(--terminal-width);
   align-self: center;
   min-height: 240px;
   overflow: hidden;
@@ -2285,7 +2287,9 @@ li.is-dragging {
 
 /* ── Fun mode ─────────────────────────────────────────────────────────────
    The world is a fixed canvas behind everything; the detail pane floats over
-   its middle. No transform on the pane, so fixed-position modals inside it
+   its middle, shrink-wrapped to the terminal plus whatever sits beside it
+   (the Notes rail, or the open panel at its dragged width). Centred with
+   auto margins rather than a transform, so fixed-position modals inside it
    still cover the window. */
 
 .app.fun {
@@ -2294,19 +2298,35 @@ li.is-dragging {
 }
 
 .app.fun .detail {
-  --fun-panel-width: clamp(560px, 64vw, 1280px);
+  --fun-meadows: 320px;
   position: absolute;
   z-index: 1;
   top: 12px;
   bottom: 12px;
-  left: calc(50% - var(--fun-panel-width) / 2);
-  width: var(--fun-panel-width);
+  left: 0;
+  right: 0;
+  margin-inline: auto;
+  width: max-content;
+  min-width: min(var(--terminal-width), calc(100vw - var(--fun-meadows)));
+  max-width: calc(100vw - var(--fun-meadows));
   box-sizing: border-box;
   background: var(--bg);
   border-radius: 12px;
   box-shadow:
     0 10px 40px rgba(0, 0, 0, 0.35),
     0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+
+/* Its fixed width is what the pane wraps; `max-width` still lets a narrow
+   window squeeze it. */
+.app.fun .session-terminal {
+  width: var(--terminal-width);
+  max-width: 100%;
+}
+
+/* A long row of tabs scrolls rather than widening the pane. */
+.app.fun .main-tabs {
+  contain: inline-size;
 }
 
 .fun-controls {

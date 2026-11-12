@@ -299,8 +299,20 @@ function Preview() {
         onSelect={setSelected}
         panelRef={panelRef}
       />
+      {/* The real detail pane's skeleton, so the pane sizes as it does live. */}
       <main className="detail" ref={panelRef}>
-        <div className="placeholder">selected: {selected}</div>
+        <div className="workspace-detail">
+          <div className="workspace-main">
+            <div style={{ padding: "8px 12px" }}>{selected}</div>
+            <div className="session-pane">
+              <div
+                className="session-terminal"
+                style={{ background: "rgba(127, 127, 127, 0.15)" }}
+              />
+            </div>
+          </div>
+          <button type="button" className="side-rail" />
+        </div>
       </main>
     </div>
   );
