@@ -10,352 +10,184 @@ import FunWorld from "./FunWorld";
 import "../App.css";
 
 const DESIGNS: Record<string, unknown> = {
-  "flaky": {
-    "name": "Jelly Bean",
-    "tagline": "chasing the cookie race, one wobble at a time",
-    "body": "blob",
-    "body_color": "#7FE5C0",
-    "accent_color": "#FF7AA2",
-    "eyes": "wide",
-    "hat": "beanie",
-    "accessory": "none",
-    "work": "typing",
-    "prop": {
-      "label": "session cookie",
-      "parts": [
+  flaky: {
+    name: "Jelly Bean",
+    tagline: "chasing the cookie race, one wobble at a time",
+    body: "blob",
+    body_color: "#7FE5C0",
+    accent_color: "#FF7AA2",
+    eyes: "wide",
+    hat: "beanie",
+    accessory: "none",
+    work: "typing",
+    prop: {
+      label: "session cookie",
+      parts: [
         {
-          "shape": "cylinder",
-          "color": "#E8A045",
-          "position": [
-            0,
-            -0.15,
-            0
-          ],
-          "scale": [
-            0.8,
-            0.15,
-            0.8
-          ],
-          "rotation": [
-            0,
-            0,
-            0
-          ]
+          shape: "cylinder",
+          color: "#E8A045",
+          position: [0, -0.15, 0],
+          scale: [0.8, 0.15, 0.8],
+          rotation: [0, 0, 0],
         },
         {
-          "shape": "sphere",
-          "color": "#6B2D5C",
-          "position": [
-            -0.2,
-            -0.05,
-            0.1
-          ],
-          "scale": [
-            0.14,
-            0.14,
-            0.14
-          ],
-          "rotation": [
-            0,
-            0,
-            0
-          ]
+          shape: "sphere",
+          color: "#6B2D5C",
+          position: [-0.2, -0.05, 0.1],
+          scale: [0.14, 0.14, 0.14],
+          rotation: [0, 0, 0],
         },
         {
-          "shape": "sphere",
-          "color": "#6B2D5C",
-          "position": [
-            0.15,
-            -0.05,
-            -0.1
-          ],
-          "scale": [
-            0.14,
-            0.14,
-            0.14
-          ],
-          "rotation": [
-            0,
-            0,
-            0
-          ]
+          shape: "sphere",
+          color: "#6B2D5C",
+          position: [0.15, -0.05, -0.1],
+          scale: [0.14, 0.14, 0.14],
+          rotation: [0, 0, 0],
         },
         {
-          "shape": "sphere",
-          "color": "#6B2D5C",
-          "position": [
-            0.1,
-            -0.05,
-            0.2
-          ],
-          "scale": [
-            0.14,
-            0.14,
-            0.14
-          ],
-          "rotation": [
-            0,
-            0,
-            0
-          ]
-        }
-      ]
-    }
+          shape: "sphere",
+          color: "#6B2D5C",
+          position: [0.1, -0.05, 0.2],
+          scale: [0.14, 0.14, 0.14],
+          rotation: [0, 0, 0],
+        },
+      ],
+    },
   },
-  "migration": {
-    "name": "Nora Malize",
-    "tagline": "unpacking blobs into tidy columns, one row at a time",
-    "body": "round",
-    "body_color": "#b8a1ff",
-    "accent_color": "#ffd166",
-    "eyes": "dots",
-    "hat": "hardhat",
-    "accessory": "backpack",
-    "work": "sweeping",
-    "prop": {
-      "label": "migration crate",
-      "parts": [
+  migration: {
+    name: "Nora Malize",
+    tagline: "unpacking blobs into tidy columns, one row at a time",
+    body: "round",
+    body_color: "#b8a1ff",
+    accent_color: "#ffd166",
+    eyes: "dots",
+    hat: "hardhat",
+    accessory: "backpack",
+    work: "sweeping",
+    prop: {
+      label: "migration crate",
+      parts: [
         {
-          "shape": "box",
-          "color": "#5b8def",
-          "position": [
-            0,
-            -0.2,
-            0
-          ],
-          "scale": [
-            0.8,
-            0.6,
-            0.8
-          ],
-          "rotation": [
-            0,
-            0,
-            0
-          ]
+          shape: "box",
+          color: "#5b8def",
+          position: [0, -0.2, 0],
+          scale: [0.8, 0.6, 0.8],
+          rotation: [0, 0, 0],
         },
         {
-          "shape": "box",
-          "color": "#ffd166",
-          "position": [
-            0,
-            0.12,
-            0
-          ],
-          "scale": [
-            0.86,
-            0.08,
-            0.86
-          ],
-          "rotation": [
-            0,
-            0,
-            0
-          ]
+          shape: "box",
+          color: "#ffd166",
+          position: [0, 0.12, 0],
+          scale: [0.86, 0.08, 0.86],
+          rotation: [0, 0, 0],
         },
         {
-          "shape": "cone",
-          "color": "#ffd166",
-          "position": [
-            0,
-            0.36,
-            0
-          ],
-          "scale": [
-            0.3,
-            0.3,
-            0.3
-          ],
-          "rotation": [
-            0,
-            0,
-            0
-          ]
-        }
-      ]
-    }
+          shape: "cone",
+          color: "#ffd166",
+          position: [0, 0.36, 0],
+          scale: [0.3, 0.3, 0.3],
+          rotation: [0, 0, 0],
+        },
+      ],
+    },
   },
-  "perf": {
-    "name": "Batchling",
-    "tagline": "one trip to the db instead of 1,400 tiny ones",
-    "body": "round",
-    "body_color": "#7FD8BE",
-    "accent_color": "#FF8FA3",
-    "eyes": "wide",
-    "hat": "headphones",
-    "accessory": "backpack",
-    "work": "typing",
-    "prop": {
-      "label": "stack of crates carried in one trip",
-      "parts": [
+  perf: {
+    name: "Batchling",
+    tagline: "one trip to the db instead of 1,400 tiny ones",
+    body: "round",
+    body_color: "#7FD8BE",
+    accent_color: "#FF8FA3",
+    eyes: "wide",
+    hat: "headphones",
+    accessory: "backpack",
+    work: "typing",
+    prop: {
+      label: "stack of crates carried in one trip",
+      parts: [
         {
-          "shape": "box",
-          "color": "#FFB347",
-          "position": [
-            0,
-            -0.35,
-            0
-          ],
-          "scale": [
-            0.9,
-            0.3,
-            0.9
-          ],
-          "rotation": [
-            0,
-            0,
-            0
-          ]
+          shape: "box",
+          color: "#FFB347",
+          position: [0, -0.35, 0],
+          scale: [0.9, 0.3, 0.9],
+          rotation: [0, 0, 0],
         },
         {
-          "shape": "box",
-          "color": "#FFD166",
-          "position": [
-            0,
-            -0.05,
-            0
-          ],
-          "scale": [
-            0.7,
-            0.3,
-            0.7
-          ],
-          "rotation": [
-            0,
-            0,
-            0
-          ]
+          shape: "box",
+          color: "#FFD166",
+          position: [0, -0.05, 0],
+          scale: [0.7, 0.3, 0.7],
+          rotation: [0, 0, 0],
         },
         {
-          "shape": "box",
-          "color": "#F4A261",
-          "position": [
-            0,
-            0.25,
-            0
-          ],
-          "scale": [
-            0.5,
-            0.3,
-            0.5
-          ],
-          "rotation": [
-            0,
-            0,
-            0
-          ]
-        }
-      ]
-    }
+          shape: "box",
+          color: "#F4A261",
+          position: [0, 0.25, 0],
+          scale: [0.5, 0.3, 0.5],
+          rotation: [0, 0, 0],
+        },
+      ],
+    },
   },
-  "security": {
-    "name": "Sir Locksalot",
-    "tagline": "guarding the bucket, one ../ at a time",
-    "body": "tall",
-    "body_color": "#7fd8c0",
-    "accent_color": "#ff7aa2",
-    "eyes": "visor",
-    "hat": "none",
-    "accessory": "cape",
-    "work": "typing",
-    "prop": {
-      "label": "padlock on the upload gate",
-      "parts": [
+  security: {
+    name: "Sir Locksalot",
+    tagline: "guarding the bucket, one ../ at a time",
+    body: "tall",
+    body_color: "#7fd8c0",
+    accent_color: "#ff7aa2",
+    eyes: "visor",
+    hat: "none",
+    accessory: "cape",
+    work: "typing",
+    prop: {
+      label: "padlock on the upload gate",
+      parts: [
         {
-          "shape": "torus",
-          "color": "#ffd166",
-          "position": [
-            0,
-            0.2,
-            0
-          ],
-          "scale": [
-            0.5,
-            0.5,
-            0.15
-          ],
-          "rotation": [
-            0,
-            0,
-            0
-          ]
+          shape: "torus",
+          color: "#ffd166",
+          position: [0, 0.2, 0],
+          scale: [0.5, 0.5, 0.15],
+          rotation: [0, 0, 0],
         },
         {
-          "shape": "box",
-          "color": "#ffd166",
-          "position": [
-            0,
-            -0.12,
-            0
-          ],
-          "scale": [
-            0.7,
-            0.5,
-            0.25
-          ],
-          "rotation": [
-            0,
-            0,
-            0
-          ]
-        }
-      ]
-    }
+          shape: "box",
+          color: "#ffd166",
+          position: [0, -0.12, 0],
+          scale: [0.7, 0.5, 0.25],
+          rotation: [0, 0, 0],
+        },
+      ],
+    },
   },
-  "orchestrate": {
-    "name": "Tidy Tally",
-    "tagline": "sweeping 9 lint rules into their own workspaces",
-    "body": "round",
-    "body_color": "#8fe3c4",
-    "accent_color": "#ff8fab",
-    "eyes": "dots",
-    "hat": "beanie",
-    "accessory": "backpack",
-    "work": "sweeping",
-    "prop": {
-      "label": "lint broom",
-      "parts": [
+  orchestrate: {
+    name: "Tidy Tally",
+    tagline: "sweeping 9 lint rules into their own workspaces",
+    body: "round",
+    body_color: "#8fe3c4",
+    accent_color: "#ff8fab",
+    eyes: "dots",
+    hat: "beanie",
+    accessory: "backpack",
+    work: "sweeping",
+    prop: {
+      label: "lint broom",
+      parts: [
         {
-          "shape": "cylinder",
-          "color": "#c9a66b",
-          "position": [
-            0,
-            0.05,
-            0
-          ],
-          "scale": [
-            0.08,
-            0.9,
-            0.08
-          ],
-          "rotation": [
-            0,
-            0,
-            20
-          ]
+          shape: "cylinder",
+          color: "#c9a66b",
+          position: [0, 0.05, 0],
+          scale: [0.08, 0.9, 0.08],
+          rotation: [0, 0, 20],
         },
         {
-          "shape": "box",
-          "color": "#ffd166",
-          "position": [
-            0.12,
-            -0.4,
-            0
-          ],
-          "scale": [
-            0.45,
-            0.22,
-            0.14
-          ],
-          "rotation": [
-            0,
-            0,
-            20
-          ]
-        }
-      ]
-    }
-  }
+          shape: "box",
+          color: "#ffd166",
+          position: [0.12, -0.4, 0],
+          scale: [0.45, 0.22, 0.14],
+          rotation: [0, 0, 20],
+        },
+      ],
+    },
+  },
 };
 
 const running = { running: true } as SessionInfo;
@@ -364,17 +196,37 @@ interface Sample {
   id: string;
   branch: string;
   design?: string;
-  mood: "needs_you" | "working" | "idle" | "asleep" | "queued" | "creating" | "failed" | "shipping" | "shipped";
+  mood:
+    | "needs_you"
+    | "working"
+    | "idle"
+    | "asleep"
+    | "queued"
+    | "creating"
+    | "failed"
+    | "shipping"
+    | "shipped";
   parent?: string;
   progress?: { done: number; total: number };
 }
 
 const SAMPLES: Sample[] = [
   { id: "a", branch: "fix-flaky-login", design: "flaky", mood: "needs_you" },
-  { id: "b", branch: "reports-normalize", design: "migration", mood: "working" },
+  {
+    id: "b",
+    branch: "reports-normalize",
+    design: "migration",
+    mood: "working",
+  },
   { id: "c", branch: "worklist-n-plus-1", design: "perf", mood: "working" },
   { id: "d", branch: "upload-traversal", design: "security", mood: "idle" },
-  { id: "e", branch: "lint-rollout", design: "orchestrate", mood: "idle", progress: { done: 3, total: 9 } },
+  {
+    id: "e",
+    branch: "lint-rollout",
+    design: "orchestrate",
+    mood: "idle",
+    progress: { done: 3, total: 9 },
+  },
   { id: "e1", branch: "lint-no-floating", mood: "idle", parent: "e" },
   { id: "e2", branch: "lint-exhaustive-deps", mood: "working", parent: "e" },
   { id: "e3", branch: "lint-no-shadow", mood: "idle", parent: "e" },
@@ -396,7 +248,14 @@ const workspace = (s: Sample): Workspace => ({
   deleted_at: null,
   folder: null,
   status: {
-    kind: s.mood === "queued" ? "queued" : s.mood === "creating" ? "creating" : s.mood === "failed" ? "creation_failed" : "ready",
+    kind:
+      s.mood === "queued"
+        ? "queued"
+        : s.mood === "creating"
+          ? "creating"
+          : s.mood === "failed"
+            ? "creation_failed"
+            : "ready",
   } as Workspace["status"],
   notes: "",
   parent: s.parent ?? null,
@@ -412,7 +271,10 @@ const workspace = (s: Sample): Workspace => ({
 mockIPC((cmd) => {
   if (cmd === "list_avatars") {
     return Object.fromEntries(
-      SAMPLES.filter((s) => s.design).map((s) => [s.id, { spec: DESIGNS[s.design!], generated_at: "" }]),
+      SAMPLES.filter((s) => s.design).map((s) => [
+        s.id,
+        { spec: DESIGNS[s.design!], generated_at: "" },
+      ]),
     );
   }
   return null;
@@ -426,7 +288,11 @@ function Preview() {
     <div className="app fun">
       <FunWorld
         workspaces={SAMPLES.map(workspace)}
-        sessions={new Map(SAMPLES.map((s) => [s.id, s.mood === "asleep" ? null : running]))}
+        sessions={
+          new Map(
+            SAMPLES.map((s) => [s.id, s.mood === "asleep" ? null : running]),
+          )
+        }
         needsTurn={(w) => bySample.get(w.id)?.mood === "needs_you"}
         working={(w) => bySample.get(w.id)?.mood === "working"}
         selectedId={selected}

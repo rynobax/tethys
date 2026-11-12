@@ -17,7 +17,13 @@ import { Character, DIMS, HAT_ROOM, type CharacterHandlers } from "./Character";
 import { toResidents, type Resident } from "./residents";
 import { DUSK, MEADOW, Scenery, type Environment } from "./Scenery";
 import { Sim } from "./sim";
-import { CAMERA_DISTANCE, PITCH, PIXELS_PER_UNIT, computeStage, type Stage } from "./stage";
+import {
+  CAMERA_DISTANCE,
+  PITCH,
+  PIXELS_PER_UNIT,
+  computeStage,
+  type Stage,
+} from "./stage";
 import "./fun.css";
 
 /** Plenty for a diorama, and the machine is short on memory as it is. */
@@ -40,13 +46,17 @@ function useAvatars(): Map<WorkspaceId, unknown> {
   const refresh = useCallback(() => {
     api
       .listAvatars()
-      .then((all) => setAvatars(new Map(Object.entries(all).map(([id, a]) => [id, a.spec]))))
+      .then((all) =>
+        setAvatars(new Map(Object.entries(all).map(([id, a]) => [id, a.spec]))),
+      )
       .catch((e) => console.error("list_avatars failed:", e));
   }, []);
   useEffect(() => {
     refresh();
     // Workspaces from before fun mode existed get designed on first visit.
-    api.ensureAvatars().catch((e) => console.error("ensure_avatars failed:", e));
+    api
+      .ensureAvatars()
+      .catch((e) => console.error("ensure_avatars failed:", e));
   }, [refresh]);
   useAppEvent("avatar:changed", refresh);
   return avatars;
@@ -85,7 +95,9 @@ function useEnvironment(): Environment {
       const { r, g, b } = new THREE.Color(bg);
       return 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.35 ? DUSK : MEADOW;
     }
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? DUSK : MEADOW;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? DUSK
+      : MEADOW;
   }, [theme]);
 }
 
@@ -123,7 +135,11 @@ function SimDriver({ sim }: { sim: Sim }) {
 function Aim() {
   const camera = useThree((s) => s.camera);
   useLayoutEffect(() => {
-    camera.position.set(0, Math.sin(PITCH) * CAMERA_DISTANCE, Math.cos(PITCH) * CAMERA_DISTANCE);
+    camera.position.set(
+      0,
+      Math.sin(PITCH) * CAMERA_DISTANCE,
+      Math.cos(PITCH) * CAMERA_DISTANCE,
+    );
     camera.lookAt(0, 0, 0);
     // Labels project before the first render would otherwise refresh it.
     camera.updateMatrixWorld();
@@ -148,7 +164,8 @@ function LabelProjector({
       const el = labels.current.get(r.id);
       const a = sim.agents.get(r.id);
       if (!el || !a) continue;
-      const head = a.activity === "egg" ? 0.95 : DIMS[r.spec.body].top + HAT_ROOM;
+      const head =
+        a.activity === "egg" ? 0.95 : DIMS[r.spec.body].top + HAT_ROOM;
       v.set(a.pos.x, head * a.size + 0.1, a.pos.z).project(camera);
       const x = ((v.x + 1) / 2) * size.width;
       const y = ((1 - v.y) / 2) * size.height;
@@ -201,7 +218,9 @@ function Label({
       {hovered && resident.designed && (
         <span className="fun-card">
           <span className="fun-card-name">{spec.name}</span>
-          {spec.tagline && <span className="fun-card-tagline">{spec.tagline}</span>}
+          {spec.tagline && (
+            <span className="fun-card-tagline">{spec.tagline}</span>
+          )}
         </span>
       )}
       <span className="fun-pill">
@@ -273,10 +292,20 @@ export default function FunWorld({
   const sim = useMemo(() => new Sim(), []);
   const labels = useRef(new Map<string, HTMLDivElement>());
   const [hovered, setHovered] = useState<string | null>(null);
-  const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(
+    null,
+  );
 
   const residents = useMemo(
-    () => toResidents({ workspaces, sessions, needsTurn, working, selectedId, avatars }),
+    () =>
+      toResidents({
+        workspaces,
+        sessions,
+        needsTurn,
+        working,
+        selectedId,
+        avatars,
+      }),
     [workspaces, sessions, needsTurn, working, selectedId, avatars],
   );
 
@@ -342,7 +371,9 @@ export default function FunWorld({
           y={menu.y}
           onOpen={() => onSelect(menu.id)}
           onRedesign={() =>
-            api.rerollAvatar(menu.id).catch((e) => console.error("reroll_avatar failed:", e))
+            api
+              .rerollAvatar(menu.id)
+              .catch((e) => console.error("reroll_avatar failed:", e))
           }
           onClose={() => setMenu(null)}
         />

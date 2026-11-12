@@ -114,9 +114,7 @@ export function ErrorOverlay() {
             </button>
           </div>
           <div className="error-overlay-message">{e.message}</div>
-          {e.stack && (
-            <pre className="error-overlay-stack">{e.stack}</pre>
-          )}
+          {e.stack && <pre className="error-overlay-stack">{e.stack}</pre>}
         </div>
       ))}
     </div>

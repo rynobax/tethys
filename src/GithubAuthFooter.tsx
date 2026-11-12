@@ -9,7 +9,8 @@ export function GithubAuthFooter() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api.githubAuthStatus()
+    api
+      .githubAuthStatus()
       .then(setSnap)
       .catch(() => setSnap(null));
   }, []);

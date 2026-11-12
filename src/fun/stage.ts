@@ -39,8 +39,14 @@ export function computeStage(
   panel: { left: number; right: number },
 ): Stage {
   const toX = (px: number) => (px - width / 2) / PIXELS_PER_UNIT;
-  const toZ = (py: number) => (py - height / 2) / (PIXELS_PER_UNIT * Math.sin(PITCH));
-  const visible = { xMin: toX(0), xMax: toX(width), zMin: toZ(0), zMax: toZ(height) };
+  const toZ = (py: number) =>
+    (py - height / 2) / (PIXELS_PER_UNIT * Math.sin(PITCH));
+  const visible = {
+    xMin: toX(0),
+    xMax: toX(width),
+    zMin: toZ(0),
+    zMax: toZ(height),
+  };
   const panelX = { xMin: toX(panel.left), xMax: toX(panel.right) };
 
   const region = (xMin: number, xMax: number): Region | null =>

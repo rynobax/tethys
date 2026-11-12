@@ -1,9 +1,4 @@
-import type {
-  Folder,
-  GithubPrStatus,
-  RepoLink,
-  Workspace,
-} from "./types";
+import type { Folder, GithubPrStatus, RepoLink, Workspace } from "./types";
 
 /** Several missed 45s poller ticks: polling is wedged or backed off. */
 const STALE_MS = 5 * 60 * 1000;
@@ -60,7 +55,9 @@ export function prGroups(entries: LinkPr[]): PrGroup[] {
   }
 
   for (const group of byStack.values()) {
-    group.prs.sort((a, b) => a.status.stack!.position - b.status.stack!.position);
+    group.prs.sort(
+      (a, b) => a.status.stack!.position - b.status.stack!.position,
+    );
   }
 
   return groups;
@@ -226,10 +223,14 @@ export function shippingSummary(w: Workspace, prs: ShippingPr[]): string {
 }
 
 /** Open PRs a workspace could ship, in tracking order. */
-export function shippablePrs(w: Workspace): { repoKey: string; status: GithubPrStatus }[] {
+export function shippablePrs(
+  w: Workspace,
+): { repoKey: string; status: GithubPrStatus }[] {
   return w.repo_links.flatMap((link) =>
     link.prs.flatMap((p) =>
-      p.status?.state === "open" ? [{ repoKey: link.repo_key, status: p.status }] : [],
+      p.status?.state === "open"
+        ? [{ repoKey: link.repo_key, status: p.status }]
+        : [],
     ),
   );
 }

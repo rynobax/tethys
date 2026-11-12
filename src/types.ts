@@ -3,32 +3,18 @@ export type FolderId = string;
 export type SessionId = string;
 
 export type SessionRuntimeState =
-  | "dormant"
-  | "working"
-  | "waiting_input"
-  | "idle";
+  "dormant" | "working" | "waiting_input" | "idle";
 
 export type PrState = "open" | "merged" | "closed";
 
 export type ChecksRollup =
-  | "none"
-  | "pending"
-  | "success"
-  | "failure"
-  | "neutral";
+  "none" | "pending" | "success" | "failure" | "neutral";
 
 export type ReviewDecision =
-  | "none"
-  | "approved"
-  | "changes_requested"
-  | "review_required";
+  "none" | "approved" | "changes_requested" | "review_required";
 
 export type MergeQueueState =
-  | "queued"
-  | "awaiting_checks"
-  | "mergeable"
-  | "unmergeable"
-  | "locked";
+  "queued" | "awaiting_checks" | "mergeable" | "unmergeable" | "locked";
 
 export interface GithubPrStatus {
   pr_number: number;
@@ -137,7 +123,6 @@ export interface SystemErrorEntry {
   workspace_branch: string | null;
 }
 
-
 export interface CreateWorkspaceArgs {
   /** Frontend-minted so the draft's sidebar row holds its position. */
   workspace_id: WorkspaceId;
@@ -158,7 +143,11 @@ export interface Repo {
 }
 
 export type RegistryStatus =
-  | { kind: "ok"; path: string; registry: { worktree_root: string; repos: Repo[] } }
+  | {
+      kind: "ok";
+      path: string;
+      registry: { worktree_root: string; repos: Repo[] };
+    }
   | { kind: "missing"; path: string }
   | { kind: "invalid"; path: string; error: string };
 
@@ -228,10 +217,7 @@ export interface GithubStatusChangedEvent {
 }
 
 export type GithubAuthState =
-  | "unknown"
-  | "authenticated"
-  | "not_authenticated"
-  | "disabled";
+  "unknown" | "authenticated" | "not_authenticated" | "disabled";
 
 export interface GithubAuthSnapshot {
   state: GithubAuthState;

@@ -120,9 +120,7 @@ export function normalizeSpec(raw: unknown, fallback: AvatarSpec): AvatarSpec {
     hat: pick(HATS, r.hat, "none"),
     accessory: pick(ACCESSORIES, r.accessory, "none"),
     work: pick(WORKS, r.work, fallback.work),
-    prop: parts.length
-      ? { label: text(rawProp?.label, 40), parts }
-      : null,
+    prop: parts.length ? { label: text(rawProp?.label, 40), parts } : null,
   };
 }
 

@@ -275,3 +275,7 @@ First minute of the rewritten script contradicts the "nothing here is big" readi
 ## Rust
 
 Use idiomatic rust. After a set of changes are finished, run clippy and clean up the issues it reports
+
+## Frontend
+
+Formatted with prettier on its defaults (`.prettierrc.json` is empty on purpose). After a set of frontend changes, run `pnpm format`. Markdown, `src-tauri/` and `crates/` are outside it.

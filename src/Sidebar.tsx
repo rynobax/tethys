@@ -102,8 +102,7 @@ const collisionDetection: CollisionDetection = (args) => {
 };
 
 type ActiveDrag =
-  | { type: "workspace"; id: WorkspaceId }
-  | { type: "folder"; id: FolderId };
+  { type: "workspace"; id: WorkspaceId } | { type: "folder"; id: FolderId };
 
 export function Sidebar({
   workspaces,
@@ -257,11 +256,11 @@ export function Sidebar({
 
   const dragged =
     activeDrag?.type === "workspace"
-      ? workspaces.find((w) => w.id === activeDrag.id) ?? null
+      ? (workspaces.find((w) => w.id === activeDrag.id) ?? null)
       : null;
   const draggedFolder =
     activeDrag?.type === "folder"
-      ? folders.find((f) => f.id === activeDrag.id) ?? null
+      ? (folders.find((f) => f.id === activeDrag.id) ?? null)
       : null;
 
   // Children that left the list for Shipping, shown on the parent instead.
@@ -298,7 +297,9 @@ export function Sidebar({
       <ul className="workspace-list">
         {listed.length === 0 && (
           <li className="empty">
-            {workspaces.length === 0 ? "No workspaces yet." : "Nothing in progress."}
+            {workspaces.length === 0
+              ? "No workspaces yet."
+              : "Nothing in progress."}
           </li>
         )}
         <DndContext
@@ -332,7 +333,9 @@ export function Sidebar({
                             onRenameFolder(folder.id, name);
                           }
                         }}
-                        onContextMenu={(x, y) => setFolderMenu({ folder, x, y })}
+                        onContextMenu={(x, y) =>
+                          setFolderMenu({ folder, x, y })
+                        }
                       />
                     ) : (
                       <DefaultFolderHeader count={rows.length} />
@@ -574,8 +577,14 @@ function SortableWorkspaceRow({
   onSelect: () => void;
   onContextMenu: (x: number, y: number) => void;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: workspace.id, data: { type: "workspace" } });
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: workspace.id, data: { type: "workspace" } });
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -662,7 +671,7 @@ function WorkspaceRow({
       ref={dndProps?.ref}
       style={
         depth > 0
-          ? { ...dndProps?.style, "--depth": depth } as React.CSSProperties
+          ? ({ ...dndProps?.style, "--depth": depth } as React.CSSProperties)
           : dndProps?.style
       }
       {...(dndProps?.attributes ?? {})}
@@ -683,7 +692,10 @@ function WorkspaceRow({
       {workspace.progress && <Progress {...workspace.progress} />}
       {status === "creating" && <div className="pending-label">creating…</div>}
       {status === "queued" && (
-        <div className="pending-label" title="Tethys sets up one workspace at a time">
+        <div
+          className="pending-label"
+          title="Tethys sets up one workspace at a time"
+        >
           queued…
         </div>
       )}
@@ -865,7 +877,9 @@ function ContextMenu({
           role="menuitem"
           onClick={wrap(() => onStopShipping(workspace))}
         >
-          {workspace.shipment.kind === "shipping" ? "Stop shipping" : "Move back"}
+          {workspace.shipment.kind === "shipping"
+            ? "Stop shipping"
+            : "Move back"}
         </button>
       )}
       {isReady && <div className="context-menu-sep" />}
@@ -926,7 +940,10 @@ function ShipPicker({
           onShip(
             candidates
               .filter((c) => chosen.has(key(c)))
-              .map((c) => ({ repo_key: c.repoKey, number: c.status.pr_number })),
+              .map((c) => ({
+                repo_key: c.repoKey,
+                number: c.status.pr_number,
+              })),
           )
         }
       >

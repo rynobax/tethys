@@ -75,37 +75,76 @@ interface Decor {
 
 function scatter(stage: Stage, side: Side): Decor {
   const region = stage.layout.regions[side];
-  const decor: Decor = { trees: [], rocks: [], flowers: [], tufts: [], patches: [] };
+  const decor: Decor = {
+    trees: [],
+    rocks: [],
+    flowers: [],
+    tufts: [],
+    patches: [],
+  };
   if (!region) return decor;
   const v = stage.visible;
   const xMin = side === "left" ? v.xMin : stage.panel.xMax;
   const xMax = side === "left" ? stage.panel.xMin : v.xMax;
-  const rng = mulberry32(Math.round((xMax - xMin) * 10) * 7919 + Math.round((v.zMax - v.zMin) * 10) + (side === "left" ? 1 : 2));
+  const rng = mulberry32(
+    Math.round((xMax - xMin) * 10) * 7919 +
+      Math.round((v.zMax - v.zMin) * 10) +
+      (side === "left" ? 1 : 2),
+  );
   const portal = stage.layout.portals[side];
 
   // A treeline along the back, leaving the portal clear.
   for (let x = xMin + 0.3; x < xMax; x += 0.7 + rng() * 0.6) {
     if (portal && Math.abs(x - portal.x) < 1.1) continue;
-    decor.trees.push({ x, z: v.zMin + 0.4 + rng() * (region.zMin - v.zMin - 0.6), s: 0.8 + rng() * 0.6, c: Math.floor(rng() * 3) });
+    decor.trees.push({
+      x,
+      z: v.zMin + 0.4 + rng() * (region.zMin - v.zMin - 0.6),
+      s: 0.8 + rng() * 0.6,
+      c: Math.floor(rng() * 3),
+    });
   }
   // And a few down the outer edge.
   const outer = side === "left" ? xMin + 0.35 : xMax - 0.35;
   for (let z = region.zMin + 1; z < v.zMax; z += 1.6 + rng() * 1.8) {
-    decor.trees.push({ x: outer + (rng() - 0.5) * 0.3, z, s: 0.6 + rng() * 0.5, c: Math.floor(rng() * 3) });
+    decor.trees.push({
+      x: outer + (rng() - 0.5) * 0.3,
+      z,
+      s: 0.6 + rng() * 0.5,
+      c: Math.floor(rng() * 3),
+    });
   }
   const area = (region.xMax - region.xMin) * (region.zMax - region.zMin);
   const point = () => ({
     x: region.xMin + rng() * (region.xMax - region.xMin),
     z: region.zMin + rng() * (region.zMax - region.zMin),
   });
-  for (let i = 0; i < area * 0.04; i++) decor.rocks.push({ ...point(), s: 0.12 + rng() * 0.16, r: rng() * Math.PI });
-  for (let i = 0; i < area * 0.35; i++) decor.flowers.push({ ...point(), c: Math.floor(rng() * 4) });
+  for (let i = 0; i < area * 0.04; i++)
+    decor.rocks.push({
+      ...point(),
+      s: 0.12 + rng() * 0.16,
+      r: rng() * Math.PI,
+    });
+  for (let i = 0; i < area * 0.35; i++)
+    decor.flowers.push({ ...point(), c: Math.floor(rng() * 4) });
   for (let i = 0; i < area * 0.3; i++) decor.tufts.push(point());
-  for (let i = 0; i < area * 0.03 + 1; i++) decor.patches.push({ ...point(), r: 0.8 + rng() * 1.6 });
+  for (let i = 0; i < area * 0.03 + 1; i++)
+    decor.patches.push({ ...point(), r: 0.8 + rng() * 1.6 });
   return decor;
 }
 
-function Tree({ x, z, s, color, trunk }: { x: number; z: number; s: number; color: string; trunk: string }) {
+function Tree({
+  x,
+  z,
+  s,
+  color,
+  trunk,
+}: {
+  x: number;
+  z: number;
+  s: number;
+  color: string;
+  trunk: string;
+}) {
   return (
     <group position={[x, 0, z]} scale={s}>
       <mesh position-y={0.2}>
@@ -131,7 +170,8 @@ function Portal({ at, color }: { at: Vec2; color: string }) {
     const t = state.clock.elapsedTime;
     if (swirl.current) {
       swirl.current.rotation.z = t * 1.5;
-      (swirl.current.material as THREE.MeshBasicMaterial).opacity = 0.55 + Math.sin(t * 2) * 0.15;
+      (swirl.current.material as THREE.MeshBasicMaterial).opacity =
+        0.55 + Math.sin(t * 2) * 0.15;
     }
     if (sparks.current) sparks.current.rotation.z = -t * 0.9;
   });
@@ -145,15 +185,32 @@ function Portal({ at, color }: { at: Vec2; color: string }) {
       ))}
       <mesh position-y={0.68}>
         <torusGeometry args={[0.55, 0.09, 8, 24]} />
-        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.45} flatShading />
+        <meshStandardMaterial
+          color={color}
+          emissive={color}
+          emissiveIntensity={0.45}
+          flatShading
+        />
       </mesh>
       <mesh ref={swirl} position-y={0.68}>
         <circleGeometry args={[0.5, 6]} />
-        <meshBasicMaterial color={color} transparent opacity={0.6} side={THREE.DoubleSide} />
+        <meshBasicMaterial
+          color={color}
+          transparent
+          opacity={0.6}
+          side={THREE.DoubleSide}
+        />
       </mesh>
       <group ref={sparks} position-y={0.68}>
         {[0, 1, 2, 3, 4].map((i) => (
-          <mesh key={i} position={[Math.cos((i / 5) * Math.PI * 2) * 0.72, Math.sin((i / 5) * Math.PI * 2) * 0.72, 0]}>
+          <mesh
+            key={i}
+            position={[
+              Math.cos((i / 5) * Math.PI * 2) * 0.72,
+              Math.sin((i / 5) * Math.PI * 2) * 0.72,
+              0,
+            ]}
+          >
             <octahedronGeometry args={[0.04]} />
             <meshBasicMaterial color="#ffffff" />
           </mesh>
@@ -232,7 +289,11 @@ export function Scenery({ stage, env }: { stage: Stage; env: Environment }) {
   return (
     <>
       <hemisphereLight args={[env.sky, env.hemiGround, env.hemiIntensity]} />
-      <directionalLight position={[6, 12, 8]} intensity={env.sunIntensity} color={env.sun} />
+      <directionalLight
+        position={[6, 12, 8]}
+        intensity={env.sunIntensity}
+        color={env.sun}
+      />
       <mesh rotation-x={-Math.PI / 2}>
         <planeGeometry args={[400, 400]} />
         <meshStandardMaterial color={env.ground} />
@@ -240,16 +301,32 @@ export function Scenery({ stage, env }: { stage: Stage; env: Environment }) {
       {decor.map((d, i) => (
         <group key={i}>
           {d.patches.map((p, j) => (
-            <mesh key={`p${j}`} rotation-x={-Math.PI / 2} position={[p.x, 0.003, p.z]}>
+            <mesh
+              key={`p${j}`}
+              rotation-x={-Math.PI / 2}
+              position={[p.x, 0.003, p.z]}
+            >
               <circleGeometry args={[p.r, 9]} />
               <meshStandardMaterial color={env.patch} />
             </mesh>
           ))}
           {d.trees.map((t, j) => (
-            <Tree key={`t${j}`} x={t.x} z={t.z} s={t.s} color={env.foliage[t.c]} trunk={env.trunk} />
+            <Tree
+              key={`t${j}`}
+              x={t.x}
+              z={t.z}
+              s={t.s}
+              color={env.foliage[t.c]}
+              trunk={env.trunk}
+            />
           ))}
           {d.rocks.map((r, j) => (
-            <mesh key={`r${j}`} position={[r.x, r.s * 0.4, r.z]} rotation-y={r.r} scale={[r.s, r.s * 0.7, r.s]}>
+            <mesh
+              key={`r${j}`}
+              position={[r.x, r.s * 0.4, r.z]}
+              rotation-y={r.r}
+              scale={[r.s, r.s * 0.7, r.s]}
+            >
               <dodecahedronGeometry args={[1, 0]} />
               <meshStandardMaterial color={env.rock} flatShading />
             </mesh>
@@ -257,13 +334,18 @@ export function Scenery({ stage, env }: { stage: Stage; env: Environment }) {
           {d.flowers.map((f, j) => (
             <mesh key={`f${j}`} position={[f.x, 0.05, f.z]}>
               <sphereGeometry args={[0.045, 5, 4]} />
-              <meshStandardMaterial color={env.flowers[f.c % env.flowers.length]} />
+              <meshStandardMaterial
+                color={env.flowers[f.c % env.flowers.length]}
+              />
             </mesh>
           ))}
           {d.tufts.map((t, j) => (
             <mesh key={`g${j}`} position={[t.x, 0.06, t.z]}>
               <coneGeometry args={[0.05, 0.14, 4]} />
-              <meshStandardMaterial color={env.foliage[j % env.foliage.length]} flatShading />
+              <meshStandardMaterial
+                color={env.foliage[j % env.foliage.length]}
+                flatShading
+              />
             </mesh>
           ))}
         </group>

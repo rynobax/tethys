@@ -37,11 +37,7 @@ interface Props {
   onNotesChange: (notes: string) => void;
 }
 
-export function SidePanel({
-  workspace,
-  notes,
-  onNotesChange,
-}: Props) {
+export function SidePanel({ workspace, notes, onNotesChange }: Props) {
   const [collapsedMap, setCollapsedMap] = useState(() =>
     loadMap(COLLAPSED_KEY, isBoolean),
   );

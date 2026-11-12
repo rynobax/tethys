@@ -130,10 +130,22 @@ export class Sim {
     return this.layout?.regions[side] ?? null;
   }
 
-  private randomPoint(region: Region, near?: Vec2, radius = WANDER_RADIUS): Vec2 {
+  private randomPoint(
+    region: Region,
+    near?: Vec2,
+    radius = WANDER_RADIUS,
+  ): Vec2 {
     // Clamped, or a point near someone outside the meadow lands outside it.
-    const cx = clamp(near?.x ?? (region.xMin + region.xMax) / 2, region.xMin, region.xMax);
-    const cz = clamp(near?.z ?? (region.zMin + region.zMax) / 2, region.zMin, region.zMax);
+    const cx = clamp(
+      near?.x ?? (region.xMin + region.xMax) / 2,
+      region.xMin,
+      region.xMax,
+    );
+    const cz = clamp(
+      near?.z ?? (region.zMin + region.zMax) / 2,
+      region.zMin,
+      region.zMax,
+    );
     const r = near ? radius : Infinity;
     return {
       x: rand(Math.max(region.xMin, cx - r), Math.min(region.xMax, cx + r)),
@@ -171,7 +183,11 @@ export class Sim {
   private settle(a: Agent) {
     if (!a.placed && this.region(a.side)) {
       const parent = this.parentOf(a);
-      a.pos = this.randomPoint(this.region(a.side)!, parent?.placed ? parent.pos : undefined, 1.5);
+      a.pos = this.randomPoint(
+        this.region(a.side)!,
+        parent?.placed ? parent.pos : undefined,
+        1.5,
+      );
       a.placed = true;
     }
     if (!this.region(a.side) && this.region(other(a.side))) {
@@ -259,8 +275,7 @@ export class Sim {
 
   /** Walk to a spot and stay there doing `intent`. */
   private head(a: Agent, spot: Vec2, intent: "attention" | "work") {
-    const arrived =
-      dist(a.pos, spot) < (a.activity === intent ? 0.5 : ARRIVE);
+    const arrived = dist(a.pos, spot) < (a.activity === intent ? 0.5 : ARRIVE);
     if (arrived) {
       a.target = null;
       this.setActivity(a, intent);
@@ -273,7 +288,8 @@ export class Sim {
   private attentionSpot(a: Agent, region: Region): Vec2 {
     const waiting = [...this.agents.values()]
       .filter(
-        (o) => o.side === a.side && this.residents.get(o.id)?.mood === "needs_you",
+        (o) =>
+          o.side === a.side && this.residents.get(o.id)?.mood === "needs_you",
       )
       .map((o) => o.id)
       .sort();
@@ -322,7 +338,10 @@ export class Sim {
     if (parent && parentRoams && Math.random() < FOLLOW_CHANCE) {
       if (parent.side !== a.side) this.toPortal(a);
       else this.walkTo(a, this.behind(parent, a), "follow");
-    } else if (Math.random() < PORTAL_CHANCE && this.layout?.portals[other(a.side)]) {
+    } else if (
+      Math.random() < PORTAL_CHANCE &&
+      this.layout?.portals[other(a.side)]
+    ) {
       this.toPortal(a);
     } else {
       this.walkTo(a, this.randomPoint(region, a.pos), "wander");
@@ -389,7 +408,8 @@ export class Sim {
   /** Nobody stands inside anybody else. Only the ones moving get pushed. */
   private separate() {
     const list = [...this.agents.values()];
-    const movable = (a: Agent) => a.activity === "walk" || a.activity === "pause";
+    const movable = (a: Agent) =>
+      a.activity === "walk" || a.activity === "pause";
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
         const a = list[i];

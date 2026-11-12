@@ -238,7 +238,11 @@ function StatusSections({
       <section>
         <div className="section-header">
           <h4>Pending deletions</h4>
-          <button type="button" onClick={runCleanupNow} disabled={busy !== null}>
+          <button
+            type="button"
+            onClick={runCleanupNow}
+            disabled={busy !== null}
+          >
             Run cleanup now
           </button>
         </div>
@@ -290,7 +294,9 @@ function StatusSections({
                     <span className="error-when">
                       {new Date(err.at).toLocaleString()}
                     </span>
-                    {err.workspace_branch && <code>{err.workspace_branch}</code>}
+                    {err.workspace_branch && (
+                      <code>{err.workspace_branch}</code>
+                    )}
                     <span className="error-kind">{err.kind}</span>
                   </div>
                   <pre className="error-message">{err.message}</pre>
@@ -447,7 +453,9 @@ function DiskMismatchSection({
                   <li key={id}>
                     <div className="status-row">
                       <code>{branch}</code>{" "}
-                      <span className="muted">· missing: {repos.join(", ")}</span>
+                      <span className="muted">
+                        · missing: {repos.join(", ")}
+                      </span>
                     </div>
                     <button
                       type="button"

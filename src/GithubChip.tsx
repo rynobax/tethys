@@ -299,7 +299,9 @@ export function GithubChip({
     status.head_branch,
     `state: ${status.state}${status.is_draft ? " (draft)" : ""}`,
     status.merge_queue ? mergeQueueTitle(status.merge_queue) : null,
-    stale ? `stale since ${new Date(status.fetched_at).toLocaleTimeString()}` : null,
+    stale
+      ? `stale since ${new Date(status.fetched_at).toLocaleTimeString()}`
+      : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -315,7 +317,11 @@ export function GithubChip({
             title={ciTitle(status.checks, status.has_merge_conflicts)}
           />
           {status.is_draft ? (
-            <Square kind="draft" tone="gray" title="Draft: not ready for review" />
+            <Square
+              kind="draft"
+              tone="gray"
+              title="Draft: not ready for review"
+            />
           ) : (
             <Square
               kind="review"

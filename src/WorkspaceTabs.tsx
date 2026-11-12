@@ -245,9 +245,7 @@ export function TabStrip({
             a.kind === "page" ? a.path : a.kind === "review" ? a.url : a.label
           }
         >
-          <span className="main-tab-glyph">
-            {ARTIFACT_GLYPHS[a.kind]}
-          </span>
+          <span className="main-tab-glyph">{ARTIFACT_GLYPHS[a.kind]}</span>
           <span className="main-tab-label">{a.label}</span>
           <button
             type="button"
@@ -291,11 +289,7 @@ export function TabContent({
       );
     }
     return (
-      <PrView
-        url={pr.status.url}
-        number={pr.number}
-        repoKey={pr.repoKey}
-      />
+      <PrView url={pr.status.url} number={pr.number} repoKey={pr.repoKey} />
     );
   }
   const artifact = tabs.artifacts.find((a) => a.id === tabs.selected);
@@ -553,7 +547,12 @@ function useCovered(hostRef: React.RefObject<HTMLElement | null>): boolean {
     const h = host.getBoundingClientRect();
     return Array.from(document.querySelectorAll(".context-menu")).some((m) => {
       const r = m.getBoundingClientRect();
-      return r.right > h.left && r.left < h.right && r.bottom > h.top && r.top < h.bottom;
+      return (
+        r.right > h.left &&
+        r.left < h.right &&
+        r.bottom > h.top &&
+        r.top < h.bottom
+      );
     });
   }, [hostRef]);
   const [covered, setCovered] = useState(false);

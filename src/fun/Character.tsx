@@ -3,7 +3,15 @@ import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
 import type { Resident } from "./residents";
 import type { Agent, Sim } from "./sim";
-import type { Accessory, AvatarSpec, Body, Eyes, Hat, PropPart, Work } from "./spec";
+import type {
+  Accessory,
+  AvatarSpec,
+  Body,
+  Eyes,
+  Hat,
+  PropPart,
+  Work,
+} from "./spec";
 
 /** Where things sit on each body, in units of a top-level resident. */
 interface Dims {
@@ -18,11 +26,56 @@ interface Dims {
 }
 
 export const DIMS: Record<Body, Dims> = {
-  bean: { center: 0.61, top: 1.1, hw: 0.3, eyeY: 0.8, eyeX: 0.11, faceZ: 0.3, neck: 0.52, shoulder: 0.58 },
-  tall: { center: 0.67, top: 1.22, hw: 0.25, eyeY: 0.94, eyeX: 0.095, faceZ: 0.25, neck: 0.62, shoulder: 0.66 },
-  round: { center: 0.54, top: 0.96, hw: 0.42, eyeY: 0.64, eyeX: 0.13, faceZ: 0.4, neck: 0.36, shoulder: 0.5 },
-  blob: { center: 0.48, top: 0.84, hw: 0.46, eyeY: 0.56, eyeX: 0.14, faceZ: 0.44, neck: 0.32, shoulder: 0.44 },
-  cube: { center: 0.45, top: 0.78, hw: 0.32, eyeY: 0.55, eyeX: 0.12, faceZ: 0.28, neck: 0.3, shoulder: 0.45 },
+  bean: {
+    center: 0.61,
+    top: 1.1,
+    hw: 0.3,
+    eyeY: 0.8,
+    eyeX: 0.11,
+    faceZ: 0.3,
+    neck: 0.52,
+    shoulder: 0.58,
+  },
+  tall: {
+    center: 0.67,
+    top: 1.22,
+    hw: 0.25,
+    eyeY: 0.94,
+    eyeX: 0.095,
+    faceZ: 0.25,
+    neck: 0.62,
+    shoulder: 0.66,
+  },
+  round: {
+    center: 0.54,
+    top: 0.96,
+    hw: 0.42,
+    eyeY: 0.64,
+    eyeX: 0.13,
+    faceZ: 0.4,
+    neck: 0.36,
+    shoulder: 0.5,
+  },
+  blob: {
+    center: 0.48,
+    top: 0.84,
+    hw: 0.46,
+    eyeY: 0.56,
+    eyeX: 0.14,
+    faceZ: 0.44,
+    neck: 0.32,
+    shoulder: 0.44,
+  },
+  cube: {
+    center: 0.45,
+    top: 0.78,
+    hw: 0.32,
+    eyeY: 0.55,
+    eyeX: 0.12,
+    faceZ: 0.28,
+    neck: 0.3,
+    shoulder: 0.45,
+  },
 };
 
 /** Room above the body a hat can take, for placing labels. */
@@ -84,7 +137,15 @@ function BodyMesh({ body, color }: { body: Body; color: string }) {
   }
 }
 
-function EyesMesh({ eyes, d, accent }: { eyes: Eyes; d: Dims; accent: string }) {
+function EyesMesh({
+  eyes,
+  d,
+  accent,
+}: {
+  eyes: Eyes;
+  d: Dims;
+  accent: string;
+}) {
   const z = d.faceZ;
   switch (eyes) {
     case "dots":
@@ -102,7 +163,11 @@ function EyesMesh({ eyes, d, accent }: { eyes: Eyes; d: Dims; accent: string }) 
       return (
         <>
           {[-1, 1].map((s) => (
-            <mesh key={s} position={[s * d.eyeX, 0, z - 0.01]} scale={[1, 0.35, 0.6]}>
+            <mesh
+              key={s}
+              position={[s * d.eyeX, 0, z - 0.01]}
+              scale={[1, 0.35, 0.6]}
+            >
               <sphereGeometry args={[0.055, 8, 6]} />
               <Mat color="#1d1d1f" />
             </mesh>
@@ -230,12 +295,22 @@ function HatMesh({
         <group position-y={T + 0.03}>
           <mesh>
             <cylinderGeometry args={[0.2, 0.2, 0.12, 8, 1, true]} />
-            <meshStandardMaterial color="#ffcf40" flatShading side={THREE.DoubleSide} metalness={0.3} roughness={0.4} />
+            <meshStandardMaterial
+              color="#ffcf40"
+              flatShading
+              side={THREE.DoubleSide}
+              metalness={0.3}
+              roughness={0.4}
+            />
           </mesh>
           {[0, 1, 2, 3, 4].map((i) => (
             <mesh
               key={i}
-              position={[Math.sin((i / 5) * Math.PI * 2) * 0.2, 0.1, Math.cos((i / 5) * Math.PI * 2) * 0.2]}
+              position={[
+                Math.sin((i / 5) * Math.PI * 2) * 0.2,
+                0.1,
+                Math.cos((i / 5) * Math.PI * 2) * 0.2,
+              ]}
             >
               <coneGeometry args={[0.04, 0.09, 4]} />
               <Mat color="#ffcf40" />
@@ -323,7 +398,15 @@ function HatMesh({
   }
 }
 
-function AccessoryMesh({ accessory, d, accent }: { accessory: Accessory; d: Dims; accent: string }) {
+function AccessoryMesh({
+  accessory,
+  d,
+  accent,
+}: {
+  accessory: Accessory;
+  d: Dims;
+  accent: string;
+}) {
   switch (accessory) {
     case "none":
       return null;
@@ -334,7 +417,10 @@ function AccessoryMesh({ accessory, d, accent }: { accessory: Accessory; d: Dims
             <torusGeometry args={[d.hw * 0.97, 0.06, 6, 16]} />
             <Mat color={accent} />
           </mesh>
-          <mesh position={[d.hw * 0.4, -0.13, d.faceZ * 0.85]} rotation-z={0.15}>
+          <mesh
+            position={[d.hw * 0.4, -0.13, d.faceZ * 0.85]}
+            rotation-z={0.15}
+          >
             <boxGeometry args={[0.1, 0.24, 0.04]} />
             <Mat color={accent} />
           </mesh>
@@ -357,9 +443,16 @@ function AccessoryMesh({ accessory, d, accent }: { accessory: Accessory; d: Dims
       );
     case "cape":
       return (
-        <mesh position={[0, d.shoulder - 0.22, -(d.faceZ + 0.03)]} rotation-x={0.12}>
+        <mesh
+          position={[0, d.shoulder - 0.22, -(d.faceZ + 0.03)]}
+          rotation-x={0.12}
+        >
           <planeGeometry args={[d.hw * 2.1, 0.55]} />
-          <meshStandardMaterial color={accent} flatShading side={THREE.DoubleSide} />
+          <meshStandardMaterial
+            color={accent}
+            flatShading
+            side={THREE.DoubleSide}
+          />
         </mesh>
       );
     case "backpack":
@@ -406,7 +499,11 @@ function PartMesh({ part }: { part: PropPart }) {
     <mesh
       position={part.position}
       scale={part.scale}
-      rotation={[part.rotation[0] * DEG, part.rotation[1] * DEG, part.rotation[2] * DEG]}
+      rotation={[
+        part.rotation[0] * DEG,
+        part.rotation[1] * DEG,
+        part.rotation[2] * DEG,
+      ]}
     >
       {geometry}
       <Mat color={part.color} />
@@ -573,7 +670,10 @@ export function Character({
   const alert = useRef<THREE.Mesh>(null);
   const propeller = useRef<THREE.Group>(null);
 
-  const footColor = useMemo(() => darken(spec.body_color, 0.7), [spec.body_color]);
+  const footColor = useMemo(
+    () => darken(spec.body_color, 0.7),
+    [spec.body_color],
+  );
   const mood = resident.mood;
   const hat: Hat | "party" = mood === "shipped" ? "party" : spec.hat;
 
@@ -620,7 +720,11 @@ export function Character({
     const working = a.activity === "work";
     const shipping = mood === "shipping";
     station.current!.visible = working;
-    tool.current!.visible = working && (spec.work === "hammering" || spec.work === "stirring" || spec.work === "sweeping");
+    tool.current!.visible =
+      working &&
+      (spec.work === "hammering" ||
+        spec.work === "stirring" ||
+        spec.work === "sweeping");
     book.current!.visible = working && spec.work === "reading";
     parcel.current!.visible = shipping && !working;
     const handsBusy = working || shipping;
@@ -639,7 +743,7 @@ export function Character({
     footR.current!.position.set(0.13, 0.05, 0.03);
 
     // Blink every few seconds; asleep keeps them shut.
-    const blink = (t % 4.2) < 0.12;
+    const blink = t % 4.2 < 0.12;
     eyes.current!.scale.y = a.activity === "sleep" ? 0.12 : blink ? 0.15 : 1;
 
     switch (a.activity) {
@@ -698,7 +802,11 @@ export function Character({
       onContextMenu={(e) => {
         e.stopPropagation();
         e.nativeEvent.preventDefault();
-        handlers.onMenu(resident.id, e.nativeEvent.clientX, e.nativeEvent.clientY);
+        handlers.onMenu(
+          resident.id,
+          e.nativeEvent.clientX,
+          e.nativeEvent.clientY,
+        );
       }}
       onPointerOver={(e) => {
         e.stopPropagation();
@@ -713,7 +821,12 @@ export function Character({
       </mesh>
       <mesh rotation-x={-Math.PI / 2} position-y={0.01}>
         <circleGeometry args={[0.36, 18]} />
-        <meshBasicMaterial color="#000000" transparent opacity={0.18} depthWrite={false} />
+        <meshBasicMaterial
+          color="#000000"
+          transparent
+          opacity={0.18}
+          depthWrite={false}
+        />
       </mesh>
       <mesh ref={ring} rotation-x={-Math.PI / 2} position-y={0.02}>
         <torusGeometry args={[0.55, 0.035, 6, 36]} />
@@ -742,13 +855,26 @@ export function Character({
             <EyesMesh eyes={spec.eyes} d={d} accent={spec.accent_color} />
           </group>
           {[-1, 1].map((s) => (
-            <mesh key={s} position={[s * (d.eyeX + 0.07), d.eyeY - 0.09, d.faceZ - 0.02]} scale={[1, 0.6, 0.4]}>
+            <mesh
+              key={s}
+              position={[s * (d.eyeX + 0.07), d.eyeY - 0.09, d.faceZ - 0.02]}
+              scale={[1, 0.6, 0.4]}
+            >
               <sphereGeometry args={[0.045, 8, 6]} />
               <meshBasicMaterial color="#ff8fa3" transparent opacity={0.55} />
             </mesh>
           ))}
-          <HatMesh hat={hat} d={d} accent={spec.accent_color} propeller={propeller} />
-          <AccessoryMesh accessory={spec.accessory} d={d} accent={spec.accent_color} />
+          <HatMesh
+            hat={hat}
+            d={d}
+            accent={spec.accent_color}
+            propeller={propeller}
+          />
+          <AccessoryMesh
+            accessory={spec.accessory}
+            d={d}
+            accent={spec.accent_color}
+          />
           <group ref={armL} position={[-(d.hw + 0.03), d.shoulder, 0]}>
             <mesh position-y={-0.15}>
               <capsuleGeometry args={[0.065, 0.18, 3, 6]} />
@@ -769,7 +895,11 @@ export function Character({
               <Tool work={spec.work} />
             </group>
           </group>
-          <group ref={book} position={[0, d.shoulder - 0.22, d.faceZ + 0.2]} rotation-x={-0.5}>
+          <group
+            ref={book}
+            position={[0, d.shoulder - 0.22, d.faceZ + 0.2]}
+            rotation-x={-0.5}
+          >
             {[-1, 1].map((s) => (
               <mesh key={s} position-x={s * 0.1} rotation-y={s * -0.3}>
                 <boxGeometry args={[0.2, 0.26, 0.02]} />
@@ -825,7 +955,8 @@ function poseWork(
       break;
     case "hammering": {
       const s = (local * 2.2) % 1;
-      R.rotation.x = s < 0.7 ? -0.9 - (s / 0.7) * 1.7 : -2.6 + ((s - 0.7) / 0.3) * 1.7;
+      R.rotation.x =
+        s < 0.7 ? -0.9 - (s / 0.7) * 1.7 : -2.6 + ((s - 0.7) / 0.3) * 1.7;
       L.rotation.x = -0.5;
       b.rotation.x = s > 0.7 ? 0.08 : 0;
       break;

@@ -26,24 +26,30 @@ const rustSource = rustFiles(RUST_DIR)
 
 const registered = new Set(
   // Command fns are snake_case; `commands::ClaudeBin` and friends are types.
-  [...readFileSync(join(RUST_DIR, "lib.rs"), "utf8").matchAll(/commands::([a-z]\w*)/g)].map(
-    (m) => m[1],
-  ),
+  [
+    ...readFileSync(join(RUST_DIR, "lib.rs"), "utf8").matchAll(
+      /commands::([a-z]\w*)/g,
+    ),
+  ].map((m) => m[1]),
 );
 
 const commandsTs = readFileSync("src/ipc/commands.ts", "utf8");
 const referenced = new Set(
-  [...commandsTs.matchAll(/invoke<[^>]*>\("(\w+)"|invoke\("(\w+)"|command: "(\w+)"/g)].map(
-    (m) => m[1] ?? m[2] ?? m[3],
-  ),
+  [
+    ...commandsTs.matchAll(
+      /invoke<[^>]*>\("(\w+)"|invoke\("(\w+)"|command: "(\w+)"/g,
+    ),
+  ].map((m) => m[1] ?? m[2] ?? m[3]),
 );
 
 // ── events ─────────────────────────────────────────────────────────────────
 
 const emitted = new Set(
-  [...rustSource.matchAll(/"((?:workspace|session|github|system_status|theme|pending_permissions|artifact|avatar):\w+)"/g)].map(
-    (m) => m[1],
-  ),
+  [
+    ...rustSource.matchAll(
+      /"((?:workspace|session|github|system_status|theme|pending_permissions|artifact|avatar):\w+)"/g,
+    ),
+  ].map((m) => m[1]),
 );
 
 const eventsTs = readFileSync("src/ipc/events.ts", "utf8");
@@ -51,7 +57,9 @@ const tableBody = eventsTs.slice(
   eventsTs.indexOf("export interface AppEvents {"),
   eventsTs.indexOf("export type AppEventName"),
 );
-const declared = new Set([...tableBody.matchAll(/"([\w_]+:[\w_]+)":/g)].map((m) => m[1]));
+const declared = new Set(
+  [...tableBody.matchAll(/"([\w_]+:[\w_]+)":/g)].map((m) => m[1]),
+);
 
 // ── report ─────────────────────────────────────────────────────────────────
 
@@ -59,17 +67,23 @@ const problems = [];
 
 for (const name of referenced) {
   if (!registered.has(name)) {
-    problems.push(`command "${name}" is called from the frontend but not registered in lib.rs`);
+    problems.push(
+      `command "${name}" is called from the frontend but not registered in lib.rs`,
+    );
   }
 }
 for (const name of declared) {
   if (!emitted.has(name)) {
-    problems.push(`event "${name}" is declared in ipc/events.ts but never emitted by Rust`);
+    problems.push(
+      `event "${name}" is declared in ipc/events.ts but never emitted by Rust`,
+    );
   }
 }
 for (const name of emitted) {
   if (!declared.has(name)) {
-    problems.push(`event "${name}" is emitted by Rust but missing from ipc/events.ts`);
+    problems.push(
+      `event "${name}" is emitted by Rust but missing from ipc/events.ts`,
+    );
   }
 }
 

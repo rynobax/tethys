@@ -36,7 +36,12 @@ export function FunControls({
           title="New workspace"
         >
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            <path
+              d="M8 3v10M3 8h10"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+            />
           </svg>
         </button>
       )}
@@ -49,7 +54,12 @@ export function FunControls({
       >
         {on ? (
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-            <path d="M3 4.5h10M3 8h10M3 11.5h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            <path
+              d="M3 4.5h10M3 8h10M3 11.5h10"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+            />
           </svg>
         ) : (
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">

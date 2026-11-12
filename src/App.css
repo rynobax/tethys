@@ -1,6 +1,7 @@
 :root {
   color-scheme: light dark;
-  font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
   font-size: 14px;
 }
 
@@ -2329,7 +2330,9 @@ li.is-dragging {
   color: var(--muted);
   cursor: pointer;
   opacity: 0.55;
-  transition: opacity 0.15s, color 0.15s;
+  transition:
+    opacity 0.15s,
+    color 0.15s;
 }
 
 .fun-control:hover:not(:disabled),
