@@ -24,7 +24,7 @@ use tracing::{debug, info, warn};
 use crate::agent::Agent;
 use crate::agent_bin::AgentBins;
 use crate::error::{AppError, AppResult};
-use crate::state::{WorkspaceId, WorkspaceStatus};
+use crate::state::{Workspace, WorkspaceId, WorkspaceStatus};
 use crate::store::Store;
 
 const MODEL: &str = "haiku";
@@ -180,6 +180,9 @@ impl Avatars {
 
     /// Designs one if the workspace has none and hasn't failed to get one.
     pub async fn ensure(self: &Arc<Self>, workspace_id: &str) {
+        if !self.designable(workspace_id).await {
+            return;
+        }
         {
             let mut inner = self.inner.lock().await;
             if inner.avatars.contains_key(workspace_id)
@@ -199,6 +202,7 @@ impl Avatars {
                 s.workspaces
                     .iter()
                     .filter(|w| w.deleted_at.is_none() && w.status == WorkspaceStatus::Ready)
+                    .filter(|w| designable(w))
                     .filter(|w| w.session.as_ref().is_some_and(|m| m.transcript_path.is_some()))
                     .map(|w| w.id.clone())
                     .collect()
@@ -212,6 +216,11 @@ impl Avatars {
     /// A new design for one that already has one. Refused while one is
     /// already being drawn up.
     pub async fn reroll(self: &Arc<Self>, workspace_id: &str) -> AppResult<()> {
+        if !self.designable(workspace_id).await {
+            return Err(AppError::Other(
+                "avatars aren't designed for workspaces on their own Claude binary".into(),
+            ));
+        }
         {
             let mut inner = self.inner.lock().await;
             if !inner.in_flight.insert(workspace_id.to_owned()) {
@@ -253,17 +262,23 @@ impl Avatars {
         });
     }
 
+    async fn designable(&self, workspace_id: &str) -> bool {
+        self.store
+            .with_workspace(workspace_id, designable)
+            .await
+            .unwrap_or(false)
+    }
+
     async fn design(&self, workspace_id: &str) -> AppResult<serde_json::Value> {
-        let (agent, binary, transcript) = self
+        // Re-checked here: the binary may have been switched since `ensure`.
+        let transcript = self
             .store
             .with_workspace(workspace_id, |w| {
-                (
-                    w.agent,
-                    w.agent_binary.clone(),
-                    w.session.as_ref().and_then(|m| m.transcript_path.clone()),
-                )
+                designable(w)
+                    .then(|| w.session.as_ref().and_then(|m| m.transcript_path.clone()))
+                    .ok_or_else(|| AppError::Other("workspace runs its own Claude binary".into()))
             })
-            .await?;
+            .await??;
         let transcript =
             transcript.ok_or_else(|| AppError::Other("session has no transcript yet".into()))?;
         let opening = tokio::task::spawn_blocking(move || read_opening(&transcript))
@@ -271,34 +286,17 @@ impl Avatars {
             .map_err(|e| AppError::Other(e.to_string()))?
             .ok_or_else(|| AppError::Other("no opening request in the transcript".into()))?;
 
-        let bin = self.binary_for(agent, binary).await?;
+        let bin = self.bins.get(Agent::Claude);
+        if bin.as_os_str().is_empty() {
+            return Err(AppError::Other("claude binary not resolved".into()));
+        }
         let _permit = self
             .gate
             .acquire()
             .await
             .map_err(|e| AppError::Other(e.to_string()))?;
         debug!(workspace_id, bin = %bin.display(), "designing avatar");
-        run_claude(&bin, &self.bins, &opening.prompt()).await
-    }
-
-    /// The workspace's own Claude binary, so a `claude-hipaa` workspace's
-    /// words never go through plain `claude`. A codex workspace has no Claude
-    /// binary of its own and uses the default.
-    async fn binary_for(&self, agent: Agent, binary: Option<String>) -> AppResult<PathBuf> {
-        match (agent, binary) {
-            (Agent::Claude, Some(bin)) if bin != Agent::Claude.default_binary() => {
-                tokio::task::spawn_blocking(move || crate::agent_bin::resolve_named(&bin))
-                    .await
-                    .map_err(|e| AppError::Other(e.to_string()))?
-            }
-            _ => {
-                let path = self.bins.get(Agent::Claude);
-                if path.as_os_str().is_empty() {
-                    return Err(AppError::Other("claude binary not resolved".into()));
-                }
-                Ok(path.to_path_buf())
-            }
-        }
+        run_claude(bin, &opening.prompt()).await
     }
 
     async fn save(&self) {
@@ -324,9 +322,20 @@ impl Avatars {
     }
 }
 
-/// Run outside any workspace and with hooks off, so the design session is
-/// invisible to Tethys's own turn tracking.
-async fn run_claude(bin: &Path, bins: &AgentBins, prompt: &str) -> AppResult<serde_json::Value> {
+/// A workspace on a binary of its own (`claude-hipaa`, `claude-unsafe`) is
+/// never designed: that binary may carry its own credentials, which a design
+/// must not spend, and its words must not leave for the default account.
+fn designable(w: &Workspace) -> bool {
+    !matches!(
+        (w.agent, w.agent_binary.as_deref()),
+        (Agent::Claude, Some(bin)) if bin != Agent::Claude.default_binary()
+    )
+}
+
+/// Always plain `claude` on the logged-in account. Run outside any workspace
+/// and with hooks off, so the design session is invisible to Tethys's own
+/// turn tracking.
+async fn run_claude(bin: &Path, prompt: &str) -> AppResult<serde_json::Value> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args([
         "-p",
@@ -347,7 +356,10 @@ async fn run_claude(bin: &Path, bins: &AgentBins, prompt: &str) -> AppResult<ser
         SPEC_SCHEMA,
     ])
     .current_dir(std::env::temp_dir())
-    .env("PATH", search_path(bin, bins))
+    .env("PATH", search_path(bin))
+    // An inherited key would outrank the login.
+    .env_remove("ANTHROPIC_API_KEY")
+    .env_remove("ANTHROPIC_AUTH_TOKEN")
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
@@ -380,21 +392,14 @@ async fn run_claude(bin: &Path, bins: &AgentBins, prompt: &str) -> AppResult<ser
         .ok_or_else(|| AppError::Other("claude reply had no structured_output".into()))
 }
 
-/// A wrapper like `claude-hipaa` is a script that `exec`s `claude` by name, and
-/// a desktop app's own `PATH` has neither.
-fn search_path(bin: &Path, bins: &AgentBins) -> String {
-    let mut dirs: Vec<PathBuf> = [bin, bins.get(Agent::Claude)]
-        .iter()
-        .filter_map(|p| p.parent().map(Path::to_path_buf))
-        .filter(|p| !p.as_os_str().is_empty())
-        .collect();
-    dirs.dedup();
+/// `claude` may be a script needing `node` beside it, and a desktop app's own
+/// `PATH` has neither.
+fn search_path(bin: &Path) -> String {
     let inherited = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
-    dirs.iter()
-        .map(|d| d.display().to_string())
-        .chain(std::iter::once(inherited))
-        .collect::<Vec<_>>()
-        .join(":")
+    match bin.parent() {
+        Some(dir) => format!("{}:{inherited}", dir.display()),
+        None => inherited,
+    }
 }
 
 /// How the work began: the first thing the user really typed, and the
@@ -551,6 +556,37 @@ mod tests {
         let transcript =
             r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout></local-command-stdout>"}}"#;
         assert_eq!(opening_from_transcript(transcript), None);
+    }
+
+    fn on(agent: Agent, binary: Option<&str>) -> Workspace {
+        Workspace {
+            id: "w".into(),
+            branch: "b".into(),
+            created_at: Utc::now(),
+            repo_links: Vec::new(),
+            session: None,
+            agent,
+            agent_binary: binary.map(Into::into),
+            origin: crate::state::Origin::Ui,
+            deleted_at: None,
+            folder: None,
+            status: WorkspaceStatus::Ready,
+            notes: String::new(),
+            parent: None,
+            pending_messages: Vec::new(),
+            shipment: None,
+            progress: None,
+            artifacts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn only_workspaces_on_plain_claude_or_codex_are_designed() {
+        assert!(designable(&on(Agent::Claude, None)));
+        assert!(designable(&on(Agent::Claude, Some("claude"))));
+        assert!(designable(&on(Agent::Codex, Some("codex"))));
+        assert!(!designable(&on(Agent::Claude, Some("claude-hipaa"))));
+        assert!(!designable(&on(Agent::Claude, Some("claude-unsafe"))));
     }
 
     #[test]
