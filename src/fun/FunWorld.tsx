@@ -26,9 +26,8 @@ import {
 } from "./stage";
 import "./fun.css";
 
-/** Plenty for a diorama, and the machine is short on memory as it is. */
-const FPS_FOCUSED = 30;
-const FPS_BLURRED = 15;
+/** Smooth everywhere, without doubling the work on a 120Hz display. */
+const MAX_FPS = 60;
 
 export interface FunWorldProps {
   workspaces: Workspace[];
@@ -101,28 +100,28 @@ function useEnvironment(): Environment {
   }, [theme]);
 }
 
-/** Renders on a timer rather than every display frame, and not at all hidden. */
+/**
+ * Drives every frame off the display's own refresh, capped at `MAX_FPS`, and
+ * at full rate whether the window is focused or not: the world is for
+ * glancing at while working somewhere else. The browser stops calling it
+ * while the window is hidden.
+ */
 function FrameDriver() {
-  const invalidate = useThree((s) => s.invalidate);
+  const advance = useThree((s) => s.advance);
   useEffect(() => {
-    let timer: ReturnType<typeof setInterval> | undefined;
-    const restart = () => {
-      clearInterval(timer);
-      if (document.hidden) return;
-      const fps = document.hasFocus() ? FPS_FOCUSED : FPS_BLURRED;
-      timer = setInterval(() => invalidate(), 1000 / fps);
+    let raf = 0;
+    let last = 0;
+    const interval = 1000 / MAX_FPS;
+    const tick = (now: number) => {
+      raf = requestAnimationFrame(tick);
+      // A few ms of slack, so 60Hz renders every refresh and 120Hz every other.
+      if (now - last < interval - 4) return;
+      last = now;
+      advance(now);
     };
-    restart();
-    window.addEventListener("focus", restart);
-    window.addEventListener("blur", restart);
-    document.addEventListener("visibilitychange", restart);
-    return () => {
-      clearInterval(timer);
-      window.removeEventListener("focus", restart);
-      window.removeEventListener("blur", restart);
-      document.removeEventListener("visibilitychange", restart);
-    };
-  }, [invalidate]);
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [advance]);
   return null;
 }
 
@@ -336,7 +335,7 @@ export default function FunWorld({
       <Canvas
         orthographic
         flat
-        frameloop="demand"
+        frameloop="never"
         dpr={[1, 2]}
         camera={{ zoom: PIXELS_PER_UNIT, near: 0.1, far: 200 }}
         onPointerMissed={() => setMenu(null)}

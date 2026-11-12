@@ -11,7 +11,8 @@ export const PIXELS_PER_UNIT = 54;
 export const PITCH = (40 * Math.PI) / 180;
 export const CAMERA_DISTANCE = 40;
 
-const EDGE_MARGIN = 0.8;
+/** Room for half a name tag, so none runs off the window. */
+const EDGE_MARGIN = 1.6;
 /** Room for half a name tag, so none slides under the panel. */
 const PANEL_MARGIN = 1.4;
 /** The treeline and portal live in this strip at the back. */
@@ -94,7 +95,7 @@ function attentionSlots(region: Region): Vec2[] {
   const slots: Vec2[] = [];
   for (let c = 0; ; c++) {
     const x = inner - c * colGap;
-    if (x < region.xMin - EDGE_MARGIN + halfTag * 0.8) break;
+    if (x < region.xMin - 0.1) break;
     const offset = c % 2 ? rowGap / 2 : 0;
     for (let z = top + offset; z <= region.zMax; z += rowGap) {
       slots.push({ x, z });

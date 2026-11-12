@@ -2286,8 +2286,8 @@ li.is-dragging {
 }
 
 /* ── Fun mode ─────────────────────────────────────────────────────────────
-   The world is a fixed canvas behind everything; the detail pane floats over
-   its middle, shrink-wrapped to the terminal plus whatever sits beside it
+   The world is a fixed canvas behind everything; the detail pane stands in
+   its middle, top to bottom, shrink-wrapped to the terminal plus whatever sits beside it
    (the Notes rail, or the open panel at its dragged width). Centred with
    auto margins rather than a transform, so fixed-position modals inside it
    still cover the window. */
@@ -2301,8 +2301,8 @@ li.is-dragging {
   --fun-meadows: 320px;
   position: absolute;
   z-index: 1;
-  top: 12px;
-  bottom: 12px;
+  top: 0;
+  bottom: 0;
   left: 0;
   right: 0;
   margin-inline: auto;
@@ -2311,10 +2311,11 @@ li.is-dragging {
   max-width: calc(100vw - var(--fun-meadows));
   box-sizing: border-box;
   background: var(--bg);
-  border-radius: 12px;
+  /* Full height and square: a column the meadows end against, not a card
+     floating over ground that carries on behind it. */
   box-shadow:
-    0 10px 40px rgba(0, 0, 0, 0.35),
-    0 0 0 1px rgba(0, 0, 0, 0.08);
+    -14px 0 28px -14px rgba(0, 0, 0, 0.55),
+    14px 0 28px -14px rgba(0, 0, 0, 0.55);
 }
 
 /* Its fixed width is what the pane wraps; `max-width` still lets a narrow
