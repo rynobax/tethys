@@ -20,10 +20,11 @@ export const PIXELS_PER_UNIT = 54;
 export const PITCH = (40 * Math.PI) / 180;
 export const CAMERA_DISTANCE = 40;
 
-/** Room for half a name tag, so none runs off the window. */
-const EDGE_MARGIN = 1.6;
-/** Room for half a name tag, so none slides under the panel. */
-const PANEL_MARGIN = 1.4;
+/** A little ground kept clear at the window's edge and beside the panel. Name
+ *  tags needn't fit inside it: they slide to stay on screen and clear of the
+ *  panel (`LabelProjector`). */
+const EDGE_MARGIN = 0.6;
+const PANEL_MARGIN = 0.6;
 /** The treeline and portal live in this strip at the back. */
 const BACK_STRIP = 2.4;
 const FRONT_MARGIN = 0.6;

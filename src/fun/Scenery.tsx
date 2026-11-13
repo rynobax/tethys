@@ -18,8 +18,7 @@ export interface Environment {
   rock: string;
   flowers: string[];
   portal: string;
-  /** The lounge's tiles round the pool, and the water in it. */
-  deck: string;
+  /** The water in the lounge's pool. */
   water: string;
   /** How much the pool lights itself, for an evening swim. */
   waterGlow: number;
@@ -39,7 +38,6 @@ export const MEADOW: Environment = {
   rock: "#bdb8b0",
   flowers: ["#ff8fab", "#ffd166", "#ffffff", "#b39ddb"],
   portal: "#9b6bff",
-  deck: "#f1e9d8",
   water: "#4fc3e8",
   waterGlow: 0.05,
   fireflies: false,
@@ -58,7 +56,6 @@ export const DUSK: Environment = {
   rock: "#7c7f86",
   flowers: ["#f48fb1", "#ffe082", "#b39ddb"],
   portal: "#b388ff",
-  deck: "#8d8a82",
   water: "#2a9fd0",
   waterGlow: 0.45,
   fireflies: true,
@@ -114,22 +111,7 @@ function scatter(stage: Stage, side: Side): Decor {
       c: Math.floor(rng() * 3),
     });
   }
-  // And a few down the outer edge.
-  const outer = side === "left" ? xMin + 0.35 : xMax - 0.35;
-  for (let z = region.zMin + 1; z < v.zMax; z += 1.6 + rng() * 1.8) {
-    decor.trees.push({
-      x: outer + (rng() - 0.5) * 0.3,
-      z,
-      s: 0.6 + rng() * 0.5,
-      c: Math.floor(rng() * 3),
-    });
-  }
-  const area = (region.xMax - region.xMin) * (region.zMax - region.zMin);
-  const point = () => ({
-    x: region.xMin + rng() * (region.xMax - region.xMin),
-    z: region.zMin + rng() * (region.zMax - region.zMin),
-  });
-  // Nothing grows in the zones, where it'd be underfoot or on the deck.
+  // Nothing grows in the zones, where it'd be underfoot.
   const { lounge, workshop, pitch } = stage.layout;
   const zones = [
     lounge?.area,
@@ -141,6 +123,22 @@ function scatter(stage: Stage, side: Side): Decor {
     zones.some(
       (z) => z && p.x > z.xMin && p.x < z.xMax && p.z > z.zMin && p.z < z.zMax,
     );
+  // And a few down the outer edge.
+  const outer = side === "left" ? xMin + 0.35 : xMax - 0.35;
+  for (let z = region.zMin + 1; z < v.zMax; z += 1.6 + rng() * 1.8) {
+    const tree = {
+      x: outer + (rng() - 0.5) * 0.3,
+      z,
+      s: 0.6 + rng() * 0.5,
+      c: Math.floor(rng() * 3),
+    };
+    if (!inZone(tree)) decor.trees.push(tree);
+  }
+  const area = (region.xMax - region.xMin) * (region.zMax - region.zMin);
+  const point = () => ({
+    x: region.xMin + rng() * (region.xMax - region.xMin),
+    z: region.zMin + rng() * (region.zMax - region.zMin),
+  });
   for (let i = 0; i < area * 0.04; i++) {
     const p = point();
     if (inZone(p)) continue;
@@ -577,7 +575,7 @@ function Parasol({ at, seed }: { at: Vec2; seed: number }) {
   );
 }
 
-/** A pool on a tiled deck, loungers down either side, rings on the water. */
+/** A pool, loungers down either side, rings on the water. */
 function LoungeArea({
   lounge,
   env,
@@ -600,7 +598,7 @@ function LoungeArea({
         env.waterGlow * (1 + Math.sin(t * 1.2) * 0.15);
     }
   });
-  const { area, pool } = lounge;
+  const { pool } = lounge;
   const w = pool.xMax - pool.xMin;
   const d = pool.zMax - pool.zMin;
   const cx = (pool.xMin + pool.xMax) / 2;
@@ -608,19 +606,6 @@ function LoungeArea({
   const glintCount = Math.max(3, Math.floor(d / 1.2));
   return (
     <>
-      <mesh
-        rotation-x={-Math.PI / 2}
-        position={[
-          (area.xMin + area.xMax) / 2,
-          0.004,
-          (area.zMin + area.zMax) / 2,
-        ]}
-      >
-        <planeGeometry
-          args={[area.xMax - area.xMin + 0.6, area.zMax - area.zMin + 0.4]}
-        />
-        <meshStandardMaterial color={env.deck} />
-      </mesh>
       {/* The coping, then the water a little below it. */}
       <mesh position={[cx, 0.025, cz]}>
         <boxGeometry args={[w + 0.24, 0.05, d + 0.24]} />
@@ -676,18 +661,8 @@ function LoungeArea({
 
 /** A paved yard, two whiteboards along the back, and two piles of crates. */
 function WorkshopArea({ workshop }: { workshop: Workshop }) {
-  const { area } = workshop;
-  const w = area.xMax - area.xMin + 0.6;
-  const d = area.zMax - area.zMin;
   return (
     <>
-      <mesh
-        rotation-x={-Math.PI / 2}
-        position={[(area.xMin + area.xMax) / 2, 0.004, area.zMin + d / 2]}
-      >
-        <planeGeometry args={[w, d]} />
-        <meshStandardMaterial color="#8f8a80" transparent opacity={0.35} />
-      </mesh>
       {workshop.boards.map((p, i) => (
         <group key={i} position={[p.x, 0, p.z - 0.5]}>
           {[-0.36, 0.36].map((x) => (
