@@ -1,5 +1,6 @@
 import type { ComponentType, RefObject } from "react";
-import type * as THREE from "three";
+import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 /**
  * The skeleton every animal shares, in the units of a top-level resident
@@ -139,4 +140,39 @@ export function SimpleFoot({ color }: { color: string }) {
       <Mat color={color} />
     </mesh>
   );
+}
+
+/**
+ * A stripe lying on a sphere, `yaw` round from the front. One that goes `up`
+ * runs between two angles above the equator; any other runs round the sphere
+ * at height `y`, `span` radians long.
+ */
+export type Stripe =
+  | { up: true; yaw: number; from: number; to: number; w?: number }
+  | { up?: false; y: number; yaw: number; span: number; w?: number };
+
+/** Stripes on a sphere of radius `r`, sunk a little into it, in one mesh. */
+export function stripes(r: number, list: Stripe[]): THREE.BufferGeometry {
+  const parts = list.map((s) => {
+    const w = s.w ?? 0.022;
+    const sunk = r - w * 0.4;
+    if (s.up) {
+      return new THREE.TorusGeometry(sunk, w, 3, 5, s.to - s.from)
+        .rotateZ(s.from)
+        .rotateY(s.yaw - Math.PI / 2);
+    }
+    return new THREE.TorusGeometry(
+      Math.sqrt(sunk * sunk - s.y * s.y),
+      w,
+      3,
+      Math.max(3, Math.round(s.span * 5)),
+      s.span,
+    )
+      .rotateZ(Math.PI / 2 - s.yaw - s.span / 2)
+      .rotateX(Math.PI / 2)
+      .translate(0, s.y, 0);
+  });
+  const merged = mergeGeometries(parts)!;
+  for (const p of parts) p.dispose();
+  return merged;
 }
