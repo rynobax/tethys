@@ -1,21 +1,15 @@
 # Children
 
-A handoff with `as_child` sets `parent` on the new workspace, once, never changed. It's separate from `Origin`, which is history and never acted on. The sidebar nests a child only when its parent is drawn too (`workspaceTree`). A parent can't be deleted while it has live children.
+## The session inbox
 
-## The event
+Delivery uses Claude Code's cross-session inbox:
 
-Deleting a child (the soft delete, not the purge) tells the direct parent: the branch and every PR it tracked or had detached, each fetched fresh (`child_events.rs`). Undo sends nothing. Codex parents are told nothing.
+- Each session exports `CLAUDE_CODE_MESSAGING_SOCKET` and `_TOKEN` to its hooks.
+- A post is `{"type":"auth","token":…}` then `{"type":"user","message":{"role":"user","content":…}}`. The token makes Claude deliver it rather than hold it for approval.
+- An idle session starts a turn with it; a busy one reads it between tool calls.
 
-## Delivery
+The details that matter:
 
-It uses Claude Code's cross-session inbox (`session_inbox.rs`, shared with Shipping). Each session exports `CLAUDE_CODE_MESSAGING_SOCKET` and `_TOKEN` to its hooks; `handle_session_start` stores them as `AgentSessionMeta::inbox`, matched by spawn token, so a nested `claude` in the same cwd can't take it. Persisted, because a reattached session fires no SessionStart. A post is an auth line with the token, then a user message; the token makes Claude deliver rather than hold it. An idle session starts a turn; a busy one reads it between tool calls.
-
-Messages queue on `Workspace::pending_messages` before delivery and leave only once delivered. Fallbacks: the next replying hook's `additionalContext`, and a retry when a resumed session stores its new inbox. Returning it from the SessionStart hook was tried and is wrong: that context waits silently for Ryan's next prompt.
-
-## Hush
-
-A parent woken at rest by this news, with live children left, is hushed (`TurnTracker::hush`): it comes to rest already dismissed until Ryan types. It must stay in force past the Stop, because the probe often reads a just-stopped turn as working for a tick and a state change clears a dismissal. In memory only.
-
-## Progress
-
-`set_progress` draws done/total under the parent's name, whatever the agent says. Total 0 clears it.
+- The inbox is stored only from SessionStart with an exact spawn-token match, because a nested `claude` shares the cwd but has its own inbox. It's persisted because a reattached session fires no SessionStart.
+- Don't return queued news from the SessionStart hook. That context waits silently for Ryan's next prompt; post it once the new inbox is stored instead.
+- A hush must stay in force past the Stop. The probe often reads a just-stopped turn as working for a tick, and any probe change clears a one-off dismissal.
