@@ -5,7 +5,7 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { StrictMode, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { SessionInfo, Workspace } from "../types";
+import type { GithubPrStatus, SessionInfo, Workspace } from "../types";
 import FunWorld from "./FunWorld";
 import "../App.css";
 
@@ -208,6 +208,8 @@ interface Sample {
     | "shipped";
   parent?: string;
   progress?: { done: number; total: number };
+  /** For a Shipping sample: approved and green, so it's waiting on Ryan. */
+  approved?: boolean;
 }
 
 const SAMPLES: Sample[] = [
@@ -248,13 +250,48 @@ const SAMPLES: Sample[] = [
   { id: "h", branch: "next-in-line", mood: "queued" },
   { id: "i", branch: "ship-the-thing", design: "perf", mood: "shipping" },
   { id: "j", branch: "already-merged", design: "flaky", mood: "shipped" },
+  { id: "n", branch: "hutch", design: "security", mood: "shipping" },
+  { id: "o", branch: "metadata-template-id", mood: "shipping" },
+  {
+    id: "p",
+    branch: "approved-and-green",
+    design: "migration",
+    mood: "shipping",
+    approved: true,
+  },
 ];
+
+const prNumber = (s: Sample) => 7000 + s.id.charCodeAt(0);
 
 const workspace = (s: Sample): Workspace => ({
   id: s.id,
   branch: s.branch,
   created_at: "",
-  repo_links: [],
+  repo_links:
+    s.mood === "shipping"
+      ? [
+          {
+            repo_key: "nl-frontend",
+            worktree_path: "",
+            setup_script_ran_at: null,
+            dismissed: [],
+            prs: [
+              {
+                number: prNumber(s),
+                tracked_at: "",
+                status: {
+                  state: "open",
+                  checks: "success",
+                  has_merge_conflicts: false,
+                  review_decision: s.approved ? "approved" : "review_required",
+                  review_requested: true,
+                  merge_queue: null,
+                } as GithubPrStatus,
+              },
+            ],
+          },
+        ]
+      : [],
   session: null,
   agent: "claude",
   agent_binary: null,
@@ -274,7 +311,11 @@ const workspace = (s: Sample): Workspace => ({
   parent: s.parent ?? null,
   shipment:
     s.mood === "shipping"
-      ? { kind: "shipping", prs: [], since: "" }
+      ? {
+          kind: "shipping",
+          prs: [{ repo_key: "nl-frontend", number: prNumber(s) }],
+          since: "",
+        }
       : s.mood === "shipped"
         ? { kind: "shipped", at: "" }
         : null,

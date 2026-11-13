@@ -1,8 +1,8 @@
 import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
-import type { Side, Vec2 } from "./sim";
-import type { Stage } from "./stage";
+import type { Pitch, Side, Vec2 } from "./sim";
+import { STAGE_HEIGHT, type Stage } from "./stage";
 
 /** Everything about the look that isn't a resident. Swap it to reskin. */
 export interface Environment {
@@ -281,7 +281,147 @@ function Fireflies({ stage }: { stage: Stage }) {
   );
 }
 
-export function Scenery({ stage, env }: { stage: Stage; env: Environment }) {
+const ONLOOKER_COLOURS = [
+  "#c9b8e8",
+  "#f2c4a0",
+  "#a8d5c2",
+  "#f0b8c8",
+  "#b8cdeb",
+  "#e8dca0",
+];
+
+/**
+ * One of the crowd a Shipping resident pitches to: small, faceless from
+ * behind, and given to clapping or putting a hand up with a question.
+ */
+function Onlooker({ at, seed }: { at: Vec2; seed: number }) {
+  const body = useRef<THREE.Group>(null);
+  const armL = useRef<THREE.Group>(null);
+  const armR = useRef<THREE.Group>(null);
+  const colour = ONLOOKER_COLOURS[seed % ONLOOKER_COLOURS.length];
+  const phase = (seed * 2.399) % (Math.PI * 2);
+  useFrame((state) => {
+    const t = state.clock.elapsedTime + phase;
+    const b = body.current;
+    const L = armL.current;
+    const R = armR.current;
+    if (!b || !L || !R) return;
+    // Each takes turns at a few seconds of clapping, asking, or just watching.
+    const mode = Math.floor(t / 4 + seed) % 5;
+    b.position.y = 0;
+    L.rotation.set(-0.2, 0, -0.15);
+    R.rotation.set(-0.2, 0, 0.15);
+    if (mode === 0) {
+      L.rotation.set(-1.2, 0, 0.35 + Math.sin(t * 14) * 0.25);
+      R.rotation.set(-1.2, 0, -0.35 - Math.sin(t * 14) * 0.25);
+      b.position.y = Math.abs(Math.sin(t * 7)) * 0.04;
+    } else if (mode === 1) {
+      R.rotation.z = 2.7 + Math.sin(t * 6) * 0.15;
+    } else {
+      b.position.y = Math.sin(t * 1.8) * 0.015;
+    }
+  });
+  return (
+    <group position={[at.x, 0, at.z]} rotation-y={Math.PI} scale={0.55}>
+      <mesh rotation-x={-Math.PI / 2} position-y={0.01}>
+        <circleGeometry args={[0.34, 14]} />
+        <meshBasicMaterial
+          color="#000000"
+          transparent
+          opacity={0.15}
+          depthWrite={false}
+        />
+      </mesh>
+      <group ref={body}>
+        <mesh position-y={0.58}>
+          <capsuleGeometry args={[0.3, 0.36, 4, 10]} />
+          <meshStandardMaterial color={colour} flatShading roughness={0.8} />
+        </mesh>
+        <group ref={armL} position={[-0.32, 0.56, 0]}>
+          <mesh position-y={-0.14}>
+            <capsuleGeometry args={[0.06, 0.16, 3, 6]} />
+            <meshStandardMaterial color={colour} flatShading />
+          </mesh>
+        </group>
+        <group ref={armR} position={[0.32, 0.56, 0]}>
+          <mesh position-y={-0.14}>
+            <capsuleGeometry args={[0.06, 0.16, 3, 6]} />
+            <meshStandardMaterial color={colour} flatShading />
+          </mesh>
+        </group>
+      </group>
+    </group>
+  );
+}
+
+/** A low stage with bunting at the back, and its audience in front. */
+function PitchArea({ pitch, env }: { pitch: Pitch; env: Environment }) {
+  const { stage, crowd } = pitch;
+  const w = stage.xMax - stage.xMin;
+  const d = stage.zMax - stage.zMin;
+  const cx = (stage.xMin + stage.xMax) / 2;
+  const cz = (stage.zMin + stage.zMax) / 2;
+  const flags = Math.max(4, Math.round(w / 0.45));
+  return (
+    <>
+      <mesh position={[cx, STAGE_HEIGHT / 2, cz]}>
+        <boxGeometry args={[w, STAGE_HEIGHT, d]} />
+        <meshStandardMaterial color="#b98a5e" flatShading />
+      </mesh>
+      {/* Board seams, so it reads as a stage rather than a slab. */}
+      {Array.from({ length: Math.floor(d / 0.5) }, (_, i) => (
+        <mesh
+          key={i}
+          position={[cx, STAGE_HEIGHT + 0.002, stage.zMin + 0.5 * (i + 1)]}
+        >
+          <boxGeometry args={[w, 0.004, 0.03]} />
+          <meshBasicMaterial color="#9a7049" />
+        </mesh>
+      ))}
+      {[stage.xMin + 0.1, stage.xMax - 0.1].map((x) => (
+        <mesh key={x} position={[x, 0.75, stage.zMin + 0.1]}>
+          <cylinderGeometry args={[0.04, 0.05, 1.5, 6]} />
+          <meshStandardMaterial color={env.trunk} flatShading />
+        </mesh>
+      ))}
+      {Array.from({ length: flags }, (_, i) => {
+        const f = (i + 0.5) / flags;
+        const sag = Math.sin(f * Math.PI) * 0.25;
+        return (
+          <mesh
+            key={i}
+            position={[
+              stage.xMin + 0.1 + f * (w - 0.2),
+              1.38 - sag,
+              stage.zMin + 0.1,
+            ]}
+            rotation-z={Math.PI}
+          >
+            <coneGeometry args={[0.1, 0.2, 3]} />
+            <meshStandardMaterial
+              color={env.flowers[i % env.flowers.length]}
+              flatShading
+            />
+          </mesh>
+        );
+      })}
+      {crowd.map((p, i) => (
+        <Onlooker key={i} at={p} seed={i + 1} />
+      ))}
+    </>
+  );
+}
+
+export function Scenery({
+  stage,
+  env,
+  pitching,
+}: {
+  stage: Stage;
+  env: Environment;
+  /** Whether anyone is Shipping and waiting, which is when the stage is up. */
+  pitching: boolean;
+}) {
   const decor = useMemo(
     () => (["left", "right"] as const).map((side) => scatter(stage, side)),
     [stage],
@@ -354,6 +494,9 @@ export function Scenery({ stage, env }: { stage: Stage; env: Environment }) {
         const at = stage.layout.portals[side];
         return at ? <Portal key={side} at={at} color={env.portal} /> : null;
       })}
+      {pitching && stage.layout.pitch && (
+        <PitchArea pitch={stage.layout.pitch} env={env} />
+      )}
       {env.fireflies && <Fireflies stage={stage} />}
     </>
   );

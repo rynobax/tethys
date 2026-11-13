@@ -3,6 +3,7 @@ import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
 import type { Resident } from "./residents";
 import type { Agent, Sim } from "./sim";
+import { STAGE_HEIGHT } from "./stage";
 import type {
   Accessory,
   AvatarSpec,
@@ -690,6 +691,7 @@ export function Character({
   const heldProp = useRef<THREE.Group>(null);
   const groundProp = useRef<THREE.Group>(null);
   const parcel = useRef<THREE.Group>(null);
+  const pedestal = useRef<THREE.Group>(null);
   const ring = useRef<THREE.Mesh>(null);
   const alert = useRef<THREE.Mesh>(null);
   const propeller = useRef<THREE.Group>(null);
@@ -707,7 +709,11 @@ export function Character({
     const t = sim.time() + a.phase;
     const local = sim.time() - a.since;
 
-    root.current.position.set(a.pos.x, 0, a.pos.z);
+    root.current.position.set(
+      a.pos.x,
+      a.activity === "pitch" ? STAGE_HEIGHT : 0,
+      a.pos.z,
+    );
     root.current.rotation.y =
       a.facing +
       (a.activity === "portal_out" || a.activity === "portal_in"
@@ -742,7 +748,9 @@ export function Character({
     }
 
     const working = a.activity === "work";
-    const shipping = mood === "shipping";
+    const pitching = a.activity === "pitch";
+    // Carried to the stage, then set on its pedestal to be pitched.
+    const shipping = mood === "shipping" && !pitching;
     station.current!.visible = working;
     tool.current!.visible =
       working &&
@@ -754,6 +762,7 @@ export function Character({
     const handsBusy = working || shipping;
     if (heldProp.current) heldProp.current.visible = !handsBusy;
     if (groundProp.current) groundProp.current.visible = working;
+    pedestal.current!.visible = pitching;
 
     const b = body.current!;
     const L = armL.current!;
@@ -804,6 +813,14 @@ export function Character({
         break;
       case "work":
         poseWork(spec.work, t, local, b, L, R);
+        break;
+      case "pitch":
+        // One hand sweeping up at the crowd, the other presenting the parcel.
+        b.position.y = Math.abs(Math.sin(t * 2.6)) * 0.05;
+        b.rotation.y = Math.sin(t * 1.3) * 0.25;
+        L.rotation.z = -1.9 - Math.sin(t * 2.6) * 0.5;
+        R.rotation.x = -1.1 + Math.sin(t * 4.3) * 0.3;
+        R.rotation.z = 0.5;
         break;
     }
     if (handsBusy && a.activity !== "work" && a.activity !== "attention") {
@@ -968,6 +985,22 @@ export function Character({
         </mesh>
         <group ref={station} position-z={0.5}>
           <Station work={spec.work} accent={spec.accent_color} />
+        </group>
+        <group ref={pedestal} position={[0.62, 0, 0.15]}>
+          <mesh position-y={0.17}>
+            <cylinderGeometry args={[0.16, 0.19, 0.34, 8]} />
+            <Mat color="#e8e2d4" />
+          </mesh>
+          <group position-y={0.47} rotation-y={0.4}>
+            <mesh>
+              <boxGeometry args={[0.3, 0.24, 0.24]} />
+              <Mat color="#c9925b" />
+            </mesh>
+            <mesh>
+              <boxGeometry args={[0.32, 0.05, 0.26]} />
+              <Mat color={spec.accent_color} />
+            </mesh>
+          </group>
         </group>
         {spec.prop && (
           <group ref={groundProp} position={[-0.62, 0.22, 0.2]}>

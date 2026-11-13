@@ -2307,7 +2307,12 @@ li.is-dragging {
   right: 0;
   margin-inline: auto;
   width: max-content;
-  min-width: min(var(--terminal-width), calc(100vw - var(--fun-meadows)));
+  /* The terminal plus the Notes rail and the pane's padding, so a pane with
+     no workspace in it is as wide as one with. */
+  min-width: min(
+    calc(var(--terminal-width) + 33px),
+    calc(100vw - var(--fun-meadows))
+  );
   max-width: calc(100vw - var(--fun-meadows));
   box-sizing: border-box;
   background: var(--bg);
@@ -2325,7 +2330,10 @@ li.is-dragging {
   max-width: 100%;
 }
 
-/* A long row of tabs scrolls rather than widening the pane. */
+/* Only the workspace view sizes the pane. Everything else in it (a creation
+   log, an error banner) fills that width and wraps or scrolls rather than
+   stretching it, and so does a long row of tabs. */
+.app.fun .detail > :not(.workspace-detail),
 .app.fun .main-tabs {
   contain: inline-size;
 }

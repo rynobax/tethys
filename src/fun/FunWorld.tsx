@@ -28,6 +28,7 @@ import {
   CAMERA_DISTANCE,
   PITCH,
   PIXELS_PER_UNIT,
+  STAGE_HEIGHT,
   computeStage,
   type Stage,
 } from "./stage";
@@ -124,7 +125,8 @@ function FrameDriver() {
       // A few ms of slack, so 60Hz renders every refresh and 120Hz every other.
       if (now - last < interval - 4) return;
       last = now;
-      advance(now);
+      // R3F reads a manual timestamp in seconds, not rAF's milliseconds.
+      advance(now / 1000);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
@@ -172,7 +174,8 @@ function LabelProjector({
       if (!el || !a) continue;
       const head =
         a.activity === "egg" ? 0.95 : DIMS[r.spec.body].top + HAT_ROOM;
-      v.set(a.pos.x, head * a.size + 0.1, a.pos.z).project(camera);
+      const lift = a.activity === "pitch" ? STAGE_HEIGHT : 0;
+      v.set(a.pos.x, head * a.size + 0.1 + lift, a.pos.z).project(camera);
       const x = ((v.x + 1) / 2) * size.width;
       const y = ((1 - v.y) / 2) * size.height;
       el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`;
@@ -229,6 +232,7 @@ function Label({
           )}
         </span>
       )}
+      {resident.note && <span className="fun-note">{resident.note}</span>}
       <span className="fun-pill">
         {resident.branch}
         {progress && progress.total > 0 && (
@@ -360,7 +364,13 @@ export default function FunWorld({
         <Aim />
         <FrameDriver />
         <SimDriver sim={sim} />
-        {stage && <Scenery stage={stage} env={env} />}
+        {stage && (
+          <Scenery
+            stage={stage}
+            env={env}
+            pitching={residents.some((r) => r.mood === "shipping")}
+          />
+        )}
         {residents.map((r) => (
           <Character
             key={r.id}

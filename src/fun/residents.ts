@@ -1,4 +1,5 @@
 import type { SessionInfo, Workspace, WorkspaceId } from "../types";
+import { shippingPrs, shippingSignal } from "../workspaceDerived";
 import { defaultSpec, normalizeSpec, type AvatarSpec } from "./spec";
 
 /** What a resident is up to, read off Tethys state. Renderer-agnostic. */
@@ -10,6 +11,7 @@ export type Mood =
   | "working"
   | "asleep"
   | "idle"
+  /** Shipping and waiting on other people: pitching to the crowd. */
   | "shipping"
   | "shipped";
 
@@ -26,6 +28,8 @@ export interface Resident {
   /** Whether `spec` came from a design rather than the default bean. */
   designed: boolean;
   progress: { done: number; total: number } | null;
+  /** A few words beside the branch, e.g. the PRs being pitched. */
+  note: string | null;
 }
 
 export interface ResidentInputs {
@@ -46,13 +50,36 @@ function moodOf(w: Workspace, inputs: ResidentInputs): Mood {
     case "creation_failed":
       return "failed";
   }
+  // The tile, not the turn, says when a Shipping workspace wants Ryan: its
+  // turns are mostly ones Tethys started.
+  const signal = shipSignal(w);
+  if (signal) {
+    if (signal === "ready" || signal === "no_reviewer") return "needs_you";
+    return inputs.working(w) ? "working" : "shipping";
+  }
   if (inputs.needsTurn(w)) return "needs_you";
   if (w.shipment?.kind === "shipped") return "shipped";
   if (inputs.working(w)) return "working";
   const session = inputs.sessions.get(w.id);
   if (!session?.running) return "asleep";
-  if (w.shipment?.kind === "shipping") return "shipping";
   return "idle";
+}
+
+function shipSignal(w: Workspace) {
+  return w.shipment?.kind === "shipping"
+    ? shippingSignal(shippingPrs(w))
+    : null;
+}
+
+function noteOf(w: Workspace): string | null {
+  const signal = shipSignal(w);
+  if (signal === "ready") return "ready to merge";
+  if (signal === "no_reviewer") return "no reviewer";
+  if (!signal) return null;
+  const open = shippingPrs(w).filter(
+    (p) => p.status?.state !== "merged" && p.status?.state !== "closed",
+  );
+  return open.map((p) => `#${p.number}`).join(" ") || null;
 }
 
 export function toResidents(inputs: ResidentInputs): Resident[] {
@@ -80,6 +107,7 @@ export function toResidents(inputs: ResidentInputs): Resident[] {
       spec: raw ? normalizeSpec(raw, fallback) : fallback,
       designed: raw !== undefined,
       progress: w.progress,
+      note: noteOf(w),
     };
   });
 }

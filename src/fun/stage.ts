@@ -4,7 +4,7 @@
  * the meadows be measured off the terminal panel's own rectangle.
  */
 
-import type { Layout, Region, Vec2 } from "./sim";
+import type { Layout, Pitch, Region, Vec2 } from "./sim";
 
 /** Pixels per world unit; a top-level resident is about one unit tall. */
 export const PIXELS_PER_UNIT = 54;
@@ -23,6 +23,13 @@ const MIN_WIDTH = 1.4;
 /** A waiting resident's footprint on screen: a name tag wide, a figure tall. */
 const SLOT_WIDTH_PX = 200;
 const SLOT_HEIGHT_PX = 136;
+
+/** How high the pitch stage's boards stand, for whoever is on them. */
+export const STAGE_HEIGHT = 0.2;
+/** Pitchers face the viewer, so a row needs only a name tag's height. */
+const STAGE_ROW_PX = 104;
+/** Below this the right meadow is too short to give any of it to a stage. */
+const MIN_PITCH_DEPTH = 12;
 
 export interface Bounds {
   xMin: number;
@@ -74,6 +81,7 @@ export function computeStage(
       regions: { left, right },
       portals: { left: portal(left), right: portal(right) },
       attentionSlots: left ? attentionSlots(left) : [],
+      pitch: right ? pitch(right) : null,
     },
     visible,
     panel: panelX,
@@ -108,4 +116,52 @@ function attentionSlots(region: Region): Vec2[] {
       (p.z - middle) * PIXELS_PER_UNIT * Math.sin(PITCH),
     );
   return slots.sort((a, b) => pxFrom(a) - pxFrom(b));
+}
+
+/**
+ * The bottom of the right meadow: a stage at the back where Shipping residents
+ * pitch, and a crowd in front of it with its back to the viewer. Front row
+ * first, middle out.
+ */
+function pitch(region: Region): Pitch | null {
+  if (region.zMax - region.zMin < MIN_PITCH_DEPTH) return null;
+  const colGap = SLOT_WIDTH_PX / PIXELS_PER_UNIT;
+  const rowGap = STAGE_ROW_PX / (PIXELS_PER_UNIT * Math.sin(PITCH));
+  const front = region.zMax - 2.6;
+  const back = front - rowGap;
+  const width = region.xMax - region.xMin;
+  const centre = (region.xMin + region.xMax) / 2;
+
+  // As many tag-widths as fit across, centred; the back row sits between them.
+  const n = Math.max(1, Math.floor(width / colGap) + 1);
+  const xs = Array.from(
+    { length: n },
+    (_, i) => centre + (i - (n - 1) / 2) * colGap,
+  );
+  const between = n > 1 ? xs.slice(1).map((x, i) => (x + xs[i]) / 2) : xs;
+  const middleOut = (a: Vec2, b: Vec2) =>
+    Math.abs(a.x - centre) - Math.abs(b.x - centre);
+  const slots = [
+    ...xs.map((x) => ({ x, z: front })).sort(middleOut),
+    ...between.map((x) => ({ x, z: back })).sort(middleOut),
+  ];
+
+  const stage = {
+    xMin: region.xMin - 0.6,
+    xMax: region.xMax + 0.6,
+    zMin: back - 0.9,
+    zMax: front + 0.7,
+  };
+  const crowd: Vec2[] = [];
+  for (const [z, shift] of [
+    [region.zMax + 0.2, 0],
+    [region.zMax - 0.55, 0.4],
+  ] as const) {
+    for (let x = stage.xMin + 0.4 + shift; x < stage.xMax - 0.2; x += 0.8) {
+      // Deterministic jitter, so a resize doesn't reshuffle the crowd much.
+      const j = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453;
+      crowd.push({ x: x + (j - Math.floor(j) - 0.5) * 0.25, z });
+    }
+  }
+  return { slots, crowd, stage, top: stage.zMin - 0.4 };
 }

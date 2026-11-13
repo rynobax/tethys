@@ -31,6 +31,19 @@ export interface Layout {
   portals: Record<Side, Vec2 | null>;
   /** Where waiting residents stand, best first; far enough apart for labels. */
   attentionSlots: Vec2[];
+  /** The right meadow's stage, `null` when the meadow is too short for one. */
+  pitch: Pitch | null;
+}
+
+/** Where Shipping residents pitch, and the crowd they pitch to. */
+export interface Pitch {
+  /** On the stage, best first. */
+  slots: Vec2[];
+  crowd: Vec2[];
+  /** The stage's footprint. */
+  stage: Region;
+  /** Everyone else keeps above this while anyone is pitching. */
+  top: number;
 }
 
 export type Activity =
@@ -41,9 +54,11 @@ export type Activity =
   | "sleep"
   | "egg"
   | "portal_out"
-  | "portal_in";
+  | "portal_in"
+  | "pitch";
 
-type Intent = "wander" | "portal" | "work" | "attention" | "follow";
+type Intent = "wander" | "portal" | "work" | "attention" | "follow" | "pitch";
+type Post = "attention" | "work" | "pitch";
 
 export interface Agent {
   id: string;
@@ -95,7 +110,7 @@ const other = (s: Side): Side => (s === "left" ? "right" : "left");
 export const sizeForDepth = (depth: number) => Math.max(0.45, 0.65 ** depth);
 
 /** Moods that walk about freely when nothing else is asked of them. */
-const ROAMING: ReadonlySet<Mood> = new Set(["idle", "shipping", "shipped"]);
+const ROAMING: ReadonlySet<Mood> = new Set(["idle", "shipped"]);
 const EGG: ReadonlySet<Mood> = new Set(["queued", "hatching", "failed"]);
 
 export class Sim {
@@ -103,23 +118,28 @@ export class Sim {
   private residents = new Map<string, Resident>();
   private layout: Layout | null = null;
   /** Attention slot index per waiting agent, kept until it stops waiting. */
-  private slots = new Map<string, number>();
+  private waitSlots = new Map<string, number>();
+  /** Stage slot index per pitching agent, likewise. */
+  private pitchSlots = new Map<string, number>();
+  /** Whether anyone is on stage, so the rest keep off it. */
+  private pitching = false;
   private now = 0;
 
   setLayout(layout: Layout) {
     this.layout = layout;
-    for (const [id, i] of this.slots) {
-      if (i >= layout.attentionSlots.length) this.slots.delete(id);
-    }
+    prune(this.waitSlots, layout.attentionSlots.length);
+    prune(this.pitchSlots, layout.pitch?.slots.length ?? 0);
     for (const a of this.agents.values()) this.settle(a);
   }
 
   sync(residents: Resident[]) {
     this.residents = new Map(residents.map((r) => [r.id, r]));
+    this.pitching = residents.some((r) => r.mood === "shipping");
     for (const id of this.agents.keys()) {
       if (!this.residents.has(id)) {
         this.agents.delete(id);
-        this.slots.delete(id);
+        this.waitSlots.delete(id);
+        this.pitchSlots.delete(id);
       }
     }
     // Parents first, so a new child can spawn beside its parent.
@@ -286,9 +306,14 @@ export class Sim {
   /** Straight onto its home ground: no walking in on first sight. */
   private place(a: Agent, r: Resident) {
     a.side = this.homeSide(r.mood);
-    const region = this.region(a.side);
+    const region = this.ground(a.side);
     if (!region) return;
-    const slot = r.mood === "needs_you" ? this.attentionSpot(a) : null;
+    const slot =
+      r.mood === "needs_you"
+        ? this.attentionSpot(a)
+        : r.mood === "shipping"
+          ? this.pitchSpot(a)
+          : null;
     const parent = this.parentOf(a);
     a.pos = slot
       ? { ...slot }
@@ -374,7 +399,11 @@ export class Sim {
       return;
     }
 
-    if (r.mood !== "needs_you" || a.side !== "left") this.slots.delete(a.id);
+    if (r.mood !== "needs_you" || a.side !== "left")
+      this.waitSlots.delete(a.id);
+    if (r.mood !== "shipping" || a.side !== "right") {
+      this.pitchSlots.delete(a.id);
+    }
 
     if (EGG.has(r.mood)) {
       a.target = null;
@@ -385,7 +414,7 @@ export class Sim {
       this.toPortal(a);
       return;
     }
-    const region = this.region(a.side);
+    const region = this.ground(a.side);
     if (!region) return;
 
     switch (r.mood) {
@@ -402,8 +431,19 @@ export class Sim {
         this.head(a, slot ?? a.spot!, "attention");
         return;
       }
+      case "shipping": {
+        const pitch = this.layout?.pitch;
+        if (!pitch) break;
+        const slot = this.pitchSpot(a);
+        if (!slot && !a.spot) {
+          a.spot = this.spacedPoint(a.id, a.side, pitch.stage);
+        }
+        this.head(a, slot ?? a.spot!, "pitch");
+        return;
+      }
       case "working":
-        if (!a.spot || this.stuck(a)) {
+        // Re-picked too when the stage has gone up over it.
+        if (!a.spot || this.stuck(a) || !inside(region, a.spot)) {
           const parent = this.holder(a);
           a.spot = parent
             ? this.spacedPoint(a.id, a.side, region, parent.pos, LEASH_REACH)
@@ -411,14 +451,13 @@ export class Sim {
         }
         this.head(a, a.spot, "work");
         return;
-      default:
-        a.spot = null;
-        this.roam(a, r, region);
     }
+    a.spot = null;
+    this.roam(a, r, region);
   }
 
   /** Walk to a spot and stay there doing `intent`. */
-  private head(a: Agent, spot: Vec2, intent: "attention" | "work") {
+  private head(a: Agent, spot: Vec2, intent: Post) {
     const reach = a.activity === intent ? 0.5 : ARRIVE;
     // Close enough and blocked counts as there, rather than shoving forever.
     if (dist(a.pos, spot) < reach || (this.stuck(a) && dist(a.pos, spot) < 1)) {
@@ -431,16 +470,21 @@ export class Sim {
 
   /** This agent's slot on the left, claiming the best free one if it has none. */
   private attentionSpot(a: Agent): Vec2 | null {
-    const slots = this.layout?.attentionSlots ?? [];
-    if (a.side !== "left" || !slots.length) return null;
-    let i = this.slots.get(a.id);
-    if (i === undefined) {
-      const taken = new Set(this.slots.values());
-      i = slots.findIndex((_, j) => !taken.has(j));
-      if (i < 0) return null;
-      this.slots.set(a.id, i);
-    }
-    return slots[i];
+    if (a.side !== "left") return null;
+    return claim(this.waitSlots, a.id, this.layout?.attentionSlots ?? []);
+  }
+
+  private pitchSpot(a: Agent): Vec2 | null {
+    if (a.side !== "right") return null;
+    return claim(this.pitchSlots, a.id, this.layout?.pitch?.slots ?? []);
+  }
+
+  /** Where a side's residents may pick spots: off the stage while it's in use. */
+  private ground(side: Side): Region | null {
+    const region = this.region(side);
+    const pitch = this.layout?.pitch;
+    if (!region || side !== "right" || !pitch || !this.pitching) return region;
+    return { ...region, zMax: Math.max(region.zMin + 1, pitch.top) };
   }
 
   private roam(a: Agent, r: Resident, region: Region) {
@@ -540,8 +584,10 @@ export class Sim {
         a.pos.z += (dz / d) * stepLen;
         wantFacing = Math.atan2(dx, dz);
       }
-    } else if (a.activity === "attention" || a.activity === "work") {
-      wantFacing = a.activity === "work" ? 0.35 * Math.sin(a.phase) : 0;
+    } else if (a.activity === "attention" || a.activity === "pitch") {
+      wantFacing = 0;
+    } else if (a.activity === "work") {
+      wantFacing = 0.35 * Math.sin(a.phase);
     }
     if (wantFacing !== null) {
       let diff = wantFacing - a.facing;
@@ -587,6 +633,26 @@ export class Sim {
       }
     }
   }
+}
+
+/** The slot `id` holds, claiming the best free one if it holds none. */
+function claim(
+  book: Map<string, number>,
+  id: string,
+  slots: Vec2[],
+): Vec2 | null {
+  let i = book.get(id);
+  if (i === undefined) {
+    const taken = new Set(book.values());
+    i = slots.findIndex((_, j) => !taken.has(j));
+    if (i < 0) return null;
+    book.set(id, i);
+  }
+  return slots[i] ?? null;
+}
+
+function prune(book: Map<string, number>, length: number) {
+  for (const [id, i] of book) if (i >= length) book.delete(id);
 }
 
 function clamp(n: number, min: number, max: number) {
