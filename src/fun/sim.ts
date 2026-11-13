@@ -37,7 +37,15 @@ export interface Layout {
   /** The right meadow's zones; `null` when it's too short to divide. */
   lounge: Lounge | null;
   workshop: Workshop | null;
+  /** The bottom of the left meadow, while anyone is Shipping. */
   pitch: Pitch | null;
+  /** Furniture nobody walks through. */
+  obstacles: Obstacle[];
+}
+
+/** A round footprint on the ground. */
+export interface Obstacle extends Vec2 {
+  r: number;
 }
 
 /** Where dismissed residents relax: round a fire, or asleep on a bedroll. */
@@ -50,7 +58,6 @@ export interface Lounge {
 
 /** Where working residents work, at a task of their own or a shared one. */
 export interface Workshop {
-  /** Its bottom edge gives way to the stage while anyone is pitching. */
   area: Region;
   /** Where someone stands to write on each whiteboard. */
   boards: Vec2[];
@@ -67,7 +74,7 @@ export interface Pitch {
   crowd: Vec2[];
   /** The stage's footprint. */
   stage: Region;
-  /** Everyone else keeps above this while anyone is pitching. */
+  /** Everyone else waiting keeps above this while anyone is pitching. */
   top: number;
 }
 
@@ -249,6 +256,7 @@ export class Sim {
     }
     this.separate();
     this.tug();
+    for (const a of this.agents.values()) this.clear(a);
   }
 
   time() {
@@ -312,29 +320,24 @@ export class Sim {
     return this.layout?.regions[side] ?? null;
   }
 
-  /** Waiting on the left, everyone else on the right, if there's room. */
+  /** Waiting and pitching on the left, the rest on the right, if there's room. */
   private homeSide(mood: Mood): Side {
-    const want: Side = mood === "needs_you" ? "left" : "right";
+    const want: Side =
+      mood === "needs_you" || mood === "shipping" ? "left" : "right";
     return this.region(want) || !this.region(other(want)) ? want : other(want);
-  }
-
-  /** The workshop, giving its bottom edge to the stage while it's in use. */
-  private workshopArea(): Region | null {
-    const w = this.layout?.workshop;
-    const pitch = this.layout?.pitch;
-    if (!w) return null;
-    if (!pitch || !this.pitching) return w.area;
-    return { ...w.area, zMax: Math.max(w.area.zMin + 1, pitch.top) };
   }
 
   /** Where a resident in this mood picks its spots on its side. */
   private ground(side: Side, mood: Mood): Region | null {
     const region = this.region(side);
-    if (!region || side !== "right") return region;
-    if (mood === "working") return this.workshopArea() ?? region;
-    if (RESTING.has(mood)) return this.layout?.lounge?.area ?? region;
+    if (!region) return null;
+    if (side === "right") {
+      if (mood === "working") return this.layout?.workshop?.area ?? region;
+      if (RESTING.has(mood)) return this.layout?.lounge?.area ?? region;
+      return region;
+    }
     const pitch = this.layout?.pitch;
-    if (!pitch || !this.pitching) return region;
+    if (!pitch || !this.pitching || mood === "shipping") return region;
     return { ...region, zMax: Math.max(region.zMin + 1, pitch.top) };
   }
 
@@ -380,13 +383,15 @@ export class Sim {
       .map((o) => this.claimed(o));
     // The portal's doorway counts as taken, so nobody sets up in it.
     if (portal) others.push(portal, { x: portal.x, z: portal.z + 1.2 });
-    const fire = side === "right" ? this.layout?.lounge?.fire : undefined;
-    if (fire) others.push(fire);
+    const furniture = side === "right" ? (this.layout?.obstacles ?? []) : [];
     let best = this.randomPoint(region, near, radius);
-    let bestScore = -1;
+    let bestScore = -Infinity;
     for (let i = 0; i < CANDIDATES; i++) {
       const p = i === 0 ? best : this.randomPoint(region, near, radius);
-      const score = Math.min(...others.map((o) => dist(o, p)));
+      const score = Math.min(
+        ...others.map((o) => dist(o, p)),
+        ...furniture.map((o) => dist(o, p) - o.r - 0.3),
+      );
       if (score > bestScore) {
         bestScore = score;
         best = p;
@@ -511,7 +516,7 @@ export class Sim {
     const right = a.side === "right";
     if (r.mood !== "needs_you" || a.side !== "left")
       this.waitSlots.delete(a.id);
-    if (r.mood !== "shipping" || !right || this.queue[0] === a.id) {
+    if (r.mood !== "shipping" || right || this.queue[0] === a.id) {
       this.chairs.delete(a.id);
     }
     if (!ROAMING.has(r.mood) || !right || a.rest !== "seat") {
@@ -663,7 +668,7 @@ export class Sim {
       this.haul(a, shop);
       return;
     }
-    // Re-picked too when the stage has gone up over it.
+    // Re-picked too when a resize has moved the workshop.
     if (!a.spot || this.stuck(a) || !inside(area, a.spot)) {
       a.spot = holder
         ? this.spacedPoint(a.id, a.side, area, holder.pos, LEASH_REACH)
@@ -735,7 +740,7 @@ export class Sim {
   /** The podium for whoever's turn it is, a chair of its own for the rest. */
   private pitchPost(a: Agent): { spot: Vec2; post: Post } | null {
     const pitch = this.layout?.pitch;
-    if (a.side !== "right" || !pitch) return null;
+    if (a.side !== "left" || !pitch) return null;
     if (this.queue[0] === a.id) return { spot: pitch.podium, post: "pitch" };
     const chair = claim(this.chairs, a.id, pitch.chairs);
     return chair ? { spot: chair, post: "seated" } : null;
@@ -836,9 +841,10 @@ export class Sim {
       }
       if (d > 1e-4) {
         const stepLen = Math.min(d, speed * dt);
-        a.pos.x += (dx / d) * stepLen;
-        a.pos.z += (dz / d) * stepLen;
-        wantFacing = Math.atan2(dx, dz);
+        const dir = this.steer(a, dx / d, dz / d);
+        a.pos.x += dir.x * stepLen;
+        a.pos.z += dir.z * stepLen;
+        wantFacing = Math.atan2(dir.x, dir.z);
       }
     } else if (
       a.activity === "attention" ||
@@ -861,6 +867,61 @@ export class Sim {
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
       a.facing += diff * Math.min(1, dt * 8);
+    }
+  }
+
+  /** The furniture in this agent's way, leaving out whatever it's walking to. */
+  private obstacles(a: Agent): Obstacle[] {
+    const all = this.layout?.obstacles ?? [];
+    if (a.side !== "right") return [];
+    const goal = a.target;
+    return goal
+      ? all.filter((o) => dist(goal, o) > this.clearance(a, o) + 0.1)
+      : all;
+  }
+
+  private clearance(a: Agent, o: Obstacle) {
+    return o.r + a.size * 0.3;
+  }
+
+  /**
+   * Veers off a straight line to the target round anything just ahead on it,
+   * to whichever side it's already further round.
+   */
+  private steer(a: Agent, x: number, z: number): Vec2 {
+    let sx = x;
+    let sz = z;
+    for (const o of this.obstacles(a)) {
+      const ox = o.x - a.pos.x;
+      const oz = o.z - a.pos.z;
+      const ahead = ox * x + oz * z;
+      if (ahead <= 0 || ahead > 1.4) continue;
+      // How far the obstacle sits off the line, to the walker's right.
+      const off = ox * z - oz * x;
+      const clear = this.clearance(a, o) + 0.1;
+      if (Math.abs(off) >= clear) continue;
+      const away = off > 0 || (off === 0 && Math.sin(a.phase) > 0) ? -1 : 1;
+      const push = (1 - Math.abs(off) / clear) * 2;
+      sx += z * away * push;
+      sz += -x * away * push;
+    }
+    const n = Math.hypot(sx, sz) || 1;
+    return { x: sx / n, z: sz / n };
+  }
+
+  /** Out of any furniture it has been pushed or pulled into. */
+  private clear(a: Agent) {
+    if (a.activity !== "walk" && a.activity !== "pause") return;
+    for (const o of this.obstacles(a)) {
+      const dx = a.pos.x - o.x;
+      const dz = a.pos.z - o.z;
+      const d = Math.hypot(dx, dz);
+      const min = this.clearance(a, o);
+      if (d >= min) continue;
+      const ux = d > 1e-5 ? dx / d : 1;
+      const uz = d > 1e-5 ? dz / d : 0;
+      a.pos.x = o.x + ux * min;
+      a.pos.z = o.z + uz * min;
     }
   }
 

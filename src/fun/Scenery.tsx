@@ -123,9 +123,14 @@ function scatter(stage: Stage, side: Side): Decor {
     z: region.zMin + rng() * (region.zMax - region.zMin),
   });
   // Rocks keep out of the zones, where they'd sit under someone's feet.
-  const zones = [stage.layout.lounge?.area, stage.layout.workshop?.area];
+  const { lounge, workshop, pitch } = stage.layout;
+  const zones = [
+    lounge?.area,
+    workshop?.area,
+    // The stage and the crowd in front of it.
+    pitch && { ...pitch.stage, zMax: v.zMax },
+  ];
   const inZone = (p: Vec2) =>
-    side === "right" &&
     zones.some(
       (z) => z && p.x > z.xMin && p.x < z.xMax && p.z > z.zMin && p.z < z.zMax,
     );
@@ -492,16 +497,10 @@ function LoungeArea({ lounge, env }: { lounge: Lounge; env: Environment }) {
 }
 
 /** A paved yard, two whiteboards along the back, and two piles of crates. */
-function WorkshopArea({
-  workshop,
-  bottom,
-}: {
-  workshop: Workshop;
-  bottom: number;
-}) {
+function WorkshopArea({ workshop }: { workshop: Workshop }) {
   const { area } = workshop;
   const w = area.xMax - area.xMin + 0.6;
-  const d = bottom - area.zMin;
+  const d = area.zMax - area.zMin;
   return (
     <>
       <mesh
@@ -704,12 +703,7 @@ export function Scenery({
         return at ? <Portal key={side} at={at} color={env.portal} /> : null;
       })}
       {lounge && <LoungeArea lounge={lounge} env={env} />}
-      {workshop && (
-        <WorkshopArea
-          workshop={workshop}
-          bottom={pitching && pitch ? pitch.top : workshop.area.zMax}
-        />
-      )}
+      {workshop && <WorkshopArea workshop={workshop} />}
       {pitching && pitch && <PitchArea pitch={pitch} env={env} sim={sim} />}
       {env.fireflies && <Fireflies stage={stage} />}
     </>

@@ -4,7 +4,15 @@
  * the meadows be measured off the terminal panel's own rectangle.
  */
 
-import type { Layout, Lounge, Pitch, Region, Vec2, Workshop } from "./sim";
+import type {
+  Layout,
+  Lounge,
+  Obstacle,
+  Pitch,
+  Region,
+  Vec2,
+  Workshop,
+} from "./sim";
 
 /** Pixels per world unit; a top-level resident is about one unit tall. */
 export const PIXELS_PER_UNIT = 54;
@@ -30,8 +38,8 @@ export const STAGE_HEIGHT = 0.2;
 const CHAIR_WIDTH_PX = 140;
 const CHAIR_ROW_PX = 76;
 const CHAIR_ROWS = 2;
-/** Below this the right meadow is too short to give any of it to a stage. */
-const MIN_PITCH_DEPTH = 12;
+/** Below this a meadow is too short to split between two uses. */
+const MIN_ZONED_DEPTH = 12;
 
 export interface Bounds {
   xMin: number;
@@ -78,12 +86,18 @@ export function computeStage(
   const portal = (r: Region | null) =>
     r ? { x: (r.xMin + r.xMax) / 2, z: r.zMin - 0.2 } : null;
 
+  // The left meadow's bottom is the stage; waiting residents keep above it.
+  const stage = left ? pitch(left) : null;
+  const waiting = left && stage ? { ...left, zMax: stage.top } : left;
+  const zones = rightZones(right);
   return {
     layout: {
       regions: { left, right },
       portals: { left: portal(left), right: portal(right) },
-      attentionSlots: left ? attentionSlots(left) : [],
-      ...rightZones(right),
+      attentionSlots: waiting ? attentionSlots(waiting) : [],
+      pitch: stage,
+      ...zones,
+      obstacles: obstacles(zones),
     },
     visible,
     panel: panelX,
@@ -121,12 +135,12 @@ function attentionSlots(region: Region): Vec2[] {
 }
 
 /**
- * The bottom of the right meadow: a stage where one Shipping resident pitches
+ * The bottom of the left meadow: a stage where one Shipping resident pitches
  * at a time from the front, the rest waiting in rows of chairs behind it, and
  * a crowd in front with its back to the viewer.
  */
 function pitch(region: Region): Pitch | null {
-  if (region.zMax - region.zMin < MIN_PITCH_DEPTH) return null;
+  if (region.zMax - region.zMin < MIN_ZONED_DEPTH) return null;
   const sinPitch = Math.sin(PITCH);
   const colGap = CHAIR_WIDTH_PX / PIXELS_PER_UNIT;
   const rowGap = CHAIR_ROW_PX / (PIXELS_PER_UNIT * sinPitch);
@@ -177,27 +191,45 @@ function pitch(region: Region): Pitch | null {
   };
 }
 
-/**
- * The right meadow from the back: the lounge, then the workshop down to the
- * front edge, with the stage taking the bottom of the workshop while it's up.
- */
+/** The right meadow: the lounge across its back half, the workshop its front. */
 function rightZones(
   region: Region | null,
-): Pick<Layout, "lounge" | "workshop" | "pitch"> {
-  if (!region || region.zMax - region.zMin < MIN_PITCH_DEPTH) {
-    return { lounge: null, workshop: null, pitch: null };
+): Pick<Layout, "lounge" | "workshop"> {
+  if (!region || region.zMax - region.zMin < MIN_ZONED_DEPTH) {
+    return { lounge: null, workshop: null };
   }
-  const stage = pitch(region);
-  const bottom = stage?.top ?? region.zMax;
-  const loungeDepth = Math.min(7.5, Math.max(5, (bottom - region.zMin) * 0.42));
-  const loungeArea = { ...region, zMax: region.zMin + loungeDepth };
-  const workshopArea = { ...region, zMin: loungeArea.zMax + 0.6 };
+  const half = (region.zMin + region.zMax) / 2;
   return {
-    lounge: lounge(loungeArea),
-    workshop: workshop(workshopArea, bottom),
-    pitch: stage,
+    lounge: lounge({ ...region, zMax: half - 0.3 }),
+    workshop: workshop({ ...region, zMin: half + 0.3 }),
   };
 }
+
+/** What a walker steps round: the lounge's and the workshop's furniture. */
+function obstacles({
+  lounge,
+  workshop,
+}: Pick<Layout, "lounge" | "workshop">): Obstacle[] {
+  const out: Obstacle[] = [];
+  if (lounge) {
+    out.push({ ...lounge.fire, r: 0.45 });
+    for (const p of lounge.seats) out.push({ ...p, r: 0.28 });
+    // The bedroll lies behind its sleeper's spot.
+    for (const p of lounge.naps) out.push({ x: p.x, z: p.z - 0.3, r: 0.35 });
+  }
+  if (workshop) {
+    // The board stands behind its writer's spot, a few circles wide.
+    for (const p of workshop.boards) {
+      for (const dx of [-0.3, 0, 0.3]) {
+        out.push({ x: p.x + dx, z: p.z - 0.5, r: 0.2 });
+      }
+    }
+    for (const p of workshop.piles) out.push({ ...p, r: 0.3 });
+  }
+  return out;
+}
+
+const SEATS = 8;
 
 /** A fire in the middle, log seats in a ring round it, bedrolls in the corners. */
 function lounge(area: Region): Lounge {
@@ -205,11 +237,11 @@ function lounge(area: Region): Lounge {
     x: (area.xMin + area.xMax) / 2,
     z: (area.zMin + area.zMax) / 2 + 0.3,
   };
-  const rx = Math.min(2.1, (area.xMax - area.xMin) / 2 - 0.2);
-  const rz = Math.min(2.3, (area.zMax - area.zMin) / 2 - 0.4);
+  const rx = Math.min(2.3, (area.xMax - area.xMin) / 2 - 0.2);
+  const rz = Math.min(3, (area.zMax - area.zMin) / 2 - 1.2);
   // Starting off the vertical, so no seat is straight behind or before the fire.
-  const seats = Array.from({ length: 6 }, (_, i) => {
-    const angle = Math.PI / 6 + (i * Math.PI) / 3;
+  const seats = Array.from({ length: SEATS }, (_, i) => {
+    const angle = Math.PI / SEATS + (i * 2 * Math.PI) / SEATS;
     return {
       x: fire.x + Math.cos(angle) * rx,
       z: fire.z + Math.sin(angle) * rz,
@@ -224,14 +256,11 @@ function lounge(area: Region): Lounge {
   return { area, fire, seats, naps };
 }
 
-/**
- * Two whiteboards along the back and two crate piles at the sides, all above
- * where the stage would reach, so they're there whether or not it's up.
- */
-function workshop(area: Region, stageTop: number): Workshop {
+/** Two whiteboards along the back and two crate piles at the sides. */
+function workshop(area: Region): Workshop {
   const cx = (area.xMin + area.xMax) / 2;
   const quarter = (area.xMax - area.xMin) / 4;
-  const pileZ = Math.min((area.zMin + stageTop) / 2, stageTop - 1);
+  const pileZ = (area.zMin + area.zMax) / 2 + 0.6;
   return {
     area,
     boards: [
