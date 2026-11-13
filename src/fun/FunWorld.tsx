@@ -47,6 +47,8 @@ export interface FunWorldProps {
   working: (w: Workspace) => boolean;
   selectedId: WorkspaceId | null;
   onSelect: (id: WorkspaceId) => void;
+  /** The sidebar's Clear notification. */
+  onDismiss: (w: Workspace) => void;
   /** The terminal panel; the meadows are whatever it leaves either side. */
   panelRef: RefObject<HTMLElement | null>;
 }
@@ -379,13 +381,14 @@ function ResidentMenu({
   x,
   y,
   onOpen,
-  onRedesign,
+  onDismiss,
   onClose,
 }: {
   x: number;
   y: number;
   onOpen: () => void;
-  onRedesign: () => void;
+  /** Absent when there's no turn to dismiss. */
+  onDismiss: (() => void) | null;
   onClose: () => void;
 }) {
   useEffect(() => {
@@ -410,9 +413,11 @@ function ResidentMenu({
       <button type="button" onClick={act(onOpen)}>
         Open
       </button>
-      <button type="button" onClick={act(onRedesign)}>
-        Redesign avatar
-      </button>
+      {onDismiss && (
+        <button type="button" onClick={act(onDismiss)}>
+          Dismiss
+        </button>
+      )}
     </div>
   );
 }
@@ -424,6 +429,7 @@ export default function FunWorld({
   working,
   selectedId,
   onSelect,
+  onDismiss,
   panelRef,
 }: FunWorldProps) {
   const avatars = useAvatars();
@@ -563,11 +569,10 @@ export default function FunWorld({
           x={menu.x}
           y={menu.y}
           onOpen={() => onSelect(menu.id)}
-          onRedesign={() =>
-            api
-              .rerollAvatar(menu.id)
-              .catch((e) => console.error("reroll_avatar failed:", e))
-          }
+          onDismiss={(() => {
+            const w = workspaces.find((w) => w.id === menu.id);
+            return w && needsTurn(w) ? () => onDismiss(w) : null;
+          })()}
           onClose={() => setMenu(null)}
         />
       )}

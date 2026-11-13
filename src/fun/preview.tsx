@@ -238,6 +238,9 @@ const SAMPLES: Sample[] = [
   { id: "e2", branch: "lint-exhaustive-deps", mood: "working", parent: "e" },
   { id: "e3", branch: "lint-no-shadow", mood: "idle", parent: "e" },
   { id: "f", branch: "old-experiment", mood: "asleep" },
+  { id: "f2", branch: "spike-pdf-export", design: "perf", mood: "idle" },
+  { id: "f3", branch: "try-new-linter", design: "security", mood: "idle" },
+  { id: "f4", branch: "dead-end-idea", mood: "asleep" },
   { id: "k", branch: "metadata-prefetch-cache", mood: "needs_you" },
   { id: "l", branch: "acr-score-form-insert-via-intent", mood: "needs_you" },
   {
@@ -350,6 +353,7 @@ function Preview() {
         needsTurn={(w) => bySample.get(w.id)?.mood === "needs_you"}
         working={(w) => bySample.get(w.id)?.mood === "working"}
         selectedId={selected}
+        onDismiss={(w) => console.log("dismiss", w.branch)}
         onSelect={setSelected}
         panelRef={panelRef}
       />

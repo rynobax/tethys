@@ -571,6 +571,7 @@ function App() {
               working={workspaceWorking}
               selectedId={selectedId}
               onSelect={setSelectedId}
+              onDismiss={handleClearTurn}
               panelRef={detailRef}
             />
           </Suspense>

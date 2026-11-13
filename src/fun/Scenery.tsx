@@ -1,7 +1,7 @@
 import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
-import type { Lounge, Pitch, Side, Sim, Vec2, Workshop } from "./sim";
+import type { Lounge, Pitch, Seat, Side, Sim, Vec2, Workshop } from "./sim";
 import { STAGE_HEIGHT, type Stage } from "./stage";
 
 /** Everything about the look that isn't a resident. Swap it to reskin. */
@@ -18,8 +18,11 @@ export interface Environment {
   rock: string;
   flowers: string[];
   portal: string;
-  /** The lounge's bare-earth clearing. */
-  clearing: string;
+  /** The lounge's tiles round the pool, and the water in it. */
+  deck: string;
+  water: string;
+  /** How much the pool lights itself, for an evening swim. */
+  waterGlow: number;
   fireflies: boolean;
 }
 
@@ -36,7 +39,9 @@ export const MEADOW: Environment = {
   rock: "#bdb8b0",
   flowers: ["#ff8fab", "#ffd166", "#ffffff", "#b39ddb"],
   portal: "#9b6bff",
-  clearing: "#d9c08f",
+  deck: "#f1e9d8",
+  water: "#4fc3e8",
+  waterGlow: 0.05,
   fireflies: false,
 };
 
@@ -53,7 +58,9 @@ export const DUSK: Environment = {
   rock: "#7c7f86",
   flowers: ["#f48fb1", "#ffe082", "#b39ddb"],
   portal: "#b388ff",
-  clearing: "#6b5a43",
+  deck: "#8d8a82",
+  water: "#2a9fd0",
+  waterGlow: 0.45,
   fireflies: true,
 };
 
@@ -122,7 +129,7 @@ function scatter(stage: Stage, side: Side): Decor {
     x: region.xMin + rng() * (region.xMax - region.xMin),
     z: region.zMin + rng() * (region.zMax - region.zMin),
   });
-  // Rocks keep out of the zones, where they'd sit under someone's feet.
+  // Nothing grows in the zones, where it'd be underfoot or on the deck.
   const { lounge, workshop, pitch } = stage.layout;
   const zones = [
     lounge?.area,
@@ -139,9 +146,15 @@ function scatter(stage: Stage, side: Side): Decor {
     if (inZone(p)) continue;
     decor.rocks.push({ ...p, s: 0.12 + rng() * 0.16, r: rng() * Math.PI });
   }
-  for (let i = 0; i < area * 0.35; i++)
-    decor.flowers.push({ ...point(), c: Math.floor(rng() * 4) });
-  for (let i = 0; i < area * 0.3; i++) decor.tufts.push(point());
+  for (let i = 0; i < area * 0.35; i++) {
+    const p = point();
+    const c = Math.floor(rng() * 4);
+    if (!inZone(p)) decor.flowers.push({ ...p, c });
+  }
+  for (let i = 0; i < area * 0.3; i++) {
+    const p = point();
+    if (!inZone(p)) decor.tufts.push(p);
+  }
   for (let i = 0; i < area * 0.03 + 1; i++)
     decor.patches.push({ ...point(), r: 0.8 + rng() * 1.6 });
   return decor;
@@ -402,95 +415,260 @@ function Chair({ at, index, sim }: { at: Vec2; index: number; sim: Sim }) {
   );
 }
 
-/** A dirt clearing with a campfire, log seats round it and bedrolls about. */
-function LoungeArea({ lounge, env }: { lounge: Lounge; env: Environment }) {
-  const flames = useRef<THREE.Group>(null);
-  const light = useRef<THREE.PointLight>(null);
+/** Rings in the pool's colours, one per ring, so neighbours differ. */
+const RING_COLORS = ["#ff6fa3", "#ffd23f", "#5ee0b0"];
+
+/** An inflatable ring, with white stripes round it. */
+export function FloatRing({ index }: { index: number }) {
+  const color = RING_COLORS[index % RING_COLORS.length];
+  return (
+    <group>
+      <mesh rotation-x={Math.PI / 2}>
+        <torusGeometry args={[0.32, 0.12, 8, 18]} />
+        <meshStandardMaterial color={color} flatShading />
+      </mesh>
+      {[0, 1, 2, 3].map((i) => {
+        const a = (i / 4) * Math.PI * 2 + 0.4;
+        return (
+          <mesh
+            key={i}
+            position={[Math.cos(a) * 0.32, 0, Math.sin(a) * 0.32]}
+            rotation-y={-a}
+          >
+            <boxGeometry args={[0.06, 0.25, 0.25]} />
+            <meshStandardMaterial color="#ffffff" flatShading />
+          </mesh>
+        );
+      })}
+    </group>
+  );
+}
+
+/** A ring nobody is asleep on, bobbing about on the water. */
+function EmptyRing({ at, index, sim }: { at: Vec2; index: number; sim: Sim }) {
+  const group = useRef<THREE.Group>(null);
+  useFrame((state) => {
+    const g = group.current;
+    if (!g) return;
+    g.visible = !sim.napTaken(index);
+    const t = state.clock.elapsedTime + index * 2.1;
+    g.position.set(at.x + Math.sin(t * 0.3) * 0.15, 0.03, at.z);
+    g.rotation.set(
+      Math.sin(t * 1.3) * 0.05,
+      t * 0.15,
+      Math.cos(t * 1.1) * 0.05,
+    );
+  });
+  return (
+    <group ref={group} scale={0.7}>
+      <FloatRing index={index} />
+    </group>
+  );
+}
+
+/** A reclining sun lounger, its sitter's feet at `at` and its back behind. */
+function Lounger({ at }: { at: Seat }) {
+  const frame = "#ffffff";
+  const cushion = "#5bb8d6";
+  return (
+    <group position={[at.x, 0, at.z]} rotation-y={at.facing}>
+      <group position-z={-0.2}>
+        <mesh position-y={0.13}>
+          <boxGeometry args={[0.42, 0.05, 0.9]} />
+          <meshStandardMaterial color={frame} flatShading />
+        </mesh>
+        <mesh position={[0, 0.17, 0.08]}>
+          <boxGeometry args={[0.36, 0.04, 0.62]} />
+          <meshStandardMaterial color={cushion} flatShading />
+        </mesh>
+        {/* The back, tilted up from the head end. */}
+        <mesh position={[0, 0.33, -0.36]} rotation-x={0.9}>
+          <boxGeometry args={[0.38, 0.05, 0.5]} />
+          <meshStandardMaterial color={cushion} flatShading />
+        </mesh>
+        {[-0.17, 0.17].flatMap((x) =>
+          [-0.38, 0.38].map((z) => (
+            <mesh key={`${x}${z}`} position={[x, 0.055, z]}>
+              <boxGeometry args={[0.04, 0.11, 0.04]} />
+              <meshStandardMaterial color={frame} flatShading />
+            </mesh>
+          )),
+        )}
+      </group>
+    </group>
+  );
+}
+
+/** A little round table with a drink on it, umbrella and all. */
+function DrinkTable({ at, seed }: { at: Vec2; seed: number }) {
+  const juice = ["#ff8a5c", "#ffd23f", "#ff5c8a", "#7be07b"][seed % 4];
+  return (
+    <group position={[at.x, 0, at.z]}>
+      <mesh position-y={0.11}>
+        <cylinderGeometry args={[0.025, 0.04, 0.22, 6]} />
+        <meshStandardMaterial color="#ffffff" flatShading />
+      </mesh>
+      <mesh position-y={0.23}>
+        <cylinderGeometry args={[0.13, 0.13, 0.025, 12]} />
+        <meshStandardMaterial color="#ffffff" flatShading />
+      </mesh>
+      <group position-y={0.245}>
+        <Drink juice={juice} />
+      </group>
+    </group>
+  );
+}
+
+/** A tall glass of something bright, with a straw and a paper umbrella. */
+export function Drink({ juice }: { juice: string }) {
+  return (
+    <group>
+      <mesh position-y={0.06}>
+        <cylinderGeometry args={[0.04, 0.032, 0.12, 8]} />
+        <meshStandardMaterial
+          color="#e8fbff"
+          transparent
+          opacity={0.45}
+          depthWrite={false}
+        />
+      </mesh>
+      <mesh position-y={0.05}>
+        <cylinderGeometry args={[0.034, 0.028, 0.09, 8]} />
+        <meshStandardMaterial color={juice} />
+      </mesh>
+      <mesh position={[0.012, 0.14, 0]} rotation-z={-0.25}>
+        <cylinderGeometry args={[0.006, 0.006, 0.12, 4]} />
+        <meshBasicMaterial color="#ff4f7b" />
+      </mesh>
+      <group position={[-0.02, 0.16, 0]} rotation-z={0.4}>
+        <mesh position-y={0.03}>
+          <cylinderGeometry args={[0.003, 0.003, 0.07, 3]} />
+          <meshBasicMaterial color="#c9a46b" />
+        </mesh>
+        <mesh position-y={0.07}>
+          <coneGeometry args={[0.05, 0.025, 8]} />
+          <meshStandardMaterial color="#ffd23f" flatShading />
+        </mesh>
+      </group>
+    </group>
+  );
+}
+
+/** A beach parasol, striped. */
+function Parasol({ at, seed }: { at: Vec2; seed: number }) {
+  const colors = seed % 2 ? ["#ff6f61", "#ffffff"] : ["#3fa9f5", "#ffffff"];
+  return (
+    <group position={[at.x, 0, at.z]}>
+      <mesh position-y={0.6}>
+        <cylinderGeometry args={[0.02, 0.02, 1.2, 5]} />
+        <meshStandardMaterial color="#e8e2d4" flatShading />
+      </mesh>
+      {Array.from({ length: 8 }, (_, i) => (
+        <mesh key={i} position-y={1.15} rotation-y={(i / 8) * Math.PI * 2}>
+          <coneGeometry args={[0.6, 0.22, 2, 1, true, 0, (Math.PI * 2) / 8]} />
+          <meshStandardMaterial
+            color={colors[i % 2]}
+            flatShading
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+/** A pool on a tiled deck, loungers down either side, rings on the water. */
+function LoungeArea({
+  lounge,
+  env,
+  sim,
+}: {
+  lounge: Lounge;
+  env: Environment;
+  sim: Sim;
+}) {
+  const water = useRef<THREE.MeshStandardMaterial>(null);
+  const glints = useRef<THREE.Group>(null);
   useFrame((state) => {
     const t = state.clock.elapsedTime;
-    flames.current?.children.forEach((f, i) => {
-      f.scale.y = 1 + Math.sin(t * (7 + i * 2.3) + i) * 0.22;
-      f.rotation.y = t * (0.6 + i * 0.2);
+    glints.current?.children.forEach((g, i) => {
+      g.scale.x = 0.6 + Math.sin(t * 1.7 + i * 1.9) * 0.4;
+      g.position.x = Math.sin(t * 0.4 + i) * 0.1 + ((i * 0.37) % 1) - 0.5;
     });
-    if (light.current) light.current.intensity = 2.4 + Math.sin(t * 9) * 0.4;
+    if (water.current) {
+      water.current.emissiveIntensity =
+        env.waterGlow * (1 + Math.sin(t * 1.2) * 0.15);
+    }
   });
-  const { area, fire } = lounge;
-  const rx = (area.xMax - area.xMin) / 2 + 0.3;
-  const rz = (area.zMax - area.zMin) / 2;
+  const { area, pool } = lounge;
+  const w = pool.xMax - pool.xMin;
+  const d = pool.zMax - pool.zMin;
+  const cx = (pool.xMin + pool.xMax) / 2;
+  const cz = (pool.zMin + pool.zMax) / 2;
+  const glintCount = Math.max(3, Math.floor(d / 1.2));
   return (
     <>
       <mesh
         rotation-x={-Math.PI / 2}
-        position={[fire.x, 0.004, (area.zMin + area.zMax) / 2]}
-        scale={[rx, rz, 1]}
+        position={[
+          (area.xMin + area.xMax) / 2,
+          0.004,
+          (area.zMin + area.zMax) / 2,
+        ]}
       >
-        <circleGeometry args={[1, 28]} />
-        <meshStandardMaterial color={env.clearing} />
-      </mesh>
-      <group position={[fire.x, 0, fire.z]}>
-        {Array.from({ length: 7 }, (_, i) => (
-          <mesh
-            key={i}
-            position={[
-              Math.cos((i / 7) * Math.PI * 2) * 0.32,
-              0.05,
-              Math.sin((i / 7) * Math.PI * 2) * 0.32,
-            ]}
-          >
-            <dodecahedronGeometry args={[0.08, 0]} />
-            <meshStandardMaterial color={env.rock} flatShading />
-          </mesh>
-        ))}
-        {[0, 1].map((i) => (
-          <mesh key={i} position-y={0.06} rotation={[0, i * 1.4, Math.PI / 2]}>
-            <cylinderGeometry args={[0.045, 0.045, 0.5, 6]} />
-            <meshStandardMaterial color={env.trunk} flatShading />
-          </mesh>
-        ))}
-        <group ref={flames} position-y={0.1}>
-          {["#ff9f1c", "#ffcd3c", "#ff6b35"].map((c, i) => (
-            <mesh key={c} position={[(i - 1) * 0.06, 0.12, 0]}>
-              <coneGeometry args={[0.1 - i * 0.015, 0.34 - i * 0.05, 5]} />
-              <meshBasicMaterial color={c} />
-            </mesh>
-          ))}
-        </group>
-        <pointLight
-          ref={light}
-          position-y={0.5}
-          color="#ffb050"
-          distance={5}
-          decay={1}
+        <planeGeometry
+          args={[area.xMax - area.xMin + 0.6, area.zMax - area.zMin + 0.4]}
         />
-      </group>
-      {lounge.seats.map((p, i) => {
-        // Lengthways round the fire, so whoever sits faces it.
-        const angle = Math.atan2(p.x - fire.x, p.z - fire.z);
-        return (
+        <meshStandardMaterial color={env.deck} />
+      </mesh>
+      {/* The coping, then the water a little below it. */}
+      <mesh position={[cx, 0.025, cz]}>
+        <boxGeometry args={[w + 0.24, 0.05, d + 0.24]} />
+        <meshStandardMaterial color="#ffffff" flatShading />
+      </mesh>
+      <mesh rotation-x={-Math.PI / 2} position={[cx, 0.052, cz]}>
+        <planeGeometry args={[w, d]} />
+        <meshStandardMaterial
+          ref={water}
+          color={env.water}
+          emissive={env.water}
+          emissiveIntensity={env.waterGlow}
+        />
+      </mesh>
+      <group ref={glints} position={[cx, 0.056, cz]}>
+        {Array.from({ length: glintCount }, (_, i) => (
           <mesh
             key={i}
-            position={[p.x, 0.07, p.z]}
-            rotation={[0, angle + Math.PI / 2, Math.PI / 2]}
+            rotation-x={-Math.PI / 2}
+            position-z={-d / 2 + ((i + 0.5) * d) / glintCount}
           >
-            <cylinderGeometry args={[0.08, 0.08, 0.5, 7]} />
-            <meshStandardMaterial color={env.trunk} flatShading />
+            <planeGeometry args={[w * 0.35, 0.04]} />
+            <meshBasicMaterial color="#ffffff" transparent opacity={0.55} />
           </mesh>
-        );
-      })}
+        ))}
+      </group>
+      {/* A ladder at the near end. */}
+      {[-0.12, 0.12].map((x) => (
+        <mesh
+          key={x}
+          position={[pool.xMax - 0.3 + x, 0.2, pool.zMax - 0.05]}
+          rotation-x={-0.3}
+        >
+          <torusGeometry args={[0.12, 0.015, 4, 10, Math.PI]} />
+          <meshStandardMaterial color="#d8dde3" />
+        </mesh>
+      ))}
       {lounge.naps.map((p, i) => (
-        <group key={i} position={[p.x, 0, p.z - 0.3]}>
-          <mesh position-y={0.025}>
-            <boxGeometry args={[0.42, 0.05, 0.85]} />
-            <meshStandardMaterial
-              color={env.flowers[i % env.flowers.length]}
-              flatShading
-            />
-          </mesh>
-          <mesh position={[0, 0.06, -0.32]}>
-            <boxGeometry args={[0.3, 0.07, 0.16]} />
-            <meshStandardMaterial color="#f4efe4" flatShading />
-          </mesh>
-        </group>
+        <EmptyRing key={i} at={p} index={i} sim={sim} />
+      ))}
+      {lounge.seats.map((p, i) => (
+        <Lounger key={i} at={p} />
+      ))}
+      {lounge.tables.map((p, i) => (
+        <DrinkTable key={i} at={p} seed={i} />
+      ))}
+      {lounge.parasols.map((p, i) => (
+        <Parasol key={i} at={p} seed={i} />
       ))}
     </>
   );
@@ -702,7 +880,7 @@ export function Scenery({
         const at = stage.layout.portals[side];
         return at ? <Portal key={side} at={at} color={env.portal} /> : null;
       })}
-      {lounge && <LoungeArea lounge={lounge} env={env} />}
+      {lounge && <LoungeArea lounge={lounge} env={env} sim={sim} />}
       {workshop && <WorkshopArea workshop={workshop} />}
       {pitching && pitch && <PitchArea pitch={pitch} env={env} sim={sim} />}
       {env.fireflies && <Fireflies stage={stage} />}

@@ -41,6 +41,14 @@ export interface Layout {
   pitch: Pitch | null;
   /** Furniture nobody walks through. */
   obstacles: Obstacle[];
+  /** Larger rectangles nobody walks across, unless heading into them. */
+  blocks: Region[];
+}
+
+/** A place to sit that faces a particular way. */
+export interface Seat extends Vec2 {
+  /** Radians about y; 0 faces the viewer. */
+  facing: number;
 }
 
 /** A round footprint on the ground. */
@@ -48,12 +56,17 @@ export interface Obstacle extends Vec2 {
   r: number;
 }
 
-/** Where dismissed residents relax: round a fire, or asleep on a bedroll. */
+/** Where dismissed residents relax: on a lounger by the pool, or asleep on it. */
 export interface Lounge {
   area: Region;
-  fire: Vec2;
-  seats: Vec2[];
+  pool: Region;
+  /** Where a lounger's sitter is put, and which way it's turned. */
+  seats: Seat[];
+  /** A drink by each lounger, in the same order. */
+  tables: Vec2[];
+  /** Rings on the water, one sleeper each. */
   naps: Vec2[];
+  parasols: Vec2[];
 }
 
 /** Where working residents work, at a task of their own or a shared one. */
@@ -132,7 +145,7 @@ export interface Agent {
   /** Hauling: which pile it's heading for, and whether it has a crate. */
   haulLeg: 0 | 1;
   carrying: boolean;
-  /** Lounging: by the fire, or up for a stroll, and until when. */
+  /** Lounging: on a lounger, or up for a stroll, and until when. */
   rest: "seat" | "stroll";
   restUntil: number;
   /** The mood it was chosen in; a new one sends it on to where that belongs. */
@@ -269,6 +282,20 @@ export class Sim {
     return false;
   }
 
+  /** Whether someone has this pool ring, so it isn't also drawn empty. */
+  napTaken(index: number): boolean {
+    for (const i of this.naps.values()) if (i === index) return true;
+    return false;
+  }
+
+  /** Asleep on its ring in the pool, rather than wherever it dropped off. */
+  afloat(id: string): boolean {
+    const a = this.agents.get(id);
+    const i = this.naps.get(id);
+    const ring = i === undefined ? undefined : this.layout?.lounge?.naps[i];
+    return !!a && !!ring && a.activity === "sleep" && dist(a.pos, ring) < 0.05;
+  }
+
   /**
    * Whether a child is on its parent's leash right now: both in the right
    * meadow, both out and about. The left meadow is spots, not walks.
@@ -384,13 +411,26 @@ export class Sim {
     // The portal's doorway counts as taken, so nobody sets up in it.
     if (portal) others.push(portal, { x: portal.x, z: portal.z + 1.2 });
     const furniture = side === "right" ? (this.layout?.obstacles ?? []) : [];
-    let best = this.randomPoint(region, near, radius);
+    const blocks =
+      side === "right"
+        ? (this.layout?.blocks ?? []).map((b) => grow(b, 0.3))
+        : [];
+    // Drawn again when it lands on a block, which can be half the ground.
+    const candidate = () => {
+      let p = this.randomPoint(region, near, radius);
+      for (let i = 0; i < 12 && blocks.some((b) => inside(b, p)); i++) {
+        p = this.randomPoint(region, near, radius);
+      }
+      return p;
+    };
+    let best = candidate();
     let bestScore = -Infinity;
     for (let i = 0; i < CANDIDATES; i++) {
-      const p = i === 0 ? best : this.randomPoint(region, near, radius);
+      const p = i === 0 ? best : candidate();
       const score = Math.min(
         ...others.map((o) => dist(o, p)),
         ...furniture.map((o) => dist(o, p) - o.r - 0.3),
+        ...blocks.map((b) => (inside(b, p) ? -10 : Infinity)),
       );
       if (score > bestScore) {
         bestScore = score;
@@ -443,10 +483,10 @@ export class Sim {
           ? (this.pitchPost(a)?.spot ?? null)
           : r.mood === "asleep" && a.side === "right"
             ? claim(this.naps, a.id, this.layout?.lounge?.naps ?? [])
-            : null;
+            : this.loungerFor(a, r);
     const parent = this.parentOf(a);
     a.pos = slot
-      ? { ...slot }
+      ? { x: slot.x, z: slot.z }
       : this.spacedPoint(
           a.id,
           a.side,
@@ -455,6 +495,14 @@ export class Sim {
           1.5,
         );
     a.placed = true;
+  }
+
+  /** A free lounger for a resident that would rather be sitting, if any. */
+  private loungerFor(a: Agent, r: Resident): Vec2 | null {
+    const lounge = this.layout?.lounge;
+    if (!lounge || a.side !== "right" || !RESTING.has(r.mood)) return null;
+    if (r.mood === "asleep" || r.parentId || a.rest !== "seat") return null;
+    return claim(this.seats, a.id, lounge.seats);
   }
 
   /** After a resize: back onto its ground, or over to the other meadow. */
@@ -697,7 +745,7 @@ export class Sim {
   }
 
   /**
-   * By the fire for a while, then up for a stroll round the lounge, and back.
+   * On a lounger for a while, then up for a stroll round the pool, and back.
    * No seat free, and it strolls until one is.
    */
   private lounge(a: Agent, r: Resident, area: Region) {
@@ -725,7 +773,7 @@ export class Sim {
     if (dist(a.pos, spot) < reach || (this.stuck(a) && dist(a.pos, spot) < 1)) {
       a.target = null;
       // Onto the furniture itself, not beside it.
-      if (FURNISHED.has(post)) a.pos = { ...spot };
+      if (FURNISHED.has(post)) a.pos = { x: spot.x, z: spot.z };
       this.setActivity(a, post);
     } else {
       this.walkTo(a, spot, post);
@@ -854,14 +902,15 @@ export class Sim {
       a.activity === "chosen"
     ) {
       wantFacing = 0;
+    } else if (a.activity === "lounge") {
+      const i = this.seats.get(a.id);
+      wantFacing =
+        i === undefined ? 0 : (this.layout?.lounge?.seats[i]?.facing ?? 0);
     } else if (a.activity === "work") {
       wantFacing = 0.35 * Math.sin(a.phase);
     } else if (a.activity === "board") {
       // Back to the viewer, facing the board behind its spot.
       wantFacing = Math.PI;
-    } else if (a.activity === "lounge") {
-      const fire = this.layout?.lounge?.fire;
-      if (fire) wantFacing = Math.atan2(fire.x - a.pos.x, fire.z - a.pos.z);
     }
     if (wantFacing !== null) {
       let diff = wantFacing - a.facing;
@@ -876,9 +925,18 @@ export class Sim {
     const all = this.layout?.obstacles ?? [];
     if (a.side !== "right") return [];
     const goal = a.target;
-    return goal
-      ? all.filter((o) => dist(goal, o) > this.clearance(a, o) + 0.1)
-      : all;
+    if (!goal) return all;
+    return all.filter((o) => dist(goal, o) > this.clearance(a, o) + 0.1);
+  }
+
+  /** The blocks in this agent's way, grown by its own girth. */
+  private blocks(a: Agent): Region[] {
+    if (a.side !== "right") return [];
+    const goal = a.target;
+    const margin = a.size * 0.3;
+    return (this.layout?.blocks ?? [])
+      .filter((b) => !goal || !inside(b, goal))
+      .map((b) => grow(b, margin));
   }
 
   private clearance(a: Agent, o: Obstacle) {
@@ -890,6 +948,19 @@ export class Sim {
    * to whichever side it's already further round.
    */
   private steer(a: Agent, x: number, z: number): Vec2 {
+    // Round a block by the shortest way past its corners.
+    const goal = a.target;
+    if (goal) {
+      for (const b of this.blocks(a)) {
+        if (!crosses(a.pos, goal, b)) continue;
+        const next = detour(a.pos, goal, b);
+        if (next) {
+          const d = dist(a.pos, next) || 1;
+          x = (next.x - a.pos.x) / d;
+          z = (next.z - a.pos.z) / d;
+        }
+      }
+    }
     let sx = x;
     let sz = z;
     for (const o of this.obstacles(a)) {
@@ -913,6 +984,17 @@ export class Sim {
   /** Out of any furniture it has been pushed or pulled into. */
   private clear(a: Agent) {
     if (a.activity !== "walk" && a.activity !== "pause") return;
+    for (const b of this.blocks(a)) {
+      if (!inside(grow(b, -0.001), a.pos)) continue;
+      // Out by the nearest edge.
+      const exits = [
+        { d: a.pos.x - b.xMin, p: { x: b.xMin, z: a.pos.z } },
+        { d: b.xMax - a.pos.x, p: { x: b.xMax, z: a.pos.z } },
+        { d: a.pos.z - b.zMin, p: { x: a.pos.x, z: b.zMin } },
+        { d: b.zMax - a.pos.z, p: { x: a.pos.x, z: b.zMax } },
+      ];
+      a.pos = exits.reduce((m, e) => (e.d < m.d ? e : m)).p;
+    }
     for (const o of this.obstacles(a)) {
       const dx = a.pos.x - o.x;
       const dz = a.pos.z - o.z;
@@ -986,6 +1068,82 @@ function prune(book: Map<string, number>, length: number) {
 
 function clamp(n: number, min: number, max: number) {
   return Math.min(max, Math.max(min, n));
+}
+
+function grow(r: Region, by: number): Region {
+  return {
+    xMin: r.xMin - by,
+    xMax: r.xMax + by,
+    zMin: r.zMin - by,
+    zMax: r.zMax + by,
+  };
+}
+
+function corners(r: Region): Vec2[] {
+  return [
+    { x: r.xMin, z: r.zMin },
+    { x: r.xMax, z: r.zMin },
+    { x: r.xMin, z: r.zMax },
+    { x: r.xMax, z: r.zMax },
+  ];
+}
+
+/**
+ * The first corner to head for on the shortest way from `from` to `to` round
+ * `block`, by one corner or two; a corner it's already at doesn't count.
+ */
+function detour(from: Vec2, to: Vec2, block: Region): Vec2 | null {
+  const inner = grow(block, -0.01);
+  const clear = (p: Vec2, q: Vec2) => !crosses(p, q, inner);
+  const cs = corners(grow(block, 0.05)).filter((c) => dist(c, from) > 0.08);
+  let best: Vec2 | null = null;
+  let bestLength = Infinity;
+  for (const c1 of cs) {
+    if (!clear(from, c1)) continue;
+    const first = dist(from, c1);
+    if (clear(c1, to) && first + dist(c1, to) < bestLength) {
+      bestLength = first + dist(c1, to);
+      best = c1;
+    }
+    for (const c2 of cs) {
+      if (c2 === c1 || !clear(c1, c2) || !clear(c2, to)) continue;
+      const length = first + dist(c1, c2) + dist(c2, to);
+      if (length < bestLength) {
+        bestLength = length;
+        best = c1;
+      }
+    }
+  }
+  return best;
+}
+
+/** Whether the segment from `p` to `q` passes through the inside of `r`. */
+function crosses(p: Vec2, q: Vec2, r: Region): boolean {
+  let t0 = 0;
+  let t1 = 1;
+  const dx = q.x - p.x;
+  const dz = q.z - p.z;
+  const sides: [number, number][] = [
+    [-dx, p.x - r.xMin],
+    [dx, r.xMax - p.x],
+    [-dz, p.z - r.zMin],
+    [dz, r.zMax - p.z],
+  ];
+  for (const [step, room] of sides) {
+    if (step === 0) {
+      if (room <= 0) return false;
+      continue;
+    }
+    const t = room / step;
+    if (step < 0) {
+      if (t > t1) return false;
+      t0 = Math.max(t0, t);
+    } else {
+      if (t < t0) return false;
+      t1 = Math.min(t1, t);
+    }
+  }
+  return t1 - t0 > 1e-6;
 }
 
 function inside(r: Region, p: Vec2) {

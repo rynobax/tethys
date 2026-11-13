@@ -3,6 +3,8 @@ import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
 import type { Resident } from "./residents";
 import type { Agent, Sim } from "./sim";
+import { Drink, FloatRing } from "./Scenery";
+import { hashString } from "./spec";
 import { STAGE_HEIGHT } from "./stage";
 import type {
   Accessory,
@@ -83,8 +85,11 @@ export const DIMS: Record<Body, Dims> = {
 const VOICE_HOLD_MS = 900;
 /** How far above the stage a seated resident's root sits, on its chair. */
 export const SEAT_LIFT = 0.1;
-/** Likewise on a log by the lounge's fire. */
-const LOG_LIFT = 0.07;
+/** Likewise on a pool lounger's cushion. */
+const LOUNGER_LIFT = 0.19;
+/** How far back a lounging resident reclines. */
+const RECLINE = -1.0;
+
 /** How high the chosen one floats in its light, in its own units. */
 export const CHOSEN_HOVER = 0.75;
 /** Leaning back that far, chest to the sky, about the middle of its body. */
@@ -712,7 +717,8 @@ export function Character({
   const parcel = useRef<THREE.Group>(null);
   const pedestal = useRef<THREE.Group>(null);
   const crate = useRef<THREE.Group>(null);
-  const stick = useRef<THREE.Group>(null);
+  const drink = useRef<THREE.Group>(null);
+  const floatRing = useRef<THREE.Group>(null);
   const ring = useRef<THREE.Mesh>(null);
   const shadow = useRef<THREE.Mesh>(null);
   /** How far up its root stands, on a stage, chair or log. */
@@ -743,7 +749,7 @@ export function Character({
           : a.activity === "seated"
             ? STAGE_HEIGHT + SEAT_LIFT
             : a.activity === "lounge"
-              ? LOG_LIFT
+              ? LOUNGER_LIFT
               : 0;
     }
     root.current.position.set(a.pos.x, lift.current, a.pos.z);
@@ -760,8 +766,18 @@ export function Character({
     // Asleep it lies on its back, face to the sky; otherwise upright.
     const lying = a.activity === "sleep";
     const fig = figure.current!;
-    fig.rotation.x = lying ? -1.45 : 0;
+    fig.rotation.x = lying ? -1.45 : a.activity === "lounge" ? RECLINE : 0;
     fig.position.set(0, lying ? 0.3 : 0, 0);
+    // Asleep on a ring in the pool: bobbing, and turning slowly on the water.
+    const afloat = sim.afloat(resident.id);
+    floatRing.current!.visible = afloat;
+    if (afloat) {
+      root.current.position.y = 0.03 + Math.sin(t * 1.3) * 0.02;
+      root.current.rotation.y += Math.sin(t * 0.13) * 0.6;
+      root.current.rotation.z = Math.sin(t * 1.1) * 0.04;
+    } else {
+      root.current.rotation.z = 0;
+    }
     const f = a.aloft;
     shadow.current!.scale.setScalar(1 - 0.45 * f);
     const sp = sparkles.current!;
@@ -816,9 +832,10 @@ export function Character({
     parcel.current!.visible = shipping && !working;
     const carrying = a.carrying && !working && !chosen;
     crate.current!.visible = carrying && !shipping;
-    // Toasting a marshmallow some of the time it sits by the fire.
-    const toasting = a.activity === "lounge" && Math.sin(t * 0.35) > 0;
-    stick.current!.visible = toasting;
+    // A drink in hand on the lounger, sipped now and then.
+    const lounging = a.activity === "lounge";
+    drink.current!.visible = lounging;
+    const sip = lounging ? Math.max(0, Math.sin(t * 0.45) - 0.75) * 4 : 0;
     const handsBusy = working || shipping || carrying;
     if (heldProp.current) heldProp.current.visible = !handsBusy;
     if (groundProp.current) groundProp.current.visible = working;
@@ -871,12 +888,17 @@ export function Character({
         b.scale.y = 0.95 + Math.sin(t * 1.4) * 0.03;
         break;
       case "lounge": {
-        const swing = Math.sin(t * 2.4) * 0.05;
-        footL.current!.position.set(-0.13, 0.1, 0.22 + swing);
-        footR.current!.position.set(0.13, 0.1, 0.22 - swing);
-        b.rotation.x = -0.06;
-        L.rotation.x = -0.5;
-        R.rotation.x = toasting ? -1.25 + Math.sin(t * 1.5) * 0.06 : -0.5;
+        // Reclined, one hand behind its head, the other holding its drink
+        // and bringing it up for a sip now and then; feet idly waggling.
+        const waggle = Math.sin(t * 1.8) * 0.04;
+        footL.current!.position.set(-0.11, 0.06, 0.12 + waggle);
+        footR.current!.position.set(0.11, 0.06, 0.12 - waggle);
+        b.rotation.x = 0.15;
+        L.rotation.set(-0.3, 0, -2.6);
+        R.rotation.x = -0.75 - sip * 1.05;
+        R.rotation.z = 0.15 + sip * 0.5;
+        // Kept upright in the world, tipped towards its mouth for a sip.
+        drink.current!.rotation.x = -(R.rotation.x + RECLINE) - sip * 0.7;
         break;
       }
       case "board":
@@ -998,6 +1020,14 @@ export function Character({
           depthWrite={false}
         />
       </mesh>
+      <group
+        ref={floatRing}
+        position={[0, 0.1, -0.35]}
+        scale={1.6}
+        visible={false}
+      >
+        <FloatRing index={hashString(resident.id)} />
+      </group>
       <mesh ref={ring} rotation-x={-Math.PI / 2} position-y={0.02}>
         <torusGeometry args={[0.55, 0.035, 6, 36]} />
         <meshBasicMaterial color="#ffffff" />
@@ -1084,15 +1114,8 @@ export function Character({
               <capsuleGeometry args={[0.065, 0.18, 3, 6]} />
               <Mat color={spec.body_color} />
             </mesh>
-            <group ref={stick} position-y={-0.3} rotation-x={Math.PI / 2}>
-              <mesh position-y={0.25}>
-                <cylinderGeometry args={[0.012, 0.012, 0.5, 4]} />
-                <Mat color="#8a6440" />
-              </mesh>
-              <mesh position-y={0.52}>
-                <cylinderGeometry args={[0.05, 0.05, 0.08, 8]} />
-                <Mat color="#fff3e0" />
-              </mesh>
+            <group ref={drink} position={[0, -0.32, 0.03]} scale={1.4}>
+              <Drink juice={spec.accent_color} />
             </group>
             <group ref={tool} position-y={-0.3}>
               <Tool work={spec.work} />

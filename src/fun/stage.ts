@@ -10,6 +10,7 @@ import type {
   Obstacle,
   Pitch,
   Region,
+  Seat,
   Vec2,
   Workshop,
 } from "./sim";
@@ -98,6 +99,8 @@ export function computeStage(
       pitch: stage,
       ...zones,
       obstacles: obstacles(zones),
+      // Walked round, unless a sleeper is heading for a ring on it.
+      blocks: zones.lounge ? [zones.lounge.pool] : [],
     },
     visible,
     panel: panelX,
@@ -212,10 +215,14 @@ function obstacles({
 }: Pick<Layout, "lounge" | "workshop">): Obstacle[] {
   const out: Obstacle[] = [];
   if (lounge) {
-    out.push({ ...lounge.fire, r: 0.45 });
-    for (const p of lounge.seats) out.push({ ...p, r: 0.28 });
-    // The bedroll lies behind its sleeper's spot.
-    for (const p of lounge.naps) out.push({ x: p.x, z: p.z - 0.3, r: 0.35 });
+    // One circle over a lounger and its table together, which leaves no
+    // notch between the two for a walker to wedge itself into.
+    const pool = (lounge.pool.xMin + lounge.pool.xMax) / 2;
+    for (const p of lounge.seats) {
+      const across = p.x < pool ? -0.12 : 0.12;
+      out.push({ ...onSeat(p, across, -0.25), r: 0.5 });
+    }
+    for (const p of lounge.parasols) out.push({ ...p, r: 0.15 });
   }
   if (workshop) {
     // The board stands behind its writer's spot, a few circles wide.
@@ -229,31 +236,71 @@ function obstacles({
   return out;
 }
 
-const SEATS = 8;
+/** Lounger rows, far enough apart for a compact name tag over each. */
+const LOUNGER_ROW = 1.8;
+/** How far the lounger's root point sits from the pool's edge. */
+const LOUNGER_OFFSET = 1;
+/** Below this the lounge has room for loungers down one side of the pool only. */
+const TWO_SIDED_WIDTH = 4.2;
+const FLOATS = 3;
 
-/** A fire in the middle, log seats in a ring round it, bedrolls in the corners. */
+/**
+ * A pool down the middle of a tiled deck, loungers facing the viewer down
+ * either side of it, each with a drink on a table beside it, and rings on the
+ * water for sleepers to drift on.
+ */
 function lounge(area: Region): Lounge {
-  const fire = {
-    x: (area.xMin + area.xMax) / 2,
-    z: (area.zMin + area.zMax) / 2 + 0.3,
+  const width = area.xMax - area.xMin;
+  const twoSided = width >= TWO_SIDED_WIDTH;
+  const half = Math.min(1.1, Math.max(0.45, width * 0.17));
+  const cx = twoSided ? (area.xMin + area.xMax) / 2 : area.xMin + half + 0.2;
+  const pool = {
+    xMin: cx - half,
+    xMax: cx + half,
+    zMin: area.zMin + 1,
+    zMax: area.zMax - 0.8,
   };
-  const rx = Math.min(2.3, (area.xMax - area.xMin) / 2 - 0.2);
-  const rz = Math.min(3, (area.zMax - area.zMin) / 2 - 1.2);
-  // Starting off the vertical, so no seat is straight behind or before the fire.
-  const seats = Array.from({ length: SEATS }, (_, i) => {
-    const angle = Math.PI / SEATS + (i * 2 * Math.PI) / SEATS;
-    return {
-      x: fire.x + Math.cos(angle) * rx,
-      z: fire.z + Math.sin(angle) * rz,
-    };
-  });
-  const naps = [
-    { x: area.xMin + 0.3, z: area.zMin + 0.9 },
-    { x: area.xMax - 0.3, z: area.zMin + 0.9 },
-    { x: area.xMin + 0.3, z: area.zMax - 0.2 },
-    { x: area.xMax - 0.3, z: area.zMax - 0.2 },
+  const columns = (
+    twoSided
+      ? [pool.xMin - LOUNGER_OFFSET, pool.xMax + LOUNGER_OFFSET]
+      : [pool.xMax + LOUNGER_OFFSET]
+  ).map((x) => Math.min(area.xMax - 0.3, Math.max(area.xMin + 0.3, x)));
+  const rows: number[] = [];
+  for (let z = pool.zMin + 0.7; z <= pool.zMax; z += LOUNGER_ROW) rows.push(z);
+  const middle = (pool.zMin + pool.zMax) / 2;
+  // Middle rows first, so a few loungers in use sit together. Each is turned
+  // most of the way to the pool, and no two quite alike.
+  const seats: Seat[] = rows
+    .sort((a, b) => Math.abs(a - middle) - Math.abs(b - middle))
+    .flatMap((z) =>
+      columns.map((x) => {
+        const j = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453;
+        const jitter = (j - Math.floor(j) - 0.5) * 0.4;
+        return { x, z, facing: (x < cx ? 0.75 : -0.75) + jitter };
+      }),
+    );
+  // On the side away from the pool, by the lounger's head.
+  const tables = seats.map((p) => onSeat(p, p.x < cx ? -0.42 : 0.42, -0.35));
+  const length = pool.zMax - pool.zMin;
+  const naps = Array.from({ length: FLOATS }, (_, i) => ({
+    x: cx + (i % 2 ? 0.25 : -0.25) * half,
+    z: pool.zMin + ((i + 0.5) * length) / FLOATS,
+  }));
+  const parasols = [
+    { x: area.xMin + 0.35, z: area.zMin + 0.3 },
+    { x: area.xMax - 0.35, z: area.zMin + 0.3 },
   ];
-  return { area, fire, seats, naps };
+  return { area, pool, seats, tables, naps, parasols };
+}
+
+/** A point beside a lounger, given across and along it from its sitter. */
+export function onSeat(seat: Seat, across: number, along: number): Vec2 {
+  const cos = Math.cos(seat.facing);
+  const sin = Math.sin(seat.facing);
+  return {
+    x: seat.x + across * cos + along * sin,
+    z: seat.z - across * sin + along * cos,
+  };
 }
 
 /** Two whiteboards along the back and two crate piles at the sides. */
