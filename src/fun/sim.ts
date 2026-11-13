@@ -88,9 +88,28 @@ export interface Workshop {
   area: Region;
   /** Where someone stands to write on each whiteboard. */
   boards: Vec2[];
-  /** Crates are hauled from the first pile to the second. */
-  piles: [Vec2, Vec2];
+  garden: Garden;
 }
+
+/** Plots where working residents grow crops, and the shed they're stored at. */
+export interface Garden {
+  /** One crop each. */
+  plots: Vec2[];
+  shed: Vec2;
+  /** Where the harvest is stacked, in front of the shed. */
+  store: Vec2;
+}
+
+/** A plot's crop, and how far grown: below 0 bare, 1 ripe. */
+export interface Plot {
+  crop: number;
+  growth: number;
+}
+
+/** How many kinds of crop there are; the scene decides what each looks like. */
+export const CROP_KINDS = 5;
+/** Crates of harvest kept at the shed; past this the oldest goes. */
+export const STORE_MAX = 9;
 
 /** Where Shipping residents pitch, and the crowd they pitch to. */
 export interface Pitch {
@@ -123,6 +142,8 @@ export type Activity =
   | "seated"
   | "lounge"
   | "board"
+  /** At a garden plot, doing its `chore`. */
+  | "garden"
   /** Selected: floating in its shaft of light, whatever it was doing. */
   | "chosen"
   /** Just merged: popping the champagne where it stands. */
@@ -131,11 +152,21 @@ export type Activity =
   | "sail";
 
 type Post =
-  "attention" | "work" | "pitch" | "seated" | "lounge" | "sleep" | "board";
-type Intent = "wander" | "portal" | "follow" | "haul" | "dock" | Post;
+  | "attention"
+  | "work"
+  | "pitch"
+  | "seated"
+  | "lounge"
+  | "sleep"
+  | "board"
+  | "garden";
+type Intent = "wander" | "portal" | "follow" | "store" | "dock" | Post;
 
 /** What a working resident is busy with, for a while. */
-export type Task = "station" | "haul" | "board";
+export type Task = "station" | "garden" | "board";
+
+/** What a gardener does at its plot, which follows from how grown it is. */
+export type Chore = "plant" | "water" | "harvest";
 
 export interface Agent {
   id: string;
@@ -165,9 +196,10 @@ export interface Agent {
   /** A working resident's current task, and when it moves on to another. */
   task: Task | null;
   taskUntil: number;
-  /** Hauling: which pile it's heading for, and whether it has a crate. */
-  haulLeg: 0 | 1;
-  carrying: boolean;
+  /** Gardening: what it's doing at its plot, and the crop it's carrying to
+   *  the shed. */
+  chore: Chore | null;
+  carrying: number | null;
   /** Lounging: on a lounger, or up for a stroll, and until when. */
   rest: "seat" | "stroll";
   restUntil: number;
@@ -217,6 +249,15 @@ const RESTING: ReadonlySet<Mood> = new Set(["idle", "asleep"]);
 /** How long a resident pops its champagne for once it's merged. */
 const POP_SECONDS = 3.5;
 const SPEED_SAIL = 0.9;
+/** How long planting and picking take, and watering at most. */
+const PLANT_SECONDS = 2.2;
+const HARVEST_SECONDS = 1.8;
+const WATER_SECONDS = 3;
+/** Growth a second: a crop ripens in a few minutes alone, far sooner watered. */
+const GROW_RATE = 1 / 240;
+const WATER_RATE = 0.12;
+/** A crate of harvest is taken from the shed this often. */
+const COLLECT_SECONDS = 50;
 
 export class Sim {
   readonly agents = new Map<string, Agent>();
@@ -228,6 +269,12 @@ export class Sim {
   private seats = new Map<string, number>();
   private naps = new Map<string, number>();
   private boards = new Map<string, number>();
+  private plotsHeld = new Map<string, number>();
+  private plots: Plot[] = [];
+  /** The harvest stacked at the shed, oldest first, and when the oldest goes. */
+  private stored: number[] = [];
+  private collectAt = 0;
+  private dt = 0;
   /** Shipping residents in turn order; the first is the one pitching. */
   private queue: string[] = [];
   private speakerSince = 0;
@@ -246,6 +293,19 @@ export class Sim {
     prune(this.seats, layout.lounge?.seats.length ?? 0);
     prune(this.naps, layout.lounge?.naps.length ?? 0);
     prune(this.boards, layout.workshop?.boards.length ?? 0);
+    const plots = layout.workshop?.garden.plots.length ?? 0;
+    prune(this.plotsHeld, plots);
+    // The first time, a garden already under way rather than bare earth.
+    const fresh = this.plots.length === 0;
+    this.plots = Array.from(
+      { length: plots },
+      (_, i) =>
+        this.plots[i] ?? {
+          crop: Math.floor(Math.random() * CROP_KINDS),
+          growth: fresh && Math.random() < 0.6 ? rand(0, 1.2) : -1,
+        },
+    );
+    for (const p of this.plots) p.growth = Math.min(1, p.growth);
     for (const a of this.agents.values()) this.settle(a);
   }
 
@@ -307,6 +367,14 @@ export class Sim {
   step(dt: number) {
     if (!this.layout) return;
     this.now += dt;
+    this.dt = dt;
+    for (const p of this.plots) {
+      if (p.growth >= 0) p.growth = Math.min(1, p.growth + dt * GROW_RATE);
+    }
+    if (this.stored.length > 0 && this.now > this.collectAt) {
+      this.stored.shift();
+      this.collectAt = this.now + COLLECT_SECONDS;
+    }
     // The speaker takes a seat at the back of the queue and the next gets up,
     // unless it's the chosen one, which holds the floor.
     if (
@@ -416,7 +484,14 @@ export class Sim {
   }
 
   private books() {
-    return [this.waitSlots, this.chairs, this.seats, this.naps, this.boards];
+    return [
+      this.waitSlots,
+      this.chairs,
+      this.seats,
+      this.naps,
+      this.boards,
+      this.plotsHeld,
+    ];
   }
 
   /** The parent on the other end of this agent's leash, if it's on one. */
@@ -565,8 +640,8 @@ export class Sim {
       bestAt: this.now,
       task: null,
       taskUntil: 0,
-      haulLeg: 0,
-      carrying: false,
+      chore: null,
+      carrying: null,
       rest: Math.random() < 0.7 ? "seat" : "stroll",
       restUntil: this.now + rand(15, 45),
       aloft: 0,
@@ -681,9 +756,13 @@ export class Sim {
     if (r.mood !== "working" || !right || a.task !== "board") {
       this.boards.delete(a.id);
     }
+    if (r.mood !== "working" || !right || a.task !== "garden") {
+      this.plotsHeld.delete(a.id);
+      a.chore = null;
+    }
     if (r.mood !== "working") {
       a.task = null;
-      a.carrying = false;
+      a.carrying = null;
     }
   }
 
@@ -836,24 +915,23 @@ export class Sim {
 
   /**
    * A working resident picks a task and keeps at it a while: its own work at a
-   * spot of its own, hauling crates between the piles, or a whiteboard. On a
-   * leash, it works at a spot within reach instead.
+   * spot of its own, the garden, or a whiteboard. On a leash, it works at a
+   * spot within reach instead.
    */
   private work(a: Agent, area: Region, holder: Agent | undefined) {
     const shop = this.layout?.workshop;
     if (holder || !shop) {
       a.task = "station";
-    } else if (!a.task || this.now > a.taskUntil) {
+    } else if (!a.task || (this.now > a.taskUntil && a.carrying === null)) {
       const freeBoard = shop.boards.some(
         (_, i) => ![...this.boards.values()].includes(i),
       );
       const roll = Math.random();
       a.task =
-        roll < 0.45 ? "station" : roll < 0.75 || !freeBoard ? "haul" : "board";
-      a.taskUntil = this.now + rand(20, 40);
+        roll < 0.35 ? "station" : roll < 0.5 && freeBoard ? "board" : "garden";
+      a.taskUntil =
+        this.now + (a.task === "garden" ? rand(40, 70) : rand(20, 40));
       a.spot = null;
-      a.carrying = false;
-      a.haulLeg = 0;
     }
 
     if (a.task === "board" && shop) {
@@ -864,9 +942,10 @@ export class Sim {
       }
       a.task = "station";
     }
-    if (a.task === "haul" && shop) {
-      this.haul(a, shop);
-      return;
+    if (a.task === "garden" && shop) {
+      if (this.garden(a, shop.garden)) return;
+      // Every plot taken: its own work for a while instead.
+      a.task = "station";
     }
     // Re-picked too when a resize has moved the workshop.
     if (!a.spot || this.stuck(a) || !inside(area, a.spot)) {
@@ -877,22 +956,91 @@ export class Sim {
     this.head(a, a.spot, "work");
   }
 
-  /** To the first pile for a crate, to the second to set it down, and again. */
-  private haul(a: Agent, shop: Workshop) {
-    if (a.activity === "pause" && this.now < a.until) return;
-    const pile = shop.piles[a.haulLeg];
-    // Each hauler has its own side of the pile, so they don't all queue.
-    const at = {
-      x: pile.x + Math.cos(a.phase) * 0.45,
-      z: pile.z + Math.sin(a.phase) * 0.35,
-    };
-    if (dist(a.pos, at) < 0.3 || this.stuck(a)) {
-      a.carrying = a.haulLeg === 0;
-      a.haulLeg = a.haulLeg === 0 ? 1 : 0;
-      this.pause(a, 0.5, 1);
-      return;
+  /**
+   * Picks a ripe plot, plants a bare one or waters a growing one, and carries
+   * each crop it picks to the shed. A plot is one gardener's at a time. False
+   * when there's no plot free.
+   */
+  private garden(a: Agent, garden: Garden): boolean {
+    if (a.activity === "pause" && this.now < a.until) return true;
+    if (a.carrying !== null) {
+      // Each its own side of the stack, so they don't all queue.
+      const at = {
+        x: garden.store.x + Math.cos(a.phase) * 0.35,
+        z: garden.store.z + 0.45 + Math.abs(Math.sin(a.phase)) * 0.2,
+      };
+      if (dist(a.pos, at) < 0.3 || (this.stuck(a) && dist(a.pos, at) < 1)) {
+        if (this.stored.length === 0) {
+          this.collectAt = this.now + COLLECT_SECONDS;
+        }
+        this.stored.push(a.carrying);
+        if (this.stored.length > STORE_MAX) this.stored.shift();
+        a.carrying = null;
+        this.pause(a, 0.6, 1.2);
+      } else {
+        this.walkTo(a, at, "store");
+      }
+      return true;
     }
-    this.walkTo(a, at, "haul");
+    const i = this.plotFor(a, garden);
+    if (i === null) return false;
+    const plot = this.plots[i];
+    a.chore = plot.growth < 0 ? "plant" : plot.growth < 1 ? "water" : "harvest";
+    const at = garden.plots[i];
+    // Behind its plot, facing out over it.
+    this.head(a, { x: at.x, z: at.z - 0.42 }, "garden");
+    if (a.activity !== "garden") return true;
+    const busy = this.now - a.since;
+    let done = false;
+    if (a.chore === "plant" && busy > PLANT_SECONDS) {
+      plot.crop = Math.floor(Math.random() * CROP_KINDS);
+      plot.growth = 0;
+      done = true;
+    } else if (a.chore === "water") {
+      plot.growth = Math.min(1, plot.growth + this.dt * WATER_RATE);
+      done = busy > WATER_SECONDS || plot.growth >= 1;
+    } else if (a.chore === "harvest" && busy > HARVEST_SECONDS) {
+      a.carrying = plot.crop;
+      plot.growth = -1;
+      done = true;
+    }
+    if (done) {
+      this.plotsHeld.delete(a.id);
+      a.chore = null;
+      this.pause(a, 0.3, 0.8);
+    }
+    return true;
+  }
+
+  /** Its plot, or the best free one: ripe first, then bare, then growing. */
+  private plotFor(a: Agent, garden: Garden): number | null {
+    const held = this.plotsHeld.get(a.id);
+    if (held !== undefined) return held;
+    const taken = new Set(this.plotsHeld.values());
+    let best: number | null = null;
+    let bestScore = Infinity;
+    this.plots.forEach((p, i) => {
+      if (taken.has(i)) return;
+      const rank = p.growth >= 1 ? 0 : p.growth < 0 ? 1 : 2;
+      // A rank is worth a few steps, so nobody crosses the garden for it.
+      const score = rank * 3 + dist(a.pos, garden.plots[i]);
+      if (score < bestScore) {
+        best = i;
+        bestScore = score;
+      }
+    });
+    if (best !== null) this.plotsHeld.set(a.id, best);
+    return best;
+  }
+
+  /** A plot's crop and growth, for the scene. */
+  plot(index: number): Plot | undefined {
+    return this.plots[index];
+  }
+
+  /** The harvest stacked at the shed, oldest first. */
+  storedCrops(): readonly number[] {
+    return this.stored;
   }
 
   /**
@@ -1065,6 +1213,8 @@ export class Sim {
         i === undefined ? 0 : (this.layout?.lounge?.seats[i]?.facing ?? 0);
     } else if (a.activity === "work") {
       wantFacing = 0.35 * Math.sin(a.phase);
+    } else if (a.activity === "garden") {
+      wantFacing = 0;
     } else if (a.activity === "board") {
       // Back to the viewer, facing the board behind its spot.
       wantFacing = Math.PI;

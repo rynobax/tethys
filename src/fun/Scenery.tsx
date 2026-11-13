@@ -1,6 +1,7 @@
 import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
+import { GardenArea } from "./Garden";
 import type {
   Lake,
   Lounge,
@@ -860,8 +861,8 @@ function LakeArea({
   );
 }
 
-/** A paved yard, two whiteboards along the back, and two piles of crates. */
-function WorkshopArea({ workshop }: { workshop: Workshop }) {
+/** Two whiteboards along the back, and the garden. */
+function WorkshopArea({ workshop, sim }: { workshop: Workshop; sim: Sim }) {
   return (
     <>
       {workshop.boards.map((p, i) => (
@@ -885,20 +886,7 @@ function WorkshopArea({ workshop }: { workshop: Workshop }) {
           ))}
         </group>
       ))}
-      {workshop.piles.map((p, i) => (
-        <group key={i} position={[p.x, 0, p.z]}>
-          {[
-            [0, 0, 0],
-            [0.22, 0, 0.05],
-            [0.1, 0.2, 0.02],
-          ].map(([x, y, z], j) => (
-            <mesh key={j} position={[x - 0.1, y + 0.1, z]} rotation-y={j * 0.3}>
-              <boxGeometry args={[0.2, 0.2, 0.2]} />
-              <meshStandardMaterial color="#c08a5b" flatShading />
-            </mesh>
-          ))}
-        </group>
-      ))}
+      <GardenArea garden={workshop.garden} sim={sim} />
     </>
   );
 }
@@ -1087,7 +1075,7 @@ export function Scenery({
         ) : null;
       })}
       {lounge && <LoungeArea lounge={lounge} env={env} sim={sim} />}
-      {workshop && <WorkshopArea workshop={workshop} />}
+      {workshop && <WorkshopArea workshop={workshop} sim={sim} />}
       {lake && <LakeArea lake={lake} env={env} sim={sim} />}
       {pitching && pitch && <PitchArea pitch={pitch} env={env} sim={sim} />}
       {env.fireflies && <Fireflies stage={stage} />}

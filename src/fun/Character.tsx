@@ -3,6 +3,7 @@ import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
 import type { Resident } from "./residents";
 import type { Agent, Sim } from "./sim";
+import { useCropMaterials } from "./Garden";
 import { Boat, Drink, FloatRing } from "./Scenery";
 import { hashString } from "./spec";
 import { STAGE_HEIGHT } from "./stage";
@@ -764,6 +765,10 @@ export function Character({
   const parcel = useRef<THREE.Group>(null);
   const pedestal = useRef<THREE.Group>(null);
   const crate = useRef<THREE.Group>(null);
+  const produce = useRef<THREE.Group>(null);
+  const can = useRef<THREE.Group>(null);
+  const drops = useRef<THREE.Group>(null);
+  const cropMaterials = useCropMaterials();
   const drink = useRef<THREE.Group>(null);
   const bottle = useRef<THREE.Group>(null);
   const cork = useRef<THREE.Mesh>(null);
@@ -889,8 +894,23 @@ export function Character({
         spec.work === "sweeping");
     book.current!.visible = working && spec.work === "reading";
     parcel.current!.visible = shipping && !working;
-    const carrying = a.carrying && !working && !chosen;
+    const carrying = a.carrying !== null && !working && !chosen;
     crate.current!.visible = carrying && !shipping;
+    if (a.carrying !== null) {
+      for (const m of produce.current!.children as THREE.Mesh[]) {
+        m.material = cropMaterials[a.carrying];
+      }
+    }
+    const gardening = a.activity === "garden";
+    const watering = gardening && a.chore === "water";
+    can.current!.visible = watering;
+    drops.current!.visible = watering;
+    if (watering) {
+      drops.current!.children.forEach((m, i) => {
+        const p = (t * 1.8 + i / drops.current!.children.length) % 1;
+        m.position.set(Math.sin(i * 2.3) * 0.06, 0.4 - p * 0.36, 0);
+      });
+    }
     // A drink in hand on the lounger, sipped now and then.
     const lounging = a.activity === "lounge";
     // Champagne once its PRs are ready to merge, opened once they're merged.
@@ -927,7 +947,7 @@ export function Character({
     }
     const sip = lounging ? Math.max(0, Math.sin(t * 0.45) - 0.75) * 4 : 0;
     const handsBusy = working || shipping || carrying;
-    if (heldProp.current) heldProp.current.visible = !handsBusy;
+    if (heldProp.current) heldProp.current.visible = !handsBusy && !gardening;
     if (groundProp.current) groundProp.current.visible = working;
     pedestal.current!.visible = pitching;
 
@@ -999,6 +1019,22 @@ export function Character({
         break;
       case "work":
         poseWork(spec.work, t, local, b, L, R);
+        break;
+      case "garden":
+        if (watering) {
+          // The can held out over the plot, tipped to pour.
+          R.rotation.x = -0.9;
+          R.rotation.z = 0.55;
+          b.rotation.y = Math.sin(t * 1.5) * 0.1;
+        } else {
+          // Bent over the plot, both hands busy in the soil.
+          const dig = Math.sin(t * 8);
+          b.position.y = -0.04;
+          b.scale.y = 0.93;
+          b.rotation.x = 0.3;
+          L.rotation.x = -1.3 + dig * 0.3;
+          R.rotation.x = -1.3 - dig * 0.3;
+        }
         break;
       case "seated": {
         // Feet dangling off the chair, swinging, and a look round now and then.
@@ -1085,6 +1121,14 @@ export function Character({
       eyes.current!.scale.x = 1;
       eyes.current!.scale.z = 1;
     }
+    // The can kept level whatever its arm is doing, then tipped to pour.
+    if (watering) {
+      can.current!.rotation.set(
+        -(R.rotation.x + b.rotation.x) + 0.55 + Math.sin(t * 3) * 0.08,
+        0,
+        -R.rotation.z,
+      );
+    }
     // The bottle kept upright whatever its arm is doing, and tipped out over
     // the crowd while it sprays.
     if (champagne) {
@@ -1134,6 +1178,15 @@ export function Character({
           depthWrite={false}
         />
       </mesh>
+      {/* Water falling from the can onto the plot in front. */}
+      <group ref={drops} position={[0.26, 0, 0.36]} visible={false}>
+        {Array.from({ length: 6 }, (_, i) => (
+          <mesh key={i}>
+            <sphereGeometry args={[0.03, 5, 4]} />
+            <meshBasicMaterial color="#9fd3f5" />
+          </mesh>
+        ))}
+      </group>
       <group ref={boat} scale={1.1} visible={false}>
         <Boat />
       </group>
@@ -1242,6 +1295,9 @@ export function Character({
             <group ref={drink} position={[0, -0.32, 0.03]} scale={1.4}>
               <Drink juice={spec.accent_color} />
             </group>
+            <group ref={can} position-y={-0.3} scale={1.7} visible={false}>
+              <WateringCan />
+            </group>
             <group ref={tool} position-y={-0.3}>
               <Tool work={spec.work} />
             </group>
@@ -1273,6 +1329,13 @@ export function Character({
                 <Mat color="#9a6b47" />
               </mesh>
             ))}
+            <group ref={produce} position-y={0.16}>
+              {[-0.08, 0, 0.08].map((x, k) => (
+                <mesh key={x} position={[x, 0, k === 1 ? 0.04 : -0.03]}>
+                  <sphereGeometry args={[0.06, 6, 5]} />
+                </mesh>
+              ))}
+            </group>
           </group>
           <group ref={parcel} position={[0, d.shoulder - 0.18, d.faceZ + 0.2]}>
             <mesh>
@@ -1362,4 +1425,24 @@ function poseWork(
       b.rotation.y = Math.sin(t * 3) * 0.4;
       break;
   }
+}
+
+/** A watering can, its spout to the front. */
+function WateringCan() {
+  return (
+    <group position-y={-0.06}>
+      <mesh>
+        <cylinderGeometry args={[0.07, 0.075, 0.12, 8]} />
+        <Mat color="#4f95c4" />
+      </mesh>
+      <mesh position={[0, 0.03, 0.1]} rotation-x={1.05}>
+        <cylinderGeometry args={[0.012, 0.016, 0.15, 5]} />
+        <Mat color="#4f95c4" />
+      </mesh>
+      <mesh position={[0, 0.09, -0.02]} rotation-y={Math.PI / 2}>
+        <torusGeometry args={[0.045, 0.012, 4, 8, Math.PI]} />
+        <Mat color="#3b78a3" />
+      </mesh>
+    </group>
+  );
 }

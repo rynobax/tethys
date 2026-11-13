@@ -46,6 +46,11 @@ const PORTAL_INSET = 1;
 /** Below this the left meadow is too narrow to give a corner to a lake. */
 const MIN_LAKE_WIDTH = 4;
 
+/** The garden's plots: a stride apart, and room behind each to stand. */
+const PLOT_STRIDE_X = 0.95;
+const PLOT_STRIDE_Z = 1.3;
+const GARDEN_ROWS = 3;
+
 /** Below this a meadow is too short to split between two uses. */
 const MIN_ZONED_DEPTH = 12;
 
@@ -256,7 +261,9 @@ function obstacles({
         out.push({ x: p.x + dx, z: p.z - 0.5, r: 0.2 });
       }
     }
-    for (const p of workshop.piles) out.push({ ...p, r: 0.3 });
+    const { plots, shed, store } = workshop.garden;
+    for (const p of plots) out.push({ ...p, r: 0.2 });
+    out.push({ ...shed, r: 0.5 }, { ...store, r: 0.3 });
   }
   return out;
 }
@@ -368,20 +375,35 @@ export function onSeat(seat: Seat, across: number, along: number): Vec2 {
   };
 }
 
-/** Two whiteboards along the back and two crate piles at the sides. */
+/**
+ * Two whiteboards along the back, and in front of them a garden: rows of
+ * plots, and a shed at the outer end with the harvest stacked before it.
+ */
 function workshop(area: Region): Workshop {
   const cx = (area.xMin + area.xMax) / 2;
   const quarter = (area.xMax - area.xMin) / 4;
-  const pileZ = (area.zMin + area.zMax) / 2 + 0.6;
+  const top = area.zMin + 3;
+  const shed = { x: area.xMax - 0.6, z: top + 0.2 };
+  const store = { x: shed.x - 0.1, z: shed.z + 0.75 };
+  // As many plots across as fit between the edge and the shed, centred.
+  const left = area.xMin + 0.6;
+  const right = shed.x - 1;
+  const cols = Math.max(1, Math.floor((right - left) / PLOT_STRIDE_X) + 1);
+  const x0 = (left + right) / 2 - ((cols - 1) * PLOT_STRIDE_X) / 2;
+  const plots: Vec2[] = [];
+  for (let r = 0; r < GARDEN_ROWS; r++) {
+    const z = top + r * PLOT_STRIDE_Z;
+    if (z > area.zMax - 1.5) break;
+    for (let c = 0; c < cols; c++) {
+      plots.push({ x: x0 + c * PLOT_STRIDE_X, z });
+    }
+  }
   return {
     area,
     boards: [
       { x: cx - quarter, z: area.zMin + 1.2 },
       { x: cx + quarter, z: area.zMin + 1.2 },
     ],
-    piles: [
-      { x: area.xMin + 0.4, z: pileZ },
-      { x: area.xMax - 0.4, z: pileZ },
-    ],
+    garden: { plots, shed, store },
   };
 }
