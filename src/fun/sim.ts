@@ -43,6 +43,20 @@ export interface Layout {
   obstacles: Obstacle[];
   /** Larger rectangles nobody walks across, unless heading into them. */
   blocks: Region[];
+  /** The top of the left meadow, where merged residents wait to be deleted. */
+  lake: Lake | null;
+}
+
+/** Water off the window's edge, with a pier out into it and a boat at the end. */
+export interface Lake {
+  water: Region;
+  /** The ground round it where the merged wait, the water a block within. */
+  shore: Region;
+  /** Where the pier meets the shore, and its end, where the boat is moored. */
+  pierFoot: Vec2;
+  pierEnd: Vec2;
+  /** Off the edge of the window, where a boat sails to and is gone. */
+  exit: Vec2;
 }
 
 /** A place to sit that faces a particular way. */
@@ -105,11 +119,15 @@ export type Activity =
   | "lounge"
   | "board"
   /** Selected: floating in its shaft of light, whatever it was doing. */
-  | "chosen";
+  | "chosen"
+  /** Just merged: popping the champagne where it stands. */
+  | "pop"
+  /** Deleted after merging: in a boat, sailing off across the lake. */
+  | "sail";
 
 type Post =
   "attention" | "work" | "pitch" | "seated" | "lounge" | "sleep" | "board";
-type Intent = "wander" | "portal" | "follow" | "haul" | Post;
+type Intent = "wander" | "portal" | "follow" | "haul" | "dock" | Post;
 
 /** What a working resident is busy with, for a while. */
 export type Task = "station" | "haul" | "board";
@@ -152,6 +170,10 @@ export interface Agent {
   chosenMood: Mood | null;
   /** 0..1, how far it has risen off the ground into its light. */
   aloft: number;
+  /** Popping the champagne until then, having just been merged. */
+  popUntil: number;
+  /** Deleted and on its way out: to the pier's foot, then along it. */
+  voyage: "dock" | "pier" | null;
 }
 
 const PORTAL_SECONDS = 0.6;
@@ -188,7 +210,10 @@ const EGG: ReadonlySet<Mood> = new Set(["queued", "hatching", "failed"]);
 /** Posts with something to sit or lie on, which an arrival snaps onto. */
 const FURNISHED: ReadonlySet<Post> = new Set(["sleep", "lounge", "seated"]);
 /** The ones Ryan has dismissed, who go to the lounge. */
-const RESTING: ReadonlySet<Mood> = new Set(["idle", "shipped", "asleep"]);
+const RESTING: ReadonlySet<Mood> = new Set(["idle", "asleep"]);
+/** How long a resident pops its champagne for once it's merged. */
+const POP_SECONDS = 3.5;
+const SPEED_SAIL = 0.9;
 
 export class Sim {
   readonly agents = new Map<string, Agent>();
@@ -206,6 +231,10 @@ export class Sim {
   /** Whether anyone is on stage, so the rest keep off it. */
   private pitching = false;
   private now = 0;
+  /** Deleted residents still sailing away, as they last were. */
+  private leaving = new Map<string, Resident>();
+  /** Ones whose boat has left the window, for the scene to let go of. */
+  private departed: string[] = [];
 
   setLayout(layout: Layout) {
     this.layout = layout;
@@ -218,6 +247,7 @@ export class Sim {
   }
 
   sync(residents: Resident[]) {
+    const before = this.residents;
     this.residents = new Map(residents.map((r) => [r.id, r]));
     this.pitching = residents.some((r) => r.mood === "shipping");
     const shipping = new Set(
@@ -229,10 +259,34 @@ export class Sim {
       if (!this.queue.includes(id)) this.queue.push(id);
     }
     if (this.queue[0] !== speaker) this.speakerSince = this.now;
-    for (const id of this.agents.keys()) {
-      if (!this.residents.has(id)) {
+    for (const [id, a] of this.agents) {
+      if (this.residents.has(id) || this.leaving.has(id)) continue;
+      for (const book of this.books()) book.delete(id);
+      // A merged one waiting by the lake leaves by boat; anyone else just goes.
+      const was = before.get(id);
+      if (was?.mood === "shipped" && this.canSail(a)) {
+        this.leaving.set(id, { ...was, selected: false });
+        a.voyage = "dock";
+      } else {
         this.agents.delete(id);
-        for (const book of this.books()) book.delete(id);
+      }
+    }
+    for (const r of residents) {
+      const a = this.agents.get(r.id);
+      // Deleting it was undone: off the boat, or the pier, and back.
+      if (a && this.leaving.delete(r.id)) {
+        a.voyage = null;
+        a.target = null;
+        this.setActivity(a, "pause");
+      }
+      const was = before.get(r.id)?.mood;
+      // Merged from the stage or from waiting to be merged: pop the cork.
+      if (
+        a &&
+        r.mood === "shipped" &&
+        (was === "shipping" || was === "needs_you")
+      ) {
+        a.popUntil = this.now + POP_SECONDS;
       }
     }
     // Parents first, so a new child can spawn beside its parent.
@@ -261,6 +315,11 @@ export class Sim {
       this.speakerSince = this.now;
     }
     for (const a of this.agents.values()) {
+      if (this.leaving.has(a.id)) {
+        this.voyage(a);
+        this.move(a, dt, a.activity === "sail" ? SPEED_SAIL : SPEED_STROLL);
+        continue;
+      }
       const r = this.residents.get(a.id);
       if (!r) continue;
       this.think(a, r);
@@ -286,6 +345,26 @@ export class Sim {
   napTaken(index: number): boolean {
     for (const i of this.naps.values()) if (i === index) return true;
     return false;
+  }
+
+  /** The residents deleted but still sailing away, as they last were. */
+  sailors(): Resident[] {
+    return [...this.leaving.values()];
+  }
+
+  /** Whether any boat is out, so the one at the pier isn't drawn too. */
+  sailing(): boolean {
+    for (const id of this.leaving.keys()) {
+      if (this.agents.get(id)?.activity === "sail") return true;
+    }
+    return false;
+  }
+
+  /** Those whose boat has left the window since the last call. */
+  takeDeparted(): string[] {
+    const out = this.departed;
+    this.departed = [];
+    return out;
   }
 
   /** Asleep on its ring in the pool, rather than wherever it dropped off. */
@@ -349,8 +428,11 @@ export class Sim {
 
   /** Waiting and pitching on the left, the rest on the right, if there's room. */
   private homeSide(mood: Mood): Side {
+    const lakeside = mood === "shipped" && !!this.layout?.lake;
     const want: Side =
-      mood === "needs_you" || mood === "shipping" ? "left" : "right";
+      mood === "needs_you" || mood === "shipping" || lakeside
+        ? "left"
+        : "right";
     return this.region(want) || !this.region(other(want)) ? want : other(want);
   }
 
@@ -363,6 +445,8 @@ export class Sim {
       if (RESTING.has(mood)) return this.layout?.lounge?.area ?? region;
       return region;
     }
+    const lake = this.layout?.lake;
+    if (mood === "shipped" && lake) return lake.shore;
     const pitch = this.layout?.pitch;
     if (!pitch || !this.pitching || mood === "shipping") return region;
     return { ...region, zMax: Math.max(region.zMin + 1, pitch.top) };
@@ -410,11 +494,8 @@ export class Sim {
       .map((o) => this.claimed(o));
     // The portal's doorway counts as taken, so nobody sets up in it.
     if (portal) others.push(portal, { x: portal.x, z: portal.z + 1.2 });
-    const furniture = side === "right" ? (this.layout?.obstacles ?? []) : [];
-    const blocks =
-      side === "right"
-        ? (this.layout?.blocks ?? []).map((b) => grow(b, 0.3))
-        : [];
+    const furniture = this.layout?.obstacles ?? [];
+    const blocks = (this.layout?.blocks ?? []).map((b) => grow(b, 0.3));
     // Drawn again when it lands on a block, which can be half the ground.
     const candidate = () => {
       let p = this.randomPoint(region, near, radius);
@@ -466,6 +547,8 @@ export class Sim {
       restUntil: this.now + rand(15, 45),
       chosenMood: null,
       aloft: 0,
+      popUntil: 0,
+      voyage: null,
     };
     this.place(a, r);
     return a;
@@ -601,6 +684,12 @@ export class Sim {
 
     this.release(a, r);
 
+    if (this.now < a.popUntil) {
+      a.target = null;
+      a.intent = null;
+      this.setActivity(a, "pop");
+      return;
+    }
     if (EGG.has(r.mood)) {
       a.target = null;
       this.setActivity(a, "egg");
@@ -663,6 +752,50 @@ export class Sim {
     } else {
       this.lounge(a, r, region);
     }
+  }
+
+  /** Whether a resident deleted now can take the boat rather than vanish. */
+  private canSail(a: Agent): boolean {
+    return (
+      !!this.layout?.lake &&
+      a.placed &&
+      a.side === "left" &&
+      a.activity !== "egg" &&
+      a.activity !== "portal_out" &&
+      a.activity !== "portal_in"
+    );
+  }
+
+  /** To the pier's foot, out along it to the boat, and away across the lake. */
+  private voyage(a: Agent) {
+    const lake = this.layout?.lake;
+    if (!lake) return this.depart(a);
+    if (a.activity === "sail") {
+      if (dist(a.pos, lake.exit) < 0.3) this.depart(a);
+      return;
+    }
+    if (a.voyage === "dock") {
+      // Blocked on the way, it makes for the pier's end from where it is.
+      if (dist(a.pos, lake.pierFoot) < 0.3 || this.stuck(a)) {
+        a.voyage = "pier";
+      } else {
+        this.walkTo(a, lake.pierFoot, "dock");
+        return;
+      }
+    }
+    if (dist(a.pos, lake.pierEnd) < 0.15) {
+      a.pos = { ...lake.pierEnd };
+      a.target = { ...lake.exit };
+      this.setActivity(a, "sail");
+    } else {
+      this.walkTo(a, lake.pierEnd, "dock");
+    }
+  }
+
+  private depart(a: Agent) {
+    this.agents.delete(a.id);
+    this.leaving.delete(a.id);
+    this.departed.push(a.id);
   }
 
   /**
@@ -880,7 +1013,7 @@ export class Sim {
     a.portalScale = 1;
 
     let wantFacing: number | null = null;
-    if (a.activity === "walk" && a.target) {
+    if ((a.activity === "walk" || a.activity === "sail") && a.target) {
       const dx = a.target.x - a.pos.x;
       const dz = a.target.z - a.pos.z;
       const d = Math.hypot(dx, dz);
@@ -899,7 +1032,8 @@ export class Sim {
       a.activity === "attention" ||
       a.activity === "pitch" ||
       a.activity === "seated" ||
-      a.activity === "chosen"
+      a.activity === "chosen" ||
+      a.activity === "pop"
     ) {
       wantFacing = 0;
     } else if (a.activity === "lounge") {
@@ -923,7 +1057,6 @@ export class Sim {
   /** The furniture in this agent's way, leaving out whatever it's walking to. */
   private obstacles(a: Agent): Obstacle[] {
     const all = this.layout?.obstacles ?? [];
-    if (a.side !== "right") return [];
     const goal = a.target;
     if (!goal) return all;
     return all.filter((o) => dist(goal, o) > this.clearance(a, o) + 0.1);
@@ -931,7 +1064,6 @@ export class Sim {
 
   /** The blocks in this agent's way, grown by its own girth. */
   private blocks(a: Agent): Region[] {
-    if (a.side !== "right") return [];
     const goal = a.target;
     const margin = a.size * 0.3;
     return (this.layout?.blocks ?? [])

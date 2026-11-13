@@ -3,7 +3,7 @@ import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
 import type { Resident } from "./residents";
 import type { Agent, Sim } from "./sim";
-import { Drink, FloatRing } from "./Scenery";
+import { Boat, Drink, FloatRing } from "./Scenery";
 import { hashString } from "./spec";
 import { STAGE_HEIGHT } from "./stage";
 import type {
@@ -15,6 +15,53 @@ import type {
   PropPart,
   Work,
 } from "./spec";
+
+/** Where the cork sits on a champagne bottle held from below. */
+const BOTTLE_TOP = 0.37;
+
+/** A bottle of champagne, its cork and the spray from popping it. */
+function Champagne({
+  cork,
+  spray,
+}: {
+  cork: React.RefObject<THREE.Mesh | null>;
+  spray: React.RefObject<THREE.Group | null>;
+}) {
+  const glass = "#1f5e3a";
+  const foil = "#e8c24a";
+  return (
+    <group>
+      <mesh position-y={0.1}>
+        <cylinderGeometry args={[0.06, 0.06, 0.2, 10]} />
+        <meshStandardMaterial color={glass} />
+      </mesh>
+      <mesh position-y={0.1}>
+        <cylinderGeometry args={[0.062, 0.062, 0.07, 10]} />
+        <meshStandardMaterial color="#fff8e6" />
+      </mesh>
+      <mesh position-y={0.235}>
+        <cylinderGeometry args={[0.024, 0.06, 0.07, 10]} />
+        <meshStandardMaterial color={glass} />
+      </mesh>
+      <mesh position-y={0.31}>
+        <cylinderGeometry args={[0.026, 0.026, 0.09, 8]} />
+        <meshStandardMaterial color={foil} />
+      </mesh>
+      <mesh ref={cork} position-y={BOTTLE_TOP}>
+        <cylinderGeometry args={[0.022, 0.018, 0.045, 8]} />
+        <meshStandardMaterial color="#d9b98a" />
+      </mesh>
+      <group ref={spray} visible={false}>
+        {Array.from({ length: 9 }, (_, i) => (
+          <mesh key={i}>
+            <sphereGeometry args={[0.028, 6, 5]} />
+            <meshBasicMaterial color={i % 3 ? "#fffbe8" : "#ffe9a0"} />
+          </mesh>
+        ))}
+      </group>
+    </group>
+  );
+}
 
 /** Where things sit on each body, in units of a top-level resident. */
 interface Dims {
@@ -718,6 +765,10 @@ export function Character({
   const pedestal = useRef<THREE.Group>(null);
   const crate = useRef<THREE.Group>(null);
   const drink = useRef<THREE.Group>(null);
+  const bottle = useRef<THREE.Group>(null);
+  const cork = useRef<THREE.Mesh>(null);
+  const spray = useRef<THREE.Group>(null);
+  const boat = useRef<THREE.Group>(null);
   const floatRing = useRef<THREE.Group>(null);
   const ring = useRef<THREE.Mesh>(null);
   const shadow = useRef<THREE.Mesh>(null);
@@ -778,6 +829,14 @@ export function Character({
     } else {
       root.current.rotation.z = 0;
     }
+    // Off across the lake, sat in its boat as it rocks on the water.
+    const sailing = a.activity === "sail";
+    boat.current!.visible = sailing;
+    if (sailing) {
+      root.current.position.y = 0.02 + Math.sin(t * 1.6) * 0.02;
+      root.current.rotation.z = Math.sin(t * 1.2) * 0.05;
+      fig.position.y = 0.16;
+    }
     const f = a.aloft;
     shadow.current!.scale.setScalar(1 - 0.45 * f);
     const sp = sparkles.current!;
@@ -834,7 +893,38 @@ export function Character({
     crate.current!.visible = carrying && !shipping;
     // A drink in hand on the lounger, sipped now and then.
     const lounging = a.activity === "lounge";
-    drink.current!.visible = lounging;
+    // Champagne once its PRs are ready to merge, opened once they're merged.
+    const champagne = resident.readyToMerge || mood === "shipped";
+    const popping = a.activity === "pop";
+    bottle.current!.visible = champagne;
+    drink.current!.visible = lounging && !champagne;
+    if (champagne) {
+      // The cork shoots up and off in the first moment of popping.
+      const c = cork.current!;
+      const e = local;
+      const corked = mood !== "shipped";
+      c.visible = corked || (popping && e < 1.4);
+      c.position.set(
+        popping ? e * 0.7 : 0,
+        BOTTLE_TOP + (popping ? e * 2.6 - e * e * 2.2 : 0),
+        0,
+      );
+      c.rotation.z = popping ? e * 9 : 0;
+      const sp = spray.current!;
+      sp.visible = popping;
+      if (popping) {
+        sp.children.forEach((m, i) => {
+          const p = (local * 1.6 + i / sp.children.length) % 1;
+          const angle = i * 2.4;
+          m.position.set(
+            Math.sin(angle) * p * 0.28 + p * 0.25,
+            BOTTLE_TOP + p * 0.75 - p * p * 0.55,
+            Math.cos(angle) * p * 0.2,
+          );
+          m.scale.setScalar(1.2 - p);
+        });
+      }
+    }
     const sip = lounging ? Math.max(0, Math.sin(t * 0.45) - 0.75) * 4 : 0;
     const handsBusy = working || shipping || carrying;
     if (heldProp.current) heldProp.current.visible = !handsBusy;
@@ -919,6 +1009,21 @@ export function Character({
         b.rotation.y = Math.sin(t * 0.45) > 0.6 ? Math.sin(t * 0.9) * 0.5 : 0;
         break;
       }
+      case "pop":
+        // Bouncing, the bottle held high and spraying, the other arm cheering.
+        b.position.y = Math.abs(Math.sin(t * 6)) * 0.08;
+        R.rotation.z = 2.3;
+        R.rotation.x = -0.3;
+        L.rotation.z = -2.6 + Math.sin(t * 8) * 0.2;
+        break;
+      case "sail": {
+        // Sat in the boat, feet up, waving goodbye with the bottle.
+        footL.current!.position.set(-0.11, 0.08, 0.2);
+        footR.current!.position.set(0.11, 0.08, 0.2);
+        R.rotation.z = 2.5 + Math.sin(t * 5) * 0.35;
+        L.rotation.x = -0.4;
+        break;
+      }
       case "pitch":
         // One hand sweeping up at the crowd, the other presenting the parcel.
         b.position.y = Math.abs(Math.sin(t * 2.6)) * 0.05;
@@ -980,6 +1085,15 @@ export function Character({
       eyes.current!.scale.x = 1;
       eyes.current!.scale.z = 1;
     }
+    // The bottle kept upright whatever its arm is doing, and tipped out over
+    // the crowd while it sprays.
+    if (champagne) {
+      bottle.current!.rotation.set(
+        -(R.rotation.x + fig.rotation.x),
+        0,
+        -R.rotation.z - (popping ? 0.6 : 0),
+      );
+    }
   });
 
   const hit = (e: ThreeEvent<MouseEvent>) => {
@@ -1020,6 +1134,9 @@ export function Character({
           depthWrite={false}
         />
       </mesh>
+      <group ref={boat} scale={1.1} visible={false}>
+        <Boat />
+      </group>
       <group
         ref={floatRing}
         position={[0, 0.1, -0.35]}
@@ -1114,6 +1231,9 @@ export function Character({
               <capsuleGeometry args={[0.065, 0.18, 3, 6]} />
               <Mat color={spec.body_color} />
             </mesh>
+            <group ref={bottle} position={[0, -0.3, 0.03]} visible={false}>
+              <Champagne cork={cork} spray={spray} />
+            </group>
             <group ref={drink} position={[0, -0.32, 0.03]} scale={1.4}>
               <Drink juice={spec.accent_color} />
             </group>

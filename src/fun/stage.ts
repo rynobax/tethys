@@ -5,6 +5,7 @@
  */
 
 import type {
+  Lake,
   Layout,
   Lounge,
   Obstacle,
@@ -40,6 +41,11 @@ export const STAGE_HEIGHT = 0.2;
 const CHAIR_WIDTH_PX = 140;
 const CHAIR_ROW_PX = 76;
 const CHAIR_ROWS = 2;
+/** How far a portal sits in from its meadow's edge by the panel. */
+const PORTAL_INSET = 1;
+/** Below this the left meadow is too narrow to give a corner to a lake. */
+const MIN_LAKE_WIDTH = 4;
+
 /** Below this a meadow is too short to split between two uses. */
 const MIN_ZONED_DEPTH = 12;
 
@@ -85,23 +91,36 @@ export function computeStage(
         };
   const left = region(visible.xMin + EDGE_MARGIN, panelX.xMin - PANEL_MARGIN);
   const right = region(panelX.xMax + PANEL_MARGIN, visible.xMax - EDGE_MARGIN);
-  const portal = (r: Region | null) =>
-    r ? { x: (r.xMin + r.xMax) / 2, z: r.zMin - 0.2 } : null;
+  // Each portal in its meadow's back corner by the panel, so the two face
+  // each other across it.
+  const portal = (r: Region | null, side: "left" | "right") =>
+    r
+      ? {
+          x: side === "left" ? r.xMax - PORTAL_INSET : r.xMin + PORTAL_INSET,
+          z: r.zMin - 0.2,
+        }
+      : null;
 
-  // The left meadow's bottom is the stage; waiting residents keep above it.
+  // The left meadow's bottom is the stage, its back corner away from the
+  // panel the lake; waiting residents keep to the rest.
   const stage = left ? pitch(left) : null;
+  const pond = left ? lake(left, visible) : null;
   const waiting = left && stage ? { ...left, zMax: stage.top } : left;
   const zones = rightZones(right);
+  const shore = pond && grow(pond.shore, 0.4);
   return {
     layout: {
       regions: { left, right },
-      portals: { left: portal(left), right: portal(right) },
-      attentionSlots: waiting ? attentionSlots(waiting) : [],
+      portals: { left: portal(left, "left"), right: portal(right, "right") },
+      attentionSlots: waiting
+        ? attentionSlots(waiting).filter((p) => !shore || !within(shore, p))
+        : [],
       pitch: stage,
+      lake: pond,
       ...zones,
       obstacles: obstacles(zones),
-      // Walked round, unless a sleeper is heading for a ring on it.
-      blocks: zones.lounge ? [zones.lounge.pool] : [],
+      // Walked round, unless heading for a ring on the pool or the boat.
+      blocks: [zones.lounge?.pool, pond?.water].filter((b) => !!b),
     },
     visible,
     panel: panelX,
@@ -237,6 +256,48 @@ function obstacles({
   return out;
 }
 
+/**
+ * The back corner of the left meadow away from the panel: water running off
+ * the window's edge, a pier out into it from the shore, and the shore round
+ * it where the merged wait to be deleted.
+ */
+function lake(region: Region, visible: Bounds): Lake | null {
+  const width = region.xMax - region.xMin;
+  if (width < MIN_LAKE_WIDTH) return null;
+  const water = {
+    xMin: visible.xMin - 2,
+    xMax: region.xMin + Math.min(4, width * 0.42),
+    zMin: region.zMin - 0.8,
+    zMax: region.zMin + 3.4,
+  };
+  const z = (water.zMin + water.zMax) / 2 + 0.5;
+  return {
+    water,
+    shore: {
+      xMin: region.xMin,
+      xMax: Math.min(region.xMax, water.xMax + 2.6),
+      zMin: region.zMin,
+      zMax: water.zMax + 2.2,
+    },
+    pierFoot: { x: water.xMax + 0.35, z },
+    pierEnd: { x: water.xMax - 1.2, z },
+    exit: { x: visible.xMin - 1.2, z: z - 0.4 },
+  };
+}
+
+function grow(r: Region, by: number): Region {
+  return {
+    xMin: r.xMin - by,
+    xMax: r.xMax + by,
+    zMin: r.zMin - by,
+    zMax: r.zMax + by,
+  };
+}
+
+function within(r: Region, p: Vec2) {
+  return p.x >= r.xMin && p.x <= r.xMax && p.z >= r.zMin && p.z <= r.zMax;
+}
+
 /** Lounger rows, far enough apart for a compact name tag over each. */
 const LOUNGER_ROW = 1.8;
 /** How far the lounger's root point sits from the pool's edge. */
@@ -287,10 +348,8 @@ function lounge(area: Region): Lounge {
     x: cx + (i % 2 ? 0.25 : -0.25) * half,
     z: pool.zMin + ((i + 0.5) * length) / FLOATS,
   }));
-  const parasols = [
-    { x: area.xMin + 0.35, z: area.zMin + 0.3 },
-    { x: area.xMax - 0.35, z: area.zMin + 0.3 },
-  ];
+  // In the back corner away from the portal.
+  const parasols = [{ x: area.xMax - 0.35, z: area.zMin + 0.3 }];
   return { area, pool, seats, tables, naps, parasols };
 }
 

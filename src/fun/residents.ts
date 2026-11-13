@@ -30,6 +30,8 @@ export interface Resident {
   progress: { done: number; total: number } | null;
   /** A few words beside the branch, e.g. the PRs being pitched. */
   note: string | null;
+  /** Shipping, and every PR approved and green: only the merge to go. */
+  readyToMerge: boolean;
 }
 
 export interface ResidentInputs {
@@ -108,6 +110,7 @@ export function toResidents(inputs: ResidentInputs): Resident[] {
       designed: raw !== undefined,
       progress: w.progress,
       note: noteOf(w),
+      readyToMerge: shipSignal(w) === "ready",
     };
   });
 }

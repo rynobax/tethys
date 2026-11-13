@@ -143,9 +143,19 @@ function FrameDriver() {
   return null;
 }
 
-function SimDriver({ sim }: { sim: Sim }) {
+function SimDriver({
+  sim,
+  onDeparted,
+}: {
+  sim: Sim;
+  /** Some deleted resident's boat has sailed off the window. */
+  onDeparted: () => void;
+}) {
   // Mounted before every Character, so they all pose the same step.
-  useFrame((_, delta) => sim.step(Math.min(delta, 0.1)));
+  useFrame((_, delta) => {
+    sim.step(Math.min(delta, 0.1));
+    if (sim.takeDeparted().length) onDeparted();
+  });
   return null;
 }
 
@@ -445,7 +455,15 @@ export default function FunWorld({
   useLayoutEffect(() => {
     if (stage) sim.setLayout(stage.layout);
   }, [sim, stage]);
-  useLayoutEffect(() => sim.sync(residents), [sim, residents]);
+  // Deleted but still sailing off: drawn as they last were until they're gone.
+  const [sailors, setSailors] = useState<Resident[]>([]);
+  useLayoutEffect(() => {
+    sim.sync(residents);
+    const next = sim.sailors();
+    setSailors((prev) => (prev.length || next.length ? next : prev));
+  }, [sim, residents]);
+  const onDeparted = useCallback(() => setSailors(sim.sailors()), [sim]);
+  const shown = useMemo(() => [...residents, ...sailors], [residents, sailors]);
 
   useEffect(() => {
     document.body.style.cursor = hovered ? "pointer" : "";
@@ -484,7 +502,7 @@ export default function FunWorld({
         <color attach="background" args={[env.ground]} />
         <Aim />
         <FrameDriver />
-        <SimDriver sim={sim} />
+        <SimDriver sim={sim} onDeparted={onDeparted} />
         {stage && (
           <Scenery
             stage={stage}
@@ -493,7 +511,7 @@ export default function FunWorld({
             sim={sim}
           />
         )}
-        {residents.map((r) => (
+        {shown.map((r) => (
           <Character
             key={r.id}
             resident={r}
@@ -521,13 +539,13 @@ export default function FunWorld({
         <DivineBeam sim={sim} selectedId={selectedId} voice={voice.current} />
         <LabelProjector
           sim={sim}
-          residents={residents}
+          residents={shown}
           labels={labels}
           stage={stage}
         />
       </Canvas>
       <div className="fun-labels">
-        {residents.map((r) => (
+        {shown.map((r) => (
           <Label
             key={r.id}
             resident={r}

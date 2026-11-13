@@ -3,7 +3,7 @@
  * Every mood on screen at once, with real designs, for iterating on the look.
  */
 import { mockIPC } from "@tauri-apps/api/mocks";
-import { StrictMode, useRef, useState } from "react";
+import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { GithubPrStatus, SessionInfo, Workspace } from "../types";
 import FunWorld from "./FunWorld";
@@ -340,21 +340,42 @@ mockIPC((cmd) => {
 function Preview() {
   const panelRef = useRef<HTMLElement>(null);
   const [selected, setSelected] = useState<string | null>("b");
-  const bySample = new Map(SAMPLES.map((s) => [s.id, s]));
+  const [samples, setSamples] = useState(SAMPLES);
+  // `?demo`: approved-and-green is merged after 3s, already-merged deleted
+  // after 5s, to watch the cork pop and the boat leave.
+  useEffect(() => {
+    if (!location.search.includes("demo")) return;
+    const merge = setTimeout(
+      () =>
+        setSamples((ss) =>
+          ss.map((s) => (s.id === "p" ? { ...s, mood: "shipped" } : s)),
+        ),
+      3000,
+    );
+    const remove = setTimeout(
+      () => setSamples((ss) => ss.filter((s) => s.id !== "j")),
+      5000,
+    );
+    return () => {
+      clearTimeout(merge);
+      clearTimeout(remove);
+    };
+  }, []);
+  const bySample = new Map(samples.map((s) => [s.id, s]));
   return (
     <div className="app fun">
       <FunWorld
-        workspaces={SAMPLES.map(workspace)}
+        workspaces={samples.map(workspace)}
         sessions={
           new Map(
-            SAMPLES.map((s) => [s.id, s.mood === "asleep" ? null : running]),
+            samples.map((s) => [s.id, s.mood === "asleep" ? null : running]),
           )
         }
         needsTurn={(w) => bySample.get(w.id)?.mood === "needs_you"}
         working={(w) => bySample.get(w.id)?.mood === "working"}
         selectedId={selected}
         menuActions={{
-          onDelete: (w) => console.log("delete", w.branch),
+          onDelete: (w) => setSamples((ss) => ss.filter((s) => s.id !== w.id)),
           onClearTurn: (w) => console.log("clear", w.branch),
           onStartShipping: (w) => console.log("ship", w.branch),
           onStopShipping: (w) => console.log("stop shipping", w.branch),

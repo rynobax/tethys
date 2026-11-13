@@ -1,7 +1,16 @@
 import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
-import type { Lounge, Pitch, Seat, Side, Sim, Vec2, Workshop } from "./sim";
+import type {
+  Lake,
+  Lounge,
+  Pitch,
+  Seat,
+  Side,
+  Sim,
+  Vec2,
+  Workshop,
+} from "./sim";
 import { STAGE_HEIGHT, type Stage } from "./stage";
 
 /** Everything about the look that isn't a resident. Swap it to reskin. */
@@ -101,21 +110,16 @@ function scatter(stage: Stage, side: Side): Decor {
   );
   const portal = stage.layout.portals[side];
 
-  // A treeline along the back, leaving the portal clear.
-  for (let x = xMin + 0.3; x < xMax; x += 0.7 + rng() * 0.6) {
-    if (portal && Math.abs(x - portal.x) < 1.1) continue;
-    decor.trees.push({
-      x,
-      z: v.zMin + 0.4 + rng() * (region.zMin - v.zMin - 0.6),
-      s: 0.8 + rng() * 0.6,
-      c: Math.floor(rng() * 3),
-    });
-  }
   // Nothing grows in the zones, where it'd be underfoot.
-  const { lounge, workshop, pitch } = stage.layout;
+  const { lounge, workshop, pitch, lake } = stage.layout;
   const zones = [
     lounge?.area,
     workshop?.area,
+    lake && {
+      ...lake.water,
+      xMax: lake.water.xMax + 0.4,
+      zMax: lake.water.zMax + 0.4,
+    },
     // The stage and the crowd in front of it.
     pitch && { ...pitch.stage, zMax: v.zMax },
   ];
@@ -123,6 +127,17 @@ function scatter(stage: Stage, side: Side): Decor {
     zones.some(
       (z) => z && p.x > z.xMin && p.x < z.xMax && p.z > z.zMin && p.z < z.zMax,
     );
+  // A treeline along the back, leaving the portal and the lake clear.
+  for (let x = xMin + 0.3; x < xMax; x += 0.7 + rng() * 0.6) {
+    const tree = {
+      x,
+      z: v.zMin + 0.4 + rng() * (region.zMin - v.zMin - 0.6),
+      s: 0.8 + rng() * 0.6,
+      c: Math.floor(rng() * 3),
+    };
+    if (portal && Math.abs(x - portal.x) < 1.1) continue;
+    if (!inZone(tree)) decor.trees.push(tree);
+  }
   // And a few down the outer edge.
   const outer = side === "left" ? xMin + 0.35 : xMax - 0.35;
   for (let z = region.zMin + 1; z < v.zMax; z += 1.6 + rng() * 1.8) {
@@ -189,7 +204,16 @@ function Tree({
   );
 }
 
-function Portal({ at, color }: { at: Vec2; color: string }) {
+/** A ring of stone and light, turned `turn` radians about y. */
+function Portal({
+  at,
+  color,
+  turn,
+}: {
+  at: Vec2;
+  color: string;
+  turn: number;
+}) {
   const swirl = useRef<THREE.Mesh>(null);
   const sparks = useRef<THREE.Group>(null);
   useFrame((state) => {
@@ -202,7 +226,7 @@ function Portal({ at, color }: { at: Vec2; color: string }) {
     if (sparks.current) sparks.current.rotation.z = -t * 0.9;
   });
   return (
-    <group position={[at.x, 0, at.z - 0.15]}>
+    <group position={[at.x, 0, at.z - 0.15]} rotation-y={turn}>
       {[-1, 1].map((s) => (
         <mesh key={s} position={[s * 0.5, 0.08, 0]}>
           <boxGeometry args={[0.26, 0.16, 0.22]} />
@@ -659,6 +683,177 @@ function LoungeArea({
   );
 }
 
+/** A little sailboat, its bow towards +z; a sailor sits amidships. */
+export function Boat() {
+  const hull = "#c8714a";
+  return (
+    <group>
+      <mesh position-y={0.08} scale={[1, 1, 2.2]}>
+        <cylinderGeometry args={[0.26, 0.17, 0.18, 10]} />
+        <meshStandardMaterial color={hull} flatShading />
+      </mesh>
+      <mesh position-y={0.175} scale={[1, 1, 2.2]}>
+        <torusGeometry args={[0.25, 0.03, 4, 14]} />
+        <meshStandardMaterial color="#f4ead8" flatShading />
+      </mesh>
+      <mesh position={[0, 0.65, 0.18]}>
+        <cylinderGeometry args={[0.018, 0.018, 1, 5]} />
+        <meshStandardMaterial color="#7a5236" flatShading />
+      </mesh>
+      {/* The sail, a flattened triangle off the mast. */}
+      <mesh position={[0, 0.66, 0]} scale={[0.05, 1, 1]}>
+        <coneGeometry args={[0.3, 0.8, 3]} />
+        <meshStandardMaterial color="#ffffff" flatShading />
+      </mesh>
+      <mesh position={[0, 1.18, 0.18]}>
+        <coneGeometry args={[0.07, 0.12, 3]} />
+        <meshStandardMaterial color="#ff5c8a" flatShading />
+      </mesh>
+    </group>
+  );
+}
+
+/**
+ * An irregular, unit-sized shoreline: a few slow waves round a circle, kept
+ * inside it so the water stays within the rectangle walkers keep out of.
+ * `grow` widens it into the sandy rim round the water.
+ */
+function shorelineShape(grow: number): THREE.Shape {
+  const shape = new THREE.Shape();
+  const steps = 64;
+  for (let i = 0; i <= steps; i++) {
+    const a = (i / steps) * Math.PI * 2;
+    const r =
+      0.86 +
+      grow +
+      Math.sin(a * 2 + 0.6) * 0.06 +
+      Math.sin(a * 3 + 2.1) * 0.05 +
+      Math.sin(a * 5 + 0.3) * 0.025;
+    // Shape y becomes world -z once laid flat.
+    const x = Math.cos(a) * r;
+    const y = -Math.sin(a) * r;
+    if (i === 0) shape.moveTo(x, y);
+    else shape.lineTo(x, y);
+  }
+  return shape;
+}
+
+/**
+ * Water running off the window's edge with a sandy rim, lily pads, reeds, and
+ * a pier out into it with a boat waiting at the end.
+ */
+function LakeArea({
+  lake,
+  env,
+  sim,
+}: {
+  lake: Lake;
+  env: Environment;
+  sim: Sim;
+}) {
+  const boat = useRef<THREE.Group>(null);
+  const water = useRef<THREE.MeshStandardMaterial>(null);
+  useFrame((state) => {
+    const t = state.clock.elapsedTime;
+    const b = boat.current;
+    if (b) {
+      b.visible = !sim.sailing();
+      b.position.y = Math.sin(t * 1.4) * 0.015;
+      b.rotation.z = Math.sin(t * 1.1) * 0.04;
+    }
+    if (water.current) {
+      water.current.emissiveIntensity =
+        env.waterGlow * 0.5 * (1 + Math.sin(t * 0.9) * 0.15);
+    }
+  });
+  const { water: w, pierFoot, pierEnd } = lake;
+  const cx = (w.xMin + w.xMax) / 2;
+  const cz = (w.zMin + w.zMax) / 2;
+  const rx = (w.xMax - w.xMin) / 2;
+  const rz = (w.zMax - w.zMin) / 2;
+  const [shoreline, sand] = useMemo(
+    () => [shorelineShape(0), shorelineShape(0.12)],
+    [],
+  );
+  const pierLength = pierFoot.x - pierEnd.x;
+  const posts = Math.max(2, Math.round(pierLength / 0.5));
+  return (
+    <>
+      <mesh
+        rotation-x={-Math.PI / 2}
+        position={[cx, 0.006, cz]}
+        scale={[rx, rz, 1]}
+      >
+        <shapeGeometry args={[sand]} />
+        <meshStandardMaterial color="#e3cf9a" />
+      </mesh>
+      <mesh
+        rotation-x={-Math.PI / 2}
+        position={[cx, 0.012, cz]}
+        scale={[rx, rz, 1]}
+      >
+        <shapeGeometry args={[shoreline]} />
+        <meshStandardMaterial
+          ref={water}
+          color={env.water}
+          emissive={env.water}
+          emissiveIntensity={env.waterGlow * 0.5}
+        />
+      </mesh>
+      {[
+        [0.55, -0.35],
+        [0.7, 0.45],
+        [0.35, 0.55],
+      ].map(([fx, fz], i) => (
+        <mesh
+          key={i}
+          rotation-x={-Math.PI / 2}
+          position={[cx + fx * rx, 0.016, cz + fz * rz]}
+        >
+          <circleGeometry args={[0.14, 9, 0.4, Math.PI * 1.8]} />
+          <meshStandardMaterial color="#5fae5a" side={THREE.DoubleSide} />
+        </mesh>
+      ))}
+      {[-0.7, -0.55, -0.4, 0.75, 0.88].map((f, i) => (
+        <mesh
+          key={i}
+          position={[cx + Math.sqrt(1 - f * f) * rx - 0.1, 0.18, cz + f * rz]}
+          rotation-z={(i % 3) * 0.12 - 0.1}
+        >
+          <cylinderGeometry args={[0.012, 0.016, 0.36, 4]} />
+          <meshStandardMaterial color="#6f9a3c" flatShading />
+        </mesh>
+      ))}
+      {/* The pier: planks on posts, from the shore out over the water. */}
+      <mesh position={[(pierFoot.x + pierEnd.x) / 2, 0.07, pierEnd.z]}>
+        <boxGeometry args={[pierLength + 0.3, 0.04, 0.42]} />
+        <meshStandardMaterial color="#a77b50" flatShading />
+      </mesh>
+      {Array.from({ length: posts }, (_, i) =>
+        [-0.19, 0.19].map((dz) => (
+          <mesh
+            key={`${i}${dz}`}
+            position={[
+              pierEnd.x + (i / (posts - 1)) * pierLength,
+              0.05,
+              pierEnd.z + dz,
+            ]}
+          >
+            <cylinderGeometry args={[0.03, 0.03, 0.14, 5]} />
+            <meshStandardMaterial color="#7a5236" flatShading />
+          </mesh>
+        )),
+      )}
+      {/* Moored alongside the pier's end, bow out to the open water. */}
+      <group position={[pierEnd.x - 0.2, 0.02, pierEnd.z + 0.45]}>
+        <group ref={boat} rotation-y={-Math.PI / 2} scale={0.75}>
+          <Boat />
+        </group>
+      </group>
+    </>
+  );
+}
+
 /** A paved yard, two whiteboards along the back, and two piles of crates. */
 function WorkshopArea({ workshop }: { workshop: Workshop }) {
   return (
@@ -782,7 +977,7 @@ export function Scenery({
   pitching: boolean;
   sim: Sim;
 }) {
-  const { lounge, workshop, pitch } = stage.layout;
+  const { lounge, workshop, pitch, lake } = stage.layout;
   const decor = useMemo(
     () => (["left", "right"] as const).map((side) => scatter(stage, side)),
     [stage],
@@ -853,10 +1048,15 @@ export function Scenery({
       ))}
       {(["left", "right"] as const).map((side) => {
         const at = stage.layout.portals[side];
-        return at ? <Portal key={side} at={at} color={env.portal} /> : null;
+        // Half turned towards the middle, so the two face each other.
+        const turn = ((side === "left" ? 1 : -1) * Math.PI) / 4;
+        return at ? (
+          <Portal key={side} at={at} color={env.portal} turn={turn} />
+        ) : null;
       })}
       {lounge && <LoungeArea lounge={lounge} env={env} sim={sim} />}
       {workshop && <WorkshopArea workshop={workshop} />}
+      {lake && <LakeArea lake={lake} env={env} sim={sim} />}
       {pitching && pitch && <PitchArea pitch={pitch} env={env} sim={sim} />}
       {env.fireflies && <Fireflies stage={stage} />}
     </>
