@@ -928,50 +928,26 @@ function WorkspaceDetail({
             <h2>
               <code>{workspace.branch}</code>
             </h2>
-            <div className="actions">
-              <BinaryMenu
-                current={workspace.agent_binary ?? AGENT_CHOICES[0].binary}
-                disabled={busy}
-                onSwitch={switchBinary}
-              />
-              <button type="button" onClick={() => setShowInfo(true)}>
-                Info
-              </button>
-              <button
-                type="button"
-                onClick={() => setAddingRepo(true)}
-                disabled={availableRepos.length === 0 || addRepoBusy}
-                title={
-                  addRepoBusy
-                    ? "Already adding a repo to this workspace"
-                    : availableRepos.length === 0
-                      ? "Every repo in your registry is already in this workspace"
-                      : "Add another repo's worktree to this workspace"
-                }
-              >
-                Add repo
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  api
-                    .openInVscode(workspace.id)
-                    .catch((e) => setError(String(e)))
-                }
-                disabled={workspace.repo_links.length === 0}
-                title="Open this workspace in VS Code, reusing the existing window"
-              >
-                Open in VS Code
-              </button>
-              <button
-                type="button"
-                className="danger"
-                onClick={onRequestDelete}
-                disabled={busy}
-              >
-                Delete
-              </button>
-            </div>
+            <WorkspaceMenu
+              currentBinary={workspace.agent_binary ?? AGENT_CHOICES[0].binary}
+              busy={busy}
+              onSwitch={switchBinary}
+              onInfo={() => setShowInfo(true)}
+              onAddRepo={
+                availableRepos.length === 0 || addRepoBusy
+                  ? null
+                  : () => setAddingRepo(true)
+              }
+              onOpenInVscode={
+                workspace.repo_links.length === 0
+                  ? null
+                  : () =>
+                      api
+                        .openInVscode(workspace.id)
+                        .catch((e) => setError(String(e)))
+              }
+              onDelete={onRequestDelete}
+            />
           </div>
         </header>
         {showInfo && (
@@ -1106,14 +1082,22 @@ function WorkspaceDetail({
   );
 }
 
-function BinaryMenu({
-  current,
-  disabled,
+function WorkspaceMenu({
+  currentBinary,
+  busy,
   onSwitch,
+  onInfo,
+  onAddRepo,
+  onOpenInVscode,
+  onDelete,
 }: {
-  current: string;
-  disabled: boolean;
+  currentBinary: string;
+  busy: boolean;
   onSwitch: (agent: Agent, binary: string) => void;
+  onInfo: () => void;
+  onAddRepo: (() => void) | null;
+  onOpenInVscode: (() => void) | null;
+  onDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -1129,35 +1113,58 @@ function BinaryMenu({
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
+  const item = (
+    label: string,
+    onClick: (() => void) | null,
+    danger = false,
+  ) => (
+    <button
+      key={label}
+      type="button"
+      role="menuitem"
+      className={danger ? "danger" : undefined}
+      disabled={!onClick}
+      onClick={() => {
+        setOpen(false);
+        onClick?.();
+      }}
+    >
+      {label}
+    </button>
+  );
+
   return (
-    <div className="binary-menu-wrap" ref={wrapRef}>
+    <div className="workspace-menu-wrap" ref={wrapRef}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        disabled={disabled}
         aria-expanded={open}
-        title="The agent binary this workspace's session runs under. Switching restarts the session; the conversation carries over between binaries of the same agent."
+        aria-label="Workspace actions"
       >
-        <code>{current}</code>
-        <span className="caret">▾</span>
+        ⋯
       </button>
       {open && (
-        <div className="binary-menu" role="menu">
-          <div className="context-menu-label">Run with</div>
-          {AGENT_CHOICES.map(({ binary, agent }) => (
-            <button
-              key={binary}
-              type="button"
-              role="menuitem"
-              disabled={binary === current}
-              onClick={() => {
-                setOpen(false);
-                onSwitch(agent, binary);
-              }}
-            >
-              {binary === current ? `${binary} ✓` : binary}
-            </button>
-          ))}
+        <div className="workspace-menu" role="menu">
+          <div
+            className="context-menu-label"
+            title="Switching restarts the session; the conversation carries over between binaries of the same agent."
+          >
+            Run with
+          </div>
+          {AGENT_CHOICES.map(({ binary, agent }) =>
+            item(
+              binary === currentBinary ? `${binary} ✓` : binary,
+              busy || binary === currentBinary
+                ? null
+                : () => onSwitch(agent, binary),
+            ),
+          )}
+          <div className="context-menu-sep" />
+          {item("Info", onInfo)}
+          {item("Add repo", onAddRepo)}
+          {item("Open in VS Code", onOpenInVscode)}
+          <div className="context-menu-sep" />
+          {item("Delete", busy ? null : onDelete, true)}
         </div>
       )}
     </div>

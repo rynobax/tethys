@@ -1430,27 +1430,15 @@ button.danger.primary:hover:not(:disabled) {
   flex-shrink: 0;
 }
 
-.binary-menu-wrap {
+.workspace-menu-wrap {
   position: relative;
   display: inline-flex;
 }
 
-.binary-menu-wrap > button code {
-  padding: 0;
-  background: transparent;
-  font-size: 12px;
-}
-
-.binary-menu-wrap .caret {
-  font-size: 9px;
-  opacity: 0.6;
-  margin-left: 4px;
-}
-
-.binary-menu {
+.workspace-menu {
   position: absolute;
   top: calc(100% + 4px);
-  left: 0;
+  right: 0;
   z-index: 20;
   min-width: 180px;
   background: var(--bg);
@@ -1463,7 +1451,7 @@ button.danger.primary:hover:not(:disabled) {
   gap: 2px;
 }
 
-.binary-menu button {
+.workspace-menu button {
   background: transparent;
   border: none;
   padding: 6px 10px;
@@ -1474,13 +1462,17 @@ button.danger.primary:hover:not(:disabled) {
   cursor: pointer;
 }
 
-.binary-menu button:hover:not(:disabled) {
+.workspace-menu button:hover:not(:disabled) {
   background: var(--selected-bg);
 }
 
-.binary-menu button:disabled {
+.workspace-menu button:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+.workspace-menu button.danger {
+  color: var(--danger);
 }
 
 .info-modal {
