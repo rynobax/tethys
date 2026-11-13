@@ -7,6 +7,10 @@
 //!
 //! Nudges are edge-triggered off the poller's old → new status, so a PR that
 //! stays red isn't Nudged again every tick; a push that goes red again is.
+//!
+//! Asking for review is Ryan saying the work is done, so a workspace whose
+//! open PRs have all come to have a reviewer starts Shipping by itself, on the
+//! tick the last of them got one.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,7 +22,7 @@ use crate::agent::Agent;
 use crate::agent_bin::AgentBins;
 use crate::error::{AppError, AppResult};
 use crate::github::pr_status::StatusTransition;
-use crate::github::status::{ChecksRollup, MergeQueueState, PrState};
+use crate::github::status::{ChecksRollup, MergeQueueState, PrState, ReviewDecision};
 use crate::github::GithubPrStatus;
 use crate::mcp::McpLaunch;
 use crate::paths::Paths;
@@ -156,8 +160,62 @@ pub fn react(state: &mut AppState, transitions: &[StatusTransition]) -> Reaction
             reaction.nudged.push(ws.id.clone());
         }
     }
-    reaction.moved = settle(state);
+    for ws in state.workspaces.iter_mut() {
+        if let Some(nudged) = auto_ship(ws, transitions) {
+            reaction.moved.push(ws.id.clone());
+            if nudged {
+                reaction.nudged.push(ws.id.clone());
+            }
+        }
+    }
+    reaction.moved.extend(settle(state));
     reaction
+}
+
+/// The tile's "no reviewer", inverted: someone has been asked, or has already
+/// reviewed it — changes requested counts.
+fn has_reviewer(s: &GithubPrStatus) -> bool {
+    s.review_requested
+        || !matches!(s.review_decision, ReviewDecision::None | ReviewDecision::ReviewRequired)
+}
+
+/// Ships every open PR once each has a reviewer, if one of them just got its
+/// first. Only a real edge counts: a PR first seen with a reviewer (attached by
+/// hand, or opened with one) has no "before", and a workspace taken out of
+/// Shipping stays out until a PR is asked about again. Returns whether
+/// starting queued a Nudge, `None` if it didn't ship.
+fn auto_ship(ws: &mut Workspace, transitions: &[StatusTransition]) -> Option<bool> {
+    if ws.deleted_at.is_some() || ws.shipment.is_some() {
+        return None;
+    }
+    let just_asked = transitions
+        .iter()
+        .filter(|t| t.workspace_id == ws.id)
+        .any(|t| match (&t.old, &t.new) {
+            (Some(old), Some(new)) => !has_reviewer(old) && has_reviewer(new),
+            _ => false,
+        });
+    if !just_asked {
+        return None;
+    }
+    let open = open_prs(ws);
+    let all_asked = !open.is_empty()
+        && open.iter().all(|p| {
+            ws.tracked_pr(p)
+                .and_then(|t| t.status.as_ref())
+                .is_some_and(has_reviewer)
+        });
+    if !all_asked {
+        return None;
+    }
+    info!(workspace = %ws.id, "every open PR has a reviewer; shipping");
+    match start(ws, open) {
+        Ok(nudged) => Some(nudged),
+        Err(e) => {
+            warn!(workspace = %ws.id, error = %e, "couldn't auto-ship");
+            None
+        }
+    }
 }
 
 /// Settles every workspace; returns the ones it moved.
@@ -224,12 +282,8 @@ fn next_shipment(ws: &Workspace, prs: &[PrRef]) -> Option<Shipment> {
     }
 }
 
-/// Puts a workspace in Shipping. An empty `prs` means its only open PR, which
-/// must then be unambiguous. Returns whether a Nudge was queued for what's
-/// already wrong.
-pub fn start(ws: &mut Workspace, prs: Vec<PrRef>) -> AppResult<bool> {
-    let open: Vec<PrRef> = ws
-        .repo_links
+fn open_prs(ws: &Workspace) -> Vec<PrRef> {
+    ws.repo_links
         .iter()
         .flat_map(|link| {
             link.prs
@@ -240,7 +294,14 @@ pub fn start(ws: &mut Workspace, prs: Vec<PrRef>) -> AppResult<bool> {
                     number: t.number,
                 })
         })
-        .collect();
+        .collect()
+}
+
+/// Puts a workspace in Shipping. An empty `prs` means its only open PR, which
+/// must then be unambiguous. Returns whether a Nudge was queued for what's
+/// already wrong.
+pub fn start(ws: &mut Workspace, prs: Vec<PrRef>) -> AppResult<bool> {
+    let open = open_prs(ws);
     let prs = if prs.is_empty() {
         match open.as_slice() {
             [] => {
@@ -550,5 +611,73 @@ mod tests {
         let mut ws = workspace_with(&[status(1, |s| s.checks = ChecksRollup::Failure)]);
         assert!(start(&mut ws, Vec::new()).unwrap());
         assert_eq!(ws.pending_messages.len(), 1);
+    }
+
+    fn asked(number: u32) -> GithubPrStatus {
+        status(number, |s| {
+            s.review_requested = true;
+            s.review_decision = ReviewDecision::ReviewRequired;
+        })
+    }
+
+    #[test]
+    fn asking_for_review_on_the_only_pr_ships_it() {
+        let mut state = AppState {
+            workspaces: vec![workspace_with(&[asked(1)])],
+            ..Default::default()
+        };
+        let reaction = react(&mut state, &[transition(1, status(1, |_| {}), asked(1))]);
+        assert_eq!(reaction.moved, vec!["ws".to_string()]);
+        assert_eq!(state.workspaces[0].shipping_prs(), &[pr(1)]);
+    }
+
+    #[test]
+    fn it_waits_until_every_open_pr_has_a_reviewer() {
+        let mut state = AppState {
+            workspaces: vec![workspace_with(&[
+                asked(1),
+                status(2, |_| {}),
+                status(3, |s| s.state = PrState::Merged),
+            ])],
+            ..Default::default()
+        };
+        react(&mut state, &[transition(1, status(1, |_| {}), asked(1))]);
+        assert_eq!(state.workspaces[0].shipment, None);
+
+        // An approval counts as much as a request.
+        let approved = status(2, |s| s.review_decision = ReviewDecision::Approved);
+        state.workspaces[0].repo_links[0].track(2, Some(approved.clone()));
+        react(&mut state, &[transition(2, status(2, |_| {}), approved)]);
+        assert_eq!(state.workspaces[0].shipping_prs(), &[pr(1), pr(2)]);
+    }
+
+    #[test]
+    fn a_reviewer_already_there_is_not_an_edge() {
+        let mut state = AppState {
+            workspaces: vec![workspace_with(&[asked(1)])],
+            ..Default::default()
+        };
+        // Taken out of Shipping by hand, then something else about the PR moves.
+        let red = status(1, |s| {
+            s.review_requested = true;
+            s.checks = ChecksRollup::Failure;
+        });
+        react(&mut state, &[transition(1, asked(1), red)]);
+        assert_eq!(state.workspaces[0].shipment, None);
+    }
+
+    #[test]
+    fn auto_shipping_a_red_pr_nudges_it() {
+        let red = status(1, |s| {
+            s.review_requested = true;
+            s.checks = ChecksRollup::Failure;
+        });
+        let mut state = AppState {
+            workspaces: vec![workspace_with(std::slice::from_ref(&red))],
+            ..Default::default()
+        };
+        let reaction = react(&mut state, &[transition(1, status(1, |_| {}), red)]);
+        assert_eq!(reaction.nudged, vec!["ws".to_string()]);
+        assert_eq!(state.workspaces[0].pending_messages.len(), 1);
     }
 }
