@@ -11,7 +11,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import { ContextMenu, type WorkspaceMenuActions } from "../Sidebar";
 import { useTheme } from "../theme";
-import type { SessionInfo, Workspace, WorkspaceId } from "../types";
+import type { Folder, SessionInfo, Workspace, WorkspaceId } from "../types";
 import { ANIMALS, type AnimalName } from "./animals";
 import { YOUNG_HEAD } from "./animals/rig";
 import {
@@ -24,6 +24,7 @@ import {
   type Voice,
 } from "./Character";
 import { allocate, loadAnimals, sameAnimals, saveAnimals } from "./family";
+import { Houses } from "./Houses";
 import { toResidents, type Resident } from "./residents";
 import { DUSK, MEADOW, Scenery, type Environment } from "./Scenery";
 import { Sim, type Activity } from "./sim";
@@ -48,6 +49,9 @@ export interface FunWorldProps {
   selectedId: WorkspaceId | null;
   /** Null when the ground is clicked, to clear the selection. */
   onSelect: (id: WorkspaceId | null) => void;
+  /** In the sidebar's order: a house each, shut while the folder is. */
+  folders: Folder[];
+  onSetFolderCollapsed: (id: Folder["id"], collapsed: boolean) => void;
   /** The sidebar's context menu actions, for the same menu on a resident. */
   menuActions: WorkspaceMenuActions;
   /** The terminal panel; the meadows are whatever it leaves either side. */
@@ -90,7 +94,10 @@ function useAnimals(
   return animals;
 }
 
-function useStage(panelRef: RefObject<HTMLElement | null>): Stage | null {
+function useStage(
+  panelRef: RefObject<HTMLElement | null>,
+  folders: number,
+): Stage | null {
   const [stage, setStage] = useState<Stage | null>(null);
   useLayoutEffect(() => {
     const measure = () => {
@@ -100,10 +107,12 @@ function useStage(panelRef: RefObject<HTMLElement | null>): Stage | null {
       const panel = panelRef.current?.getBoundingClientRect();
       if (!panel) return;
       setStage(
-        computeStage(window.innerWidth, window.innerHeight, {
-          left: panel.left,
-          right: panel.right,
-        }),
+        computeStage(
+          window.innerWidth,
+          window.innerHeight,
+          { left: panel.left, right: panel.right },
+          folders,
+        ),
       );
     };
     const observer = new ResizeObserver(measure);
@@ -124,7 +133,7 @@ function useStage(panelRef: RefObject<HTMLElement | null>): Stage | null {
       observer.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [panelRef]);
+  }, [panelRef, folders]);
   return stage;
 }
 
@@ -415,6 +424,8 @@ function LabelProjector({
       x = clamp(x, tag);
       el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`;
       el.style.opacity = String(a.portalScale);
+      // Indoors, its tag goes in with it.
+      el.style.visibility = a.portalScale < 0.02 ? "hidden" : "";
       // Sitting about, a resident gets a smaller tag so more fit side by side.
       el.classList.toggle("compact", COMPACT.has(a.activity));
     }
@@ -481,12 +492,14 @@ export default function FunWorld({
   working,
   selectedId,
   onSelect,
+  folders,
+  onSetFolderCollapsed,
   menuActions,
   panelRef,
   onManualClock,
 }: FunWorldProps) {
   const animals = useAnimals(workspaces);
-  const stage = useStage(panelRef);
+  const stage = useStage(panelRef, folders.length);
   const env = useEnvironment();
   const sim = useMemo(() => new Sim(), []);
   const labels = useRef(new Map<string, HTMLDivElement>());
@@ -518,8 +531,9 @@ export default function FunWorld({
         working,
         selectedId,
         animals,
+        folders,
       }),
-    [workspaces, sessions, needsTurn, working, selectedId, animals],
+    [workspaces, sessions, needsTurn, working, selectedId, animals, folders],
   );
 
   // Layout first, so new residents spawn inside today's meadows.
@@ -582,7 +596,11 @@ export default function FunWorld({
           <Scenery
             stage={stage}
             env={env}
-            pitching={residents.some((r) => r.mood === "shipping")}
+            pitching={residents.some(
+              (r) =>
+                r.mood === "shipping" &&
+                (r.home === null || !stage.layout.houses[r.home]),
+            )}
             sim={sim}
           />
         )}
@@ -595,6 +613,14 @@ export default function FunWorld({
             voice={voice.current}
           />
         ))}
+        {stage && (
+          <Houses
+            houses={stage.layout.houses}
+            folders={folders}
+            sim={sim}
+            onToggle={(f) => onSetFolderCollapsed(f.id, !f.collapsed)}
+          />
+        )}
         <DivineBeam sim={sim} selectedId={selectedId} voice={voice.current} />
         <LabelProjector
           sim={sim}

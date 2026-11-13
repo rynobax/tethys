@@ -48,6 +48,18 @@ export interface Layout {
   blocks: Region[];
   /** The top of the left meadow, where merged residents wait to be deleted. */
   lake: Lake | null;
+  /** Down the left meadow's outer edge, one per folder in order, as fit. */
+  houses: House[];
+  /** The ground the houses take, which nobody waits on. */
+  street: Region | null;
+}
+
+/** A folder's house: just its front, facing the viewer. */
+export interface House {
+  /** The middle of the front's base. */
+  front: Vec2;
+  /** On the step, where its folk go in and come out. */
+  door: Vec2;
 }
 
 /** Water off the window's edge, with a pier out into it and a boat at the end. */
@@ -177,7 +189,11 @@ export type Activity =
   /** A parent in its rocking chair, stitching its quilt. */
   | "quilt"
   /** A parent up on its chair, cheering a task just done. */
-  | "cheer";
+  | "cheer"
+  /** Its folder shut: going in at its house's door, inside, and back out. */
+  | "home_in"
+  | "home"
+  | "home_out";
 
 type Post =
   | "attention"
@@ -190,7 +206,7 @@ type Post =
   | "garden"
   | "queue"
   | "quilt";
-type Intent = "wander" | "portal" | "store" | "dock" | Post;
+type Intent = "wander" | "portal" | "store" | "dock" | "home" | Post;
 
 /** What a working resident is busy with, for a while. */
 export type Task = "station" | "garden" | "board";
@@ -239,6 +255,8 @@ export interface Agent {
   popUntil: number;
   /** Cheering on its chair until then, a task just done. */
   cheerUntil: number;
+  /** The house it's inside, if it is. */
+  indoors: number | null;
   /** Deleted and on its way out: to the pier's foot, then along it. */
   voyage: "dock" | "pier" | null;
 }
@@ -277,6 +295,8 @@ const FURNISHED: ReadonlySet<Post> = new Set([
 ]);
 /** Moods a parent spends quilting; the rest send it where they always do. */
 const QUILTING: ReadonlySet<Mood> = new Set(["idle", "working"]);
+/** Going in at a door, inside, or coming out: nobody to bump into. */
+const INDOORS: ReadonlySet<Activity> = new Set(["home_in", "home", "home_out"]);
 /** How long a parent cheers each task done. */
 const CHEER_SECONDS = 2.6;
 /** The ones Ryan has dismissed, who go to the lounge. */
@@ -352,10 +372,10 @@ export class Sim {
   sync(residents: Resident[]) {
     const before = this.residents;
     this.residents = new Map(residents.map((r) => [r.id, r]));
-    this.pitching = residents.some((r) => r.mood === "shipping");
-    const shipping = new Set(
-      residents.filter((r) => r.mood === "shipping").map((r) => r.id),
-    );
+    // One gone home is off the stage and out of the queue to pitch.
+    const pitches = (r: Resident) => r.mood === "shipping" && !this.houseFor(r);
+    this.pitching = residents.some(pitches);
+    const shipping = new Set(residents.filter(pitches).map((r) => r.id));
     const speaker = this.queue[0];
     this.queue = this.queue.filter((id) => shipping.has(id));
     for (const id of [...shipping].sort()) {
@@ -548,10 +568,16 @@ export class Sim {
     }
     const lake = this.layout?.lake;
     if (mood === "shipped" && lake) return lake.shore;
+    // Off the street, so nobody stands about in front of the houses.
+    const street = this.layout?.street;
+    const open =
+      street && street.xMax < region.xMax - 1
+        ? { ...region, xMin: Math.max(region.xMin, street.xMax) }
+        : region;
     const pitch = this.layout?.pitch;
-    if (!pitch || !this.pitching || mood === "shipping") return region;
+    if (!pitch || !this.pitching || mood === "shipping") return open;
     const top = this.stageNow()!.zMin - 0.4;
-    return { ...region, zMax: Math.max(region.zMin + 1, top) };
+    return { ...open, zMax: Math.max(open.zMin + 1, top) };
   }
 
   private randomPoint(
@@ -650,6 +676,7 @@ export class Sim {
       aloft: 0,
       popUntil: 0,
       cheerUntil: 0,
+      indoors: null,
       voyage: null,
     };
     this.place(a, r);
@@ -795,6 +822,7 @@ export class Sim {
     }
 
     this.release(a, r);
+    if (this.homeward(a, r)) return;
 
     if (this.now < a.popUntil) {
       a.target = null;
@@ -1061,6 +1089,76 @@ export class Sim {
     return i === undefined ? null : dock[i];
   }
 
+  /** Its folder's house, when the folder is shut and the house is out. */
+  private houseFor(r: Resident): House | undefined {
+    return r.home === null ? undefined : this.layout?.houses[r.home];
+  }
+
+  /**
+   * Its folder shut: in at its house's door and out of sight, letting go of
+   * everything. Opened, out the door again and off to wherever it belongs.
+   * False when none of that is going on.
+   */
+  private homeward(a: Agent, r: Resident): boolean {
+    const house = this.houseFor(r);
+    if (a.activity === "home_out") {
+      if (this.now - a.since >= PORTAL_SECONDS) this.pause(a, 0.2, 0.6);
+      return true;
+    }
+    if (a.indoors !== null && (!house || r.home !== a.indoors)) {
+      const door =
+        this.layout?.houses[a.indoors]?.door ?? this.layout?.houses[0]?.door;
+      a.indoors = null;
+      a.target = null;
+      a.spot = null;
+      if (door) {
+        a.side = "left";
+        a.pos = { x: door.x, z: door.z };
+        a.facing = 0;
+        this.setActivity(a, "home_out");
+        return true;
+      }
+      a.placed = false;
+      this.place(a, r);
+      return false;
+    }
+    if (!house) return false;
+    for (const book of this.books()) book.delete(a.id);
+    a.task = null;
+    a.chore = null;
+    a.carrying = null;
+    a.spot = null;
+    if (a.activity === "home") return true;
+    if (a.activity === "home_in") {
+      if (this.now - a.since >= PORTAL_SECONDS) {
+        a.indoors = r.home;
+        this.setActivity(a, "home");
+      }
+      return true;
+    }
+    if (a.side !== "left") {
+      this.toPortal(a);
+      return true;
+    }
+    // An egg can't walk: it's simply indoors.
+    const egg = EGG.has(r.mood);
+    const there = dist(a.pos, house.door);
+    if (egg || there < ARRIVE || (this.stuck(a) && there < 1)) {
+      a.target = null;
+      a.pos = { x: house.door.x, z: house.door.z };
+      a.facing = Math.PI;
+      if (egg) {
+        a.indoors = r.home;
+        this.setActivity(a, "home");
+      } else {
+        this.setActivity(a, "home_in");
+      }
+      return true;
+    }
+    this.walkTo(a, house.door, "home");
+    return true;
+  }
+
   /** A parent's place on the porch, claiming a free one if it has none. */
   private quiltingPlace(a: Agent, r: Resident): QuiltingPlace | null {
     const porch = this.layout?.porch;
@@ -1097,6 +1195,16 @@ export class Sim {
       this.setActivity(a, "cheer");
     }
     return true;
+  }
+
+  /** Who is inside this house. */
+  indoors(house: number): Resident[] {
+    const out: Resident[] = [];
+    for (const a of this.agents.values()) {
+      const r = this.residents.get(a.id);
+      if (r && a.indoors === house) out.push(r);
+    }
+    return out;
   }
 
   /** Whoever quilts at this place on the porch, if anyone. */
@@ -1218,12 +1326,16 @@ export class Sim {
   private move(a: Agent, dt: number, speed: number) {
     const rise = a.activity === "chosen" ? 1 : 0;
     a.aloft += (rise - a.aloft) * Math.min(1, dt * (rise ? 2.5 : 4));
-    if (a.activity === "portal_out") {
+    if (a.activity === "portal_out" || a.activity === "home_in") {
       a.portalScale = Math.max(0, 1 - (this.now - a.since) / PORTAL_SECONDS);
       return;
     }
-    if (a.activity === "portal_in") {
+    if (a.activity === "portal_in" || a.activity === "home_out") {
       a.portalScale = Math.min(1, (this.now - a.since) / PORTAL_SECONDS);
+      return;
+    }
+    if (a.activity === "home") {
+      a.portalScale = 0;
       return;
     }
     a.portalScale = 1;
@@ -1378,7 +1490,8 @@ export class Sim {
       for (let j = i + 1; j < list.length; j++) {
         const a = list[i];
         const b = list[j];
-        if (a.side !== b.side) continue;
+        if (a.side !== b.side || INDOORS.has(a.activity)) continue;
+        if (INDOORS.has(b.activity)) continue;
         const ma = movable(a);
         const mb = movable(b);
         if (!ma && !mb) continue;

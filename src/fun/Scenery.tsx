@@ -114,8 +114,14 @@ function scatter(stage: Stage, side: Side): Decor {
   const portal = stage.layout.portals[side];
 
   // Nothing grows in the zones, where it'd be underfoot.
-  const { lounge, workshop, porch, pitch, lake } = stage.layout;
+  const { lounge, workshop, porch, pitch, lake, houses } = stage.layout;
   const zones = [
+    ...houses.map(({ front }) => ({
+      xMin: front.x - 1.2,
+      xMax: front.x + 1.2,
+      zMin: front.z - 1.8,
+      zMax: front.z + 0.6,
+    })),
     lounge?.area,
     workshop?.area,
     porch?.area,

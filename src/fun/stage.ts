@@ -5,6 +5,7 @@
  */
 
 import type {
+  House,
   Lake,
   Layout,
   Lounge,
@@ -55,6 +56,13 @@ const PLOT_STRIDE_X = 0.95;
 const PLOT_STRIDE_Z = 1.3;
 const GARDEN_ROWS = 3;
 
+/** A house front's width, and the room from one house to the next down the
+ *  meadow's outer edge: the front stands up the screen from its base. */
+const HOUSE_WIDTH = 2.1;
+const HOUSE_STEP = 3.4;
+/** Below this the left meadow keeps no room for houses. */
+const MIN_HOUSES_WIDTH = 5;
+
 /** The porch's depth along the right meadow's front, and the room between
  *  places: a compact name tag wide. */
 const PORCH_DEPTH = 2.2;
@@ -82,6 +90,8 @@ export function computeStage(
   width: number,
   height: number,
   panel: { left: number; right: number },
+  /** How many houses are wanted, one per folder; fewer may fit. */
+  folders = 0,
 ): Stage {
   const toX = (px: number) => (px - width / 2) / PIXELS_PER_UNIT;
   const toZ = (py: number) =>
@@ -122,23 +132,70 @@ export function computeStage(
   const waiting = left && stage ? { ...left, zMax: stage.top } : left;
   const zones = rightZones(right);
   const shore = pond && grow(pond.shore, 0.4);
+  const street =
+    waiting && folders > 0
+      ? houses(waiting, pond ? pond.shore.zMax : null, folders)
+      : [];
+  // Waiting residents keep clear of the street of houses.
+  const streetEdge = street.length
+    ? street[0].front.x + HOUSE_WIDTH / 2 + 1.9
+    : -Infinity;
   return {
     layout: {
       regions: { left, right },
       portals: { left: portal(left, "left"), right: portal(right, "right") },
       attentionSlots: waiting
-        ? attentionSlots(waiting).filter((p) => !shore || !within(shore, p))
+        ? attentionSlots(waiting).filter(
+            (p) => (!shore || !within(shore, p)) && p.x > streetEdge,
+          )
         : [],
+      houses: street,
+      street:
+        waiting && street.length ? { ...waiting, xMax: streetEdge } : null,
       pitch: stage,
       lake: pond,
       ...zones,
       obstacles: obstacles(zones),
       // Walked round, unless heading for a ring on the pool or the boat.
-      blocks: [zones.lounge?.pool, pond?.water].filter((b) => !!b),
+      blocks: [
+        zones.lounge?.pool,
+        pond?.water,
+        ...street.map(({ front }) => ({
+          xMin: front.x - HOUSE_WIDTH / 2,
+          xMax: front.x + HOUSE_WIDTH / 2,
+          zMin: front.z - 0.35,
+          zMax: front.z,
+        })),
+      ].filter((b) => !!b),
     },
     visible,
     panel: panelX,
   };
+}
+
+/**
+ * Down the left meadow's outer edge, below the lake if there is one: a house
+ * front per folder, as many as fit.
+ */
+function houses(
+  region: Region,
+  belowLake: number | null,
+  wanted: number,
+): House[] {
+  if (region.xMax - region.xMin < MIN_HOUSES_WIDTH) return [];
+  const x = region.xMin + HOUSE_WIDTH / 2 + 0.2;
+  // A front stands up the screen from its base, so the first is set down
+  // far enough to clear whatever is above it.
+  const first = (belowLake ?? region.zMin) + 2.5;
+  const out: House[] = [];
+  for (
+    let z = first;
+    z <= region.zMax && out.length < wanted;
+    z += HOUSE_STEP
+  ) {
+    out.push({ front: { x, z }, door: { x, z: z + 0.3 } });
+  }
+  return out;
 }
 
 /**

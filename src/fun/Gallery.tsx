@@ -93,6 +93,7 @@ const residents: Resident[] = SHOWN.flatMap((name) =>
     note: null,
     readyToMerge: false,
     quilts: false,
+    home: null,
   })),
 );
 

@@ -571,6 +571,8 @@ function App() {
               working={workspaceWorking}
               selectedId={selectedId}
               onSelect={setSelectedId}
+              folders={folders}
+              onSetFolderCollapsed={handleSetFolderCollapsed}
               menuActions={{
                 onDelete: handleDelete,
                 onClearTurn: handleClearTurn,

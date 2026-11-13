@@ -1,4 +1,4 @@
-import type { SessionInfo, Workspace, WorkspaceId } from "../types";
+import type { Folder, SessionInfo, Workspace, WorkspaceId } from "../types";
 import { shippingPrs, shippingSignal } from "../workspaceDerived";
 import { ANIMAL_NAMES, type AnimalName } from "./animals";
 import { hashString, workFor, type Work } from "./spec";
@@ -35,6 +35,9 @@ export interface Resident {
   readyToMerge: boolean;
   /** A parent, or keeping count of tasks: it quilts on the porch. */
   quilts: boolean;
+  /** Its folder's place in the folders' order, when the folder is shut: it
+   *  goes home to that folder's house. */
+  home: number | null;
 }
 
 export interface ResidentInputs {
@@ -43,6 +46,8 @@ export interface ResidentInputs {
   needsTurn: (w: Workspace) => boolean;
   working: (w: Workspace) => boolean;
   selectedId: WorkspaceId | null;
+  /** In the sidebar's order, which the houses keep. */
+  folders: Folder[];
   animals: ReadonlyMap<WorkspaceId, AnimalName>;
 }
 
@@ -88,6 +93,13 @@ function noteOf(w: Workspace): string | null {
   return open.map((p) => `#${p.number}`).join(" ") || null;
 }
 
+/** Whether its folder is shut, which sends it home; never while selected. */
+function homeOf(w: Workspace, inputs: ResidentInputs): number | null {
+  if (w.id === inputs.selectedId) return null;
+  const i = inputs.folders.findIndex((f) => f.id === w.folder);
+  return i >= 0 && inputs.folders[i].collapsed ? i : null;
+}
+
 export function toResidents(inputs: ResidentInputs): Resident[] {
   const live = inputs.workspaces.filter((w) => !w.deleted_at);
   const byId = new Map(live.map((w) => [w.id, w]));
@@ -117,6 +129,7 @@ export function toResidents(inputs: ResidentInputs): Resident[] {
       note: noteOf(w),
       readyToMerge: shipSignal(w) === "ready",
       quilts: parents.has(w.id) || (w.progress?.total ?? 0) > 0,
+      home: homeOf(w, inputs),
     };
   });
 }

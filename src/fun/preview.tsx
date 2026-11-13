@@ -7,7 +7,7 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
-import type { GithubPrStatus, SessionInfo, Workspace } from "../types";
+import type { Folder, GithubPrStatus, SessionInfo, Workspace } from "../types";
 import FunWorld, { type ManualClock } from "./FunWorld";
 import Gallery from "./Gallery";
 import "../App.css";
@@ -28,6 +28,7 @@ interface Sample {
     | "shipping"
     | "shipped";
   parent?: string;
+  folder?: string;
   progress?: { done: number; total: number };
   /** For a Shipping sample: approved and green, so it's waiting on Ryan. */
   approved?: boolean;
@@ -54,17 +55,41 @@ const SAMPLES: Sample[] = [
   {
     id: "e",
     branch: "lint-rollout",
+    folder: "lint",
     mood: "idle",
     progress: { done: 3, total: 9 },
   },
-  { id: "e1", branch: "lint-no-floating", mood: "idle", parent: "e" },
-  { id: "e2", branch: "lint-exhaustive-deps", mood: "working", parent: "e" },
-  { id: "e3", branch: "lint-no-shadow", mood: "idle", parent: "e" },
-  { id: "f", branch: "old-experiment", mood: "asleep" },
-  { id: "f2", branch: "spike-pdf-export", mood: "idle" },
+  {
+    id: "e1",
+    branch: "lint-no-floating",
+    mood: "idle",
+    parent: "e",
+    folder: "lint",
+  },
+  {
+    id: "e2",
+    branch: "lint-exhaustive-deps",
+    mood: "working",
+    parent: "e",
+    folder: "lint",
+  },
+  {
+    id: "e3",
+    branch: "lint-no-shadow",
+    mood: "idle",
+    parent: "e",
+    folder: "lint",
+  },
+  { id: "f", branch: "old-experiment", mood: "asleep", folder: "spikes" },
+  { id: "f2", branch: "spike-pdf-export", mood: "idle", folder: "spikes" },
   { id: "f3", branch: "try-new-linter", mood: "idle" },
   { id: "f4", branch: "dead-end-idea", mood: "asleep" },
-  { id: "k", branch: "metadata-prefetch-cache", mood: "needs_you" },
+  {
+    id: "k",
+    branch: "metadata-prefetch-cache",
+    mood: "needs_you",
+    folder: "meta",
+  },
   { id: "l", branch: "acr-score-form-insert-via-intent", mood: "needs_you" },
   {
     id: "m",
@@ -83,6 +108,12 @@ const SAMPLES: Sample[] = [
     mood: "shipping",
     approved: true,
   },
+];
+
+const FOLDERS: Folder[] = [
+  { id: "lint", name: "Lint rollout", collapsed: false },
+  { id: "spikes", name: "Spikes", collapsed: false },
+  { id: "meta", name: "Metadata", collapsed: true },
 ];
 
 const prNumber = (s: Sample) => 7000 + s.id.charCodeAt(0);
@@ -120,7 +151,7 @@ const workspace = (s: Sample): Workspace => ({
   agent: "claude",
   agent_binary: null,
   deleted_at: null,
-  folder: null,
+  folder: s.folder ?? null,
   status: {
     kind:
       s.mood === "queued"
@@ -152,6 +183,9 @@ function Preview() {
   const panelRef = useRef<HTMLElement>(null);
   const [selected, setSelected] = useState<string | null>("b");
   const [samples, setSamples] = useState(SAMPLES);
+  const [folders, setFolders] = useState(FOLDERS);
+  const fold = (id: string, collapsed: boolean) =>
+    setFolders((fs) => fs.map((f) => (f.id === id ? { ...f, collapsed } : f)));
   // `?demo`: approved-and-green is merged after 3s, already-merged deleted
   // after 5s, to watch the cork pop and the boat leave.
   useEffect(() => {
@@ -194,6 +228,12 @@ function Preview() {
             ),
           ),
         select: (id: string | null) => flushSync(() => setSelected(id)),
+        fold: (id: string, collapsed: boolean) =>
+          flushSync(() =>
+            setFolders((fs) =>
+              fs.map((f) => (f.id === id ? { ...f, collapsed } : f)),
+            ),
+          ),
         ids: () => SAMPLES.map((s) => `${s.id} ${s.branch} ${s.mood}`),
       },
     });
@@ -217,6 +257,8 @@ function Preview() {
           onStopShipping: (w) => console.log("stop shipping", w.branch),
         }}
         onSelect={setSelected}
+        folders={folders}
+        onSetFolderCollapsed={fold}
         panelRef={panelRef}
         onManualClock={shot ? onManualClock : undefined}
       />

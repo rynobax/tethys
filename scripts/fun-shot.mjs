@@ -14,6 +14,7 @@
 //                           asleep, shipping, shipped, queued, creating, failed)
 //   remove:ID               delete a sample
 //   progress:ID=DONE/TOTAL  set a sample's task count
+//   fold:FOLDER=1|0         shut (1) or open (0) a folder: lint, spikes, meta
 //   select:ID               select a sample (`select:` for none)
 //   shot:FILE[@X,Y,W,H][xSCALE]
 //                           save a PNG, of a clip of the window in CSS pixels
@@ -52,7 +53,7 @@ if (commands.length === 0) {
   console.error(
     readFileSync(new URL(import.meta.url), "utf8")
       .split("\n")
-      .slice(1, 29)
+      .slice(1, 30)
       .join("\n"),
   );
   process.exit(1);
@@ -237,6 +238,13 @@ async function main() {
       await evaluate(
         cdp,
         `window.__fun.mood(${JSON.stringify(id)}, ${JSON.stringify(mood)})`,
+      );
+      await evaluate(cdp, "window.__fun.step(0.05)");
+    } else if (verb === "fold") {
+      const [id, shut] = rest.split("=");
+      await evaluate(
+        cdp,
+        `window.__fun.fold(${JSON.stringify(id)}, ${shut === "1"})`,
       );
       await evaluate(cdp, "window.__fun.step(0.05)");
     } else if (verb === "progress") {
