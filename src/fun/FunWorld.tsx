@@ -47,7 +47,8 @@ export interface FunWorldProps {
   needsTurn: (w: Workspace) => boolean;
   working: (w: Workspace) => boolean;
   selectedId: WorkspaceId | null;
-  onSelect: (id: WorkspaceId) => void;
+  /** Null when the ground is clicked, to clear the selection. */
+  onSelect: (id: WorkspaceId | null) => void;
   /** The sidebar's context menu actions, for the same menu on a resident. */
   menuActions: WorkspaceMenuActions;
   /** The terminal panel; the meadows are whatever it leaves either side. */
@@ -499,6 +500,9 @@ export default function FunWorld({
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(
     null,
   );
+  // Whether a menu was open when this click began: the menu closes itself on
+  // mousedown, before the click lands, and that click shouldn't also deselect.
+  const menuOpenAtDown = useRef(false);
 
   const menuFor = menu ? workspaces.find((w) => w.id === menu.id) : undefined;
 
@@ -554,14 +558,22 @@ export default function FunWorld({
   );
 
   return (
-    <div className="fun-world">
+    <div
+      className="fun-world"
+      onPointerDownCapture={() => {
+        menuOpenAtDown.current = menu !== null;
+      }}
+    >
       <Canvas
         orthographic
         flat
         frameloop="never"
         dpr={[1, 2]}
         camera={{ zoom: PIXELS_PER_UNIT, near: 0.1, far: 200 }}
-        onPointerMissed={() => setMenu(null)}
+        onPointerMissed={(e) => {
+          setMenu(null);
+          if (e.button === 0 && !menuOpenAtDown.current) onSelect(null);
+        }}
       >
         <color attach="background" args={[env.ground]} />
         <Aim />
