@@ -2323,6 +2323,27 @@ li.is-dragging {
     14px 0 28px -14px rgba(0, 0, 0, 0.55);
 }
 
+/* A PR, page, diagram or review takes the right meadow too: the pane keeps
+   the left edge it has on Chat and runs to the window's right, over a world
+   that carries on underneath as if the pane were narrow. */
+.app.fun .detail:has(.main-tab-body) {
+  left: calc(
+    (
+        100vw -
+          min(
+            calc(var(--terminal-width) + 33px),
+            calc(100vw - var(--fun-meadows))
+          )
+      ) /
+      2
+  );
+  right: 0;
+  margin: 0;
+  width: auto;
+  max-width: none;
+  box-shadow: -14px 0 28px -14px rgba(0, 0, 0, 0.55);
+}
+
 /* Its fixed width is what the pane wraps; `max-width` still lets a narrow
    window squeeze it. */
 .app.fun .session-terminal {

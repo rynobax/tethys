@@ -79,6 +79,9 @@ function useStage(panelRef: RefObject<HTMLElement | null>): Stage | null {
   const [stage, setStage] = useState<Stage | null>(null);
   useLayoutEffect(() => {
     const measure = () => {
+      // Widened over the right meadow for a PR or artifact (`App.css`): the
+      // world keeps the layout it had, carrying on under the pane.
+      if (panelRef.current?.querySelector(".main-tab-body")) return;
       const panel = panelRef.current?.getBoundingClientRect();
       if (!panel) return;
       setStage(
