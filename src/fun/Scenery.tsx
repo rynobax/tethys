@@ -2,6 +2,7 @@ import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { GardenArea } from "./Garden";
+import { PorchArea } from "./Porch";
 import type {
   Lake,
   Lounge,
@@ -113,10 +114,11 @@ function scatter(stage: Stage, side: Side): Decor {
   const portal = stage.layout.portals[side];
 
   // Nothing grows in the zones, where it'd be underfoot.
-  const { lounge, workshop, pitch, lake } = stage.layout;
+  const { lounge, workshop, porch, pitch, lake } = stage.layout;
   const zones = [
     lounge?.area,
     workshop?.area,
+    porch?.area,
     lake && {
       ...lake.water,
       xMax: lake.water.xMax + 0.4,
@@ -1005,7 +1007,7 @@ export function Scenery({
   pitching: boolean;
   sim: Sim;
 }) {
-  const { lounge, workshop, pitch, lake } = stage.layout;
+  const { lounge, workshop, porch, pitch, lake } = stage.layout;
   const decor = useMemo(
     () => (["left", "right"] as const).map((side) => scatter(stage, side)),
     [stage],
@@ -1084,6 +1086,7 @@ export function Scenery({
       })}
       {lounge && <LoungeArea lounge={lounge} env={env} sim={sim} />}
       {workshop && <WorkshopArea workshop={workshop} sim={sim} />}
+      {porch && <PorchArea porch={porch} sim={sim} />}
       {lake && <LakeArea lake={lake} env={env} sim={sim} />}
       {pitching && pitch && <PitchArea pitch={pitch} env={env} sim={sim} />}
       {env.fireflies && <Fireflies stage={stage} />}

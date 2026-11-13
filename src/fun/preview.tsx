@@ -40,7 +40,12 @@ const SAMPLES: Sample[] = [
     branch: "reports-normalize",
     mood: "working",
   },
-  { id: "c", branch: "worklist-n-plus-1", mood: "working" },
+  {
+    id: "c",
+    branch: "worklist-n-plus-1",
+    mood: "working",
+    progress: { done: 5, total: 5 },
+  },
   {
     id: "d",
     branch: "upload-traversal",
@@ -182,6 +187,12 @@ function Preview() {
         mood: (id: string, mood: Sample["mood"]) =>
           set((ss) => ss.map((s) => (s.id === id ? { ...s, mood } : s))),
         remove: (id: string) => set((ss) => ss.filter((s) => s.id !== id)),
+        progress: (id: string, done: number, total: number) =>
+          set((ss) =>
+            ss.map((s) =>
+              s.id === id ? { ...s, progress: { done, total } } : s,
+            ),
+          ),
         select: (id: string | null) => flushSync(() => setSelected(id)),
         ids: () => SAMPLES.map((s) => `${s.id} ${s.branch} ${s.mood}`),
       },

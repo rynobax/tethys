@@ -33,6 +33,8 @@ export interface Resident {
   note: string | null;
   /** Shipping, and every PR approved and green: only the merge to go. */
   readyToMerge: boolean;
+  /** A parent, or keeping count of tasks: it quilts on the porch. */
+  quilts: boolean;
 }
 
 export interface ResidentInputs {
@@ -98,6 +100,7 @@ export function toResidents(inputs: ResidentInputs): Resident[] {
     }
     return depth;
   };
+  const parents = new Set(live.map((w) => w.parent));
   return live.map((w) => {
     return {
       id: w.id,
@@ -113,6 +116,7 @@ export function toResidents(inputs: ResidentInputs): Resident[] {
       progress: w.progress,
       note: noteOf(w),
       readyToMerge: shipSignal(w) === "ready",
+      quilts: parents.has(w.id) || (w.progress?.total ?? 0) > 0,
     };
   });
 }

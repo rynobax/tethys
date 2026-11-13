@@ -64,6 +64,9 @@ const NO_EYES = new THREE.Object3D();
 const VOICE_HOLD_MS = 900;
 /** How far above the stage a seated resident's root sits, on its chair. */
 export const SEAT_LIFT = 0.1;
+/** Likewise in a rocking chair on the porch, and stood up on its seat. */
+export const QUILT_LIFT = 0.12;
+export const CHEER_LIFT = 0.2;
 /** Likewise on a pool lounger's cushion. */
 const LOUNGER_LIFT = 0.19;
 /** How far back a lounging resident reclines. */
@@ -258,7 +261,11 @@ export function Character({
             ? STAGE_HEIGHT + SEAT_LIFT
             : a.activity === "lounge"
               ? LOUNGER_LIFT
-              : 0;
+              : a.activity === "quilt"
+                ? QUILT_LIFT
+                : a.activity === "cheer"
+                  ? CHEER_LIFT
+                  : 0;
     }
     root.current.position.set(a.pos.x, lift.current, a.pos.z);
     root.current.rotation.y =
@@ -501,6 +508,27 @@ export function Character({
         b.rotation.y = Math.sin(t * 0.45) > 0.6 ? Math.sin(t * 0.9) * 0.5 : 0;
         break;
       }
+      case "quilt": {
+        // Rocking in its chair, feet swinging clear of the porch, leaning
+        // over the frame to stitch: one hand holds the cloth, the other
+        // draws the needle up and through.
+        const rock = Math.sin(t * 1.3);
+        footL.current!.position.set(-0.12, 0.1, 0.2 + rock * 0.03);
+        footR.current!.position.set(0.12, 0.1, 0.2 + rock * 0.03);
+        b.rotation.x = 0.12 + rock * 0.06;
+        L.rotation.x = -1.05;
+        L.rotation.z = 0.3;
+        const pull = Math.max(0, Math.sin(t * 2.4));
+        R.rotation.x = -1.1 + pull * 0.6;
+        R.rotation.z = -0.25 - pull * 0.35;
+        break;
+      }
+      case "cheer":
+        // Up on its chair, hopping, both arms in the air.
+        b.position.y = Math.abs(Math.sin(t * 7)) * 0.1;
+        L.rotation.z = -2.6 + Math.sin(t * 9) * 0.2;
+        R.rotation.z = 2.6 - Math.sin(t * 9) * 0.2;
+        break;
       case "pop":
         // Bouncing, the bottle held high and spraying, the other arm cheering.
         b.position.y = Math.abs(Math.sin(t * 6)) * 0.08;

@@ -13,6 +13,7 @@
 //   mood:ID=MOOD            change a sample's mood (needs_you, working, idle,
 //                           asleep, shipping, shipped, queued, creating, failed)
 //   remove:ID               delete a sample
+//   progress:ID=DONE/TOTAL  set a sample's task count
 //   select:ID               select a sample (`select:` for none)
 //   shot:FILE[@X,Y,W,H][xSCALE]
 //                           save a PNG, of a clip of the window in CSS pixels
@@ -51,7 +52,7 @@ if (commands.length === 0) {
   console.error(
     readFileSync(new URL(import.meta.url), "utf8")
       .split("\n")
-      .slice(1, 28)
+      .slice(1, 29)
       .join("\n"),
   );
   process.exit(1);
@@ -236,6 +237,14 @@ async function main() {
       await evaluate(
         cdp,
         `window.__fun.mood(${JSON.stringify(id)}, ${JSON.stringify(mood)})`,
+      );
+      await evaluate(cdp, "window.__fun.step(0.05)");
+    } else if (verb === "progress") {
+      const [id, count] = rest.split("=");
+      const [done, total] = count.split("/").map(Number);
+      await evaluate(
+        cdp,
+        `window.__fun.progress(${JSON.stringify(id)}, ${done}, ${total})`,
       );
       await evaluate(cdp, "window.__fun.step(0.05)");
     } else if (verb === "remove") {

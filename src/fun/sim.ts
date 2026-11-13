@@ -37,6 +37,9 @@ export interface Layout {
   /** The right meadow's zones; `null` when it's too short to divide. */
   lounge: Lounge | null;
   workshop: Workshop | null;
+  /** Along the right meadow's front, where parents quilt; `null` with the
+   *  workshop. */
+  porch: Porch | null;
   /** The bottom of the left meadow, while anyone is Shipping. */
   pitch: Pitch | null;
   /** Furniture nobody walks through. */
@@ -94,6 +97,20 @@ export interface Workshop {
   /** Where someone stands to write on each whiteboard. */
   boards: Vec2[];
   garden: Garden;
+}
+
+/** Where parents sit and quilt, a square for each task done. */
+export interface Porch {
+  area: Region;
+  /** Best first; each a rocking chair, and its quilting frame in front. */
+  places: QuiltingPlace[];
+}
+
+export interface QuiltingPlace {
+  /** Where the quilter sits, facing the viewer. */
+  seat: Vec2;
+  /** The middle of the frame, between the quilter and the viewer. */
+  frame: Vec2;
 }
 
 /** Plots where working residents grow crops, and the shed they're stored at. */
@@ -156,7 +173,11 @@ export type Activity =
   /** Merged: in the line on the pier, waiting to be deleted. */
   | "queue"
   /** Deleted after merging: in a boat, sailing off across the lake. */
-  | "sail";
+  | "sail"
+  /** A parent in its rocking chair, stitching its quilt. */
+  | "quilt"
+  /** A parent up on its chair, cheering a task just done. */
+  | "cheer";
 
 type Post =
   | "attention"
@@ -167,7 +188,8 @@ type Post =
   | "sleep"
   | "board"
   | "garden"
-  | "queue";
+  | "queue"
+  | "quilt";
 type Intent = "wander" | "portal" | "store" | "dock" | Post;
 
 /** What a working resident is busy with, for a while. */
@@ -215,6 +237,8 @@ export interface Agent {
   aloft: number;
   /** Popping the champagne until then, having just been merged. */
   popUntil: number;
+  /** Cheering on its chair until then, a task just done. */
+  cheerUntil: number;
   /** Deleted and on its way out: to the pier's foot, then along it. */
   voyage: "dock" | "pier" | null;
 }
@@ -245,7 +269,16 @@ export const sizeForDepth = (depth: number) =>
 const ROAMING: ReadonlySet<Mood> = new Set(["idle", "shipped"]);
 const EGG: ReadonlySet<Mood> = new Set(["queued", "hatching", "failed"]);
 /** Posts with something to sit or lie on, which an arrival snaps onto. */
-const FURNISHED: ReadonlySet<Post> = new Set(["sleep", "lounge", "seated"]);
+const FURNISHED: ReadonlySet<Post> = new Set([
+  "sleep",
+  "lounge",
+  "seated",
+  "quilt",
+]);
+/** Moods a parent spends quilting; the rest send it where they always do. */
+const QUILTING: ReadonlySet<Mood> = new Set(["idle", "working"]);
+/** How long a parent cheers each task done. */
+const CHEER_SECONDS = 2.6;
 /** The ones Ryan has dismissed, who go to the lounge. */
 const RESTING: ReadonlySet<Mood> = new Set(["idle", "asleep"]);
 /** How long a resident pops its champagne for once it's merged. */
@@ -273,6 +306,8 @@ export class Sim {
   private boards = new Map<string, number>();
   private plotsHeld = new Map<string, number>();
   private docks = new Map<string, number>();
+  /** Each quilter's place on the porch. */
+  private quilters = new Map<string, number>();
   private plots: Plot[] = [];
   /** The harvest stacked at the shed, oldest first, and when the oldest goes. */
   private stored: number[] = [];
@@ -297,6 +332,7 @@ export class Sim {
     prune(this.naps, layout.lounge?.naps.length ?? 0);
     prune(this.boards, layout.workshop?.boards.length ?? 0);
     prune(this.docks, layout.lake?.dock.length ?? 0);
+    prune(this.quilters, layout.porch?.places.length ?? 0);
     const plots = layout.workshop?.garden.plots.length ?? 0;
     prune(this.plotsHeld, plots);
     // The first time, a garden already under way rather than bare earth.
@@ -354,6 +390,11 @@ export class Sim {
         (was === "shipping" || was === "needs_you")
       ) {
         a.popUntil = this.now + POP_SECONDS;
+      }
+      // Another task done: a cheer from its chair.
+      const done = before.get(r.id)?.progress?.done;
+      if (a && done !== undefined && (r.progress?.done ?? 0) > done) {
+        a.cheerUntil = this.now + CHEER_SECONDS;
       }
     }
     // Parents first, so a new child can spawn beside its parent.
@@ -478,6 +519,7 @@ export class Sim {
       this.boards,
       this.plotsHeld,
       this.docks,
+      this.quilters,
     ];
   }
 
@@ -607,6 +649,7 @@ export class Sim {
       restUntil: this.now + rand(15, 45),
       aloft: 0,
       popUntil: 0,
+      cheerUntil: 0,
       voyage: null,
     };
     this.place(a, r);
@@ -625,7 +668,7 @@ export class Sim {
           ? (this.pitchPost(a)?.spot ?? null)
           : r.mood === "asleep" && a.side === "right"
             ? claim(this.naps, a.id, this.layout?.lounge?.naps ?? [])
-            : this.loungerFor(a, r);
+            : (this.quiltingPlace(a, r)?.seat ?? this.loungerFor(a, r));
     const parent = this.parentOf(a);
     a.pos = slot
       ? { x: slot.x, z: slot.z }
@@ -656,6 +699,8 @@ export class Sim {
       a.spot = null;
       this.place(a, r);
     }
+    // On the porch, which is nobody's ground but the quilters'.
+    if (this.quilters.has(a.id)) return;
     // Its own ground, not just the meadow, so nobody is left on the stage.
     const region = this.ground(a.side, r.mood);
     if (!region) return;
@@ -715,6 +760,9 @@ export class Sim {
     }
     if (r.mood !== "asleep" || !right) this.naps.delete(a.id);
     if (r.mood !== "shipped" || right) this.docks.delete(a.id);
+    if (!r.quilts || !QUILTING.has(r.mood) || !right) {
+      this.quilters.delete(a.id);
+    }
     if (r.mood !== "working" || !right || a.task !== "board") {
       this.boards.delete(a.id);
     }
@@ -764,6 +812,7 @@ export class Sim {
       this.toPortal(a);
       return;
     }
+    if (this.quilt(a, r)) return;
     const region = this.ground(a.side, r.mood);
     if (!region) return;
     switch (r.mood) {
@@ -1012,6 +1061,56 @@ export class Sim {
     return i === undefined ? null : dock[i];
   }
 
+  /** A parent's place on the porch, claiming a free one if it has none. */
+  private quiltingPlace(a: Agent, r: Resident): QuiltingPlace | null {
+    const porch = this.layout?.porch;
+    if (!porch || !r.quilts || !QUILTING.has(r.mood) || a.side !== "right") {
+      return null;
+    }
+    if (!this.quilters.has(a.id)) {
+      const taken = new Set(this.quilters.values());
+      const free = porch.places.findIndex((_, i) => !taken.has(i));
+      if (free < 0) return null;
+      this.quilters.set(a.id, free);
+    }
+    return porch.places[this.quilters.get(a.id)!];
+  }
+
+  /**
+   * A parent idle or working sits on the porch and quilts, up on its chair to
+   * cheer each task done. False with no place free, to do as anyone would.
+   */
+  private quilt(a: Agent, r: Resident): boolean {
+    const place = this.quiltingPlace(a, r);
+    if (!place) return false;
+    // Whatever else it had going is put down.
+    this.seats.delete(a.id);
+    this.boards.delete(a.id);
+    this.plotsHeld.delete(a.id);
+    a.task = null;
+    a.chore = null;
+    a.carrying = null;
+    a.spot = null;
+    if (a.activity === "cheer" && this.now < a.cheerUntil) return true;
+    this.head(a, place.seat, "quilt");
+    if (a.activity === "quilt" && this.now < a.cheerUntil) {
+      this.setActivity(a, "cheer");
+    }
+    return true;
+  }
+
+  /** Whoever quilts at this place on the porch, if anyone. */
+  quilter(index: number): Resident | undefined {
+    for (const [id, i] of this.quilters) {
+      if (i !== index) continue;
+      const a = this.agents.get(id);
+      return a?.activity === "quilt" || a?.activity === "cheer"
+        ? this.residents.get(id)
+        : undefined;
+    }
+    return undefined;
+  }
+
   /** Its place in the line for the boat, so alternate name tags can stagger. */
   dockIndex(id: string): number | undefined {
     return this.docks.get(id);
@@ -1159,7 +1258,11 @@ export class Sim {
         i === undefined ? 0 : (this.layout?.lounge?.seats[i]?.facing ?? 0);
     } else if (a.activity === "work") {
       wantFacing = 0.35 * Math.sin(a.phase);
-    } else if (a.activity === "garden") {
+    } else if (
+      a.activity === "garden" ||
+      a.activity === "quilt" ||
+      a.activity === "cheer"
+    ) {
       wantFacing = 0;
     } else if (a.activity === "queue") {
       // Turned towards the boat, half to the viewer.

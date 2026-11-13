@@ -10,6 +10,10 @@ Each family is one animal: a child is always its parent's, so a family reads as 
 - The choice is kept in the webview's `localStorage`, so it survives restarts but isn't Tethys state.
 - Every animal is drawn on one rig (`animals/rig.tsx`): it draws its head, torso, arms, feet and tail at shared joints, and every pose and held thing works for all of them. A new animal never touches `Character.tsx`.
 
+## Parents
+
+A workspace with children, or with a task count, quilts on the porch along the right meadow's front while it's idle or working. Its quilt has a square per task, sewn in its family's colours as each is done, and it cheers from its chair each time one is. Any other mood sends it where that mood always does, and with every place on the porch taken it does as anyone else would.
+
 ## Iterating
 
 - `pnpm vite --port 5199`, then open `fun-preview.html`, or `fun-preview.html?gallery` for every animal side by side.

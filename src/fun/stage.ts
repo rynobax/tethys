@@ -10,6 +10,7 @@ import type {
   Lounge,
   Obstacle,
   Pitch,
+  Porch,
   Region,
   Seat,
   Vec2,
@@ -53,6 +54,11 @@ const MIN_LAKE_WIDTH = 4;
 const PLOT_STRIDE_X = 0.95;
 const PLOT_STRIDE_Z = 1.3;
 const GARDEN_ROWS = 3;
+
+/** The porch's depth along the right meadow's front, and the room between
+ *  places: a compact name tag wide. */
+const PORCH_DEPTH = 2.2;
+const QUILTING_STEP = 2.7;
 
 /** Below this a meadow is too short to split between two uses. */
 const MIN_ZONED_DEPTH = 12;
@@ -227,25 +233,44 @@ function pitch(region: Region): Pitch | null {
   };
 }
 
-/** The right meadow: the lounge across its back half, the workshop its front. */
+/**
+ * The right meadow: the lounge across its back half, the workshop its front,
+ * and the porch along the front of that.
+ */
 function rightZones(
   region: Region | null,
-): Pick<Layout, "lounge" | "workshop"> {
+): Pick<Layout, "lounge" | "workshop" | "porch"> {
   if (!region || region.zMax - region.zMin < MIN_ZONED_DEPTH) {
-    return { lounge: null, workshop: null };
+    return { lounge: null, workshop: null, porch: null };
   }
   const half = (region.zMin + region.zMax) / 2;
+  const porchTop = region.zMax - PORCH_DEPTH;
   return {
     lounge: lounge({ ...region, zMax: half - 0.3 }),
-    workshop: workshop({ ...region, zMin: half + 0.3 }),
+    workshop: workshop({ ...region, zMin: half + 0.3, zMax: porchTop }),
+    porch: porch({ ...region, zMin: porchTop }),
   };
+}
+
+/** A row of places across the porch, the middle ones first. */
+function porch(area: Region): Porch {
+  const width = area.xMax - area.xMin - 1.6;
+  const count = Math.max(1, Math.floor(width / QUILTING_STEP) + 1);
+  const cx = (area.xMin + area.xMax) / 2;
+  const seatZ = area.zMax - 1.3;
+  const places = Array.from({ length: count }, (_, i) => {
+    const x = cx + (i - (count - 1) / 2) * QUILTING_STEP;
+    return { seat: { x, z: seatZ }, frame: { x, z: seatZ + 0.68 } };
+  }).sort((a, b) => Math.abs(a.seat.x - cx) - Math.abs(b.seat.x - cx));
+  return { area, places };
 }
 
 /** What a walker steps round: the lounge's and the workshop's furniture. */
 function obstacles({
   lounge,
   workshop,
-}: Pick<Layout, "lounge" | "workshop">): Obstacle[] {
+  porch,
+}: Pick<Layout, "lounge" | "workshop" | "porch">): Obstacle[] {
   const out: Obstacle[] = [];
   if (lounge) {
     // One circle over a lounger and its table together, which leaves no
@@ -267,6 +292,14 @@ function obstacles({
     const { plots, shed, store } = workshop.garden;
     for (const p of plots) out.push({ ...p, r: 0.2 });
     out.push({ ...shed, r: 0.5 }, { ...store, r: 0.3 });
+  }
+  if (porch) {
+    for (const { seat, frame } of porch.places) {
+      out.push({ ...seat, r: 0.3 });
+      for (const dx of [-0.25, 0.25]) {
+        out.push({ x: frame.x + dx, z: frame.z, r: 0.32 });
+      }
+    }
   }
   return out;
 }

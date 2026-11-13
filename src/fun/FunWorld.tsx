@@ -18,6 +18,8 @@ import {
   Character,
   SEAT_LIFT,
   CHOSEN_HOVER,
+  CHEER_LIFT,
+  QUILT_LIFT,
   type CharacterHandlers,
   type Voice,
 } from "./Character";
@@ -241,6 +243,8 @@ const COMPACT: ReadonlySet<Activity> = new Set([
   "lounge",
   "sleep",
   "queue",
+  "quilt",
+  "cheer",
 ]);
 /** How far every other tag in the line for the boat is lifted, clear of its
  *  neighbours'. */
@@ -380,7 +384,11 @@ function LabelProjector({
           ? STAGE_HEIGHT
           : a.activity === "seated"
             ? STAGE_HEIGHT + SEAT_LIFT
-            : 0;
+            : a.activity === "quilt"
+              ? QUILT_LIFT
+              : a.activity === "cheer"
+                ? CHEER_LIFT
+                : 0;
       const aloft = a.aloft * CHOSEN_HOVER * a.size;
       v.set(a.pos.x, head * a.size + 0.1 + lift + aloft, a.pos.z);
       v.project(camera);
