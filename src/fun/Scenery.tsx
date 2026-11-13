@@ -1048,8 +1048,8 @@ export function Scenery({
       ))}
       {(["left", "right"] as const).map((side) => {
         const at = stage.layout.portals[side];
-        // Half turned towards the middle, so the two face each other.
-        const turn = ((side === "left" ? 1 : -1) * Math.PI) / 4;
+        // Half turned to face into its back corner by the panel.
+        const turn = ((side === "left" ? -1 : 1) * Math.PI) / 4;
         return at ? (
           <Portal key={side} at={at} color={env.portal} turn={turn} />
         ) : null;
