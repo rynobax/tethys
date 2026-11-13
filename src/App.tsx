@@ -571,7 +571,12 @@ function App() {
               working={workspaceWorking}
               selectedId={selectedId}
               onSelect={setSelectedId}
-              onDismiss={handleClearTurn}
+              menuActions={{
+                onDelete: handleDelete,
+                onClearTurn: handleClearTurn,
+                onStartShipping: handleStartShipping,
+                onStopShipping: handleStopShipping,
+              }}
               panelRef={detailRef}
             />
           </Suspense>

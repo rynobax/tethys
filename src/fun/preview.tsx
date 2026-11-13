@@ -353,7 +353,12 @@ function Preview() {
         needsTurn={(w) => bySample.get(w.id)?.mood === "needs_you"}
         working={(w) => bySample.get(w.id)?.mood === "working"}
         selectedId={selected}
-        onDismiss={(w) => console.log("dismiss", w.branch)}
+        menuActions={{
+          onDelete: (w) => console.log("delete", w.branch),
+          onClearTurn: (w) => console.log("clear", w.branch),
+          onStartShipping: (w) => console.log("ship", w.branch),
+          onStopShipping: (w) => console.log("stop shipping", w.branch),
+        }}
         onSelect={setSelected}
         panelRef={panelRef}
       />

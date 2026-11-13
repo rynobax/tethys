@@ -779,7 +779,15 @@ function FolderContextMenu({
   );
 }
 
-function ContextMenu({
+/** What a workspace's context menu can do; fun mode shows the same menu. */
+export type WorkspaceMenuActions = {
+  onDelete: (ws: Workspace) => void;
+  onClearTurn: (ws: Workspace) => void;
+  onStartShipping: (ws: Workspace, prs: PrRef[]) => void;
+  onStopShipping: (ws: Workspace) => void;
+};
+
+export function ContextMenu({
   x,
   y,
   workspace,

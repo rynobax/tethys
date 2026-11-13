@@ -10,6 +10,7 @@ import {
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import * as api from "../ipc/commands";
+import { ContextMenu, type WorkspaceMenuActions } from "../Sidebar";
 import { useAppEvent } from "../ipc/events";
 import { useTheme } from "../theme";
 import type { SessionInfo, Workspace, WorkspaceId } from "../types";
@@ -47,8 +48,8 @@ export interface FunWorldProps {
   working: (w: Workspace) => boolean;
   selectedId: WorkspaceId | null;
   onSelect: (id: WorkspaceId) => void;
-  /** The sidebar's Clear notification. */
-  onDismiss: (w: Workspace) => void;
+  /** The sidebar's context menu actions, for the same menu on a resident. */
+  menuActions: WorkspaceMenuActions;
   /** The terminal panel; the meadows are whatever it leaves either side. */
   panelRef: RefObject<HTMLElement | null>;
 }
@@ -275,6 +276,14 @@ function LabelProjector({
     [widths],
   );
   useEffect(() => () => observer.disconnect(), [observer]);
+  const widthOf = (node: Element | null) => {
+    if (!node) return 0;
+    if (!widths.has(node)) {
+      widths.set(node, (node as HTMLElement).offsetWidth);
+      observer.observe(node);
+    }
+    return widths.get(node)!;
+  };
   useFrame(({ camera, size }) => {
     const toPx = (x: number) => size.width / 2 + x * PIXELS_PER_UNIT;
     for (const r of residents) {
@@ -294,19 +303,26 @@ function LabelProjector({
       v.project(camera);
       let x = ((v.x + 1) / 2) * size.width;
       const y = ((1 - v.y) / 2) * size.height;
-      if (!widths.has(el)) {
-        widths.set(el, el.offsetWidth);
-        observer.observe(el);
-      }
       // Kept on screen, and above all out from under the terminal pane: the
-      // pane wins when a long tag can't have both.
-      const half = widths.get(el)! / 2 + LABEL_GAP;
-      x = Math.min(Math.max(x, half), size.width - half);
-      if (stage) {
-        x =
-          a.side === "left"
-            ? Math.min(x, toPx(stage.panel.xMin) - half)
-            : Math.max(x, toPx(stage.panel.xMax) + half);
+      // pane wins when a long tag can't have both. The hover card is wider
+      // than the tag and slides on its own, so the tag stays over its head.
+      const clamp = (x: number, width: number) => {
+        const half = width / 2 + LABEL_GAP;
+        x = Math.min(Math.max(x, half), size.width - half);
+        if (!stage) return x;
+        return a.side === "left"
+          ? Math.min(x, toPx(stage.panel.xMin) - half)
+          : Math.max(x, toPx(stage.panel.xMax) + half);
+      };
+      const tag = Math.max(
+        widthOf(el.querySelector(".fun-pill")),
+        widthOf(el.querySelector(".fun-note")),
+      );
+      x = clamp(x, tag);
+      const card = el.querySelector<HTMLElement>(".fun-card");
+      if (card) {
+        const shift = clamp(x, widthOf(card)) - x;
+        card.style.transform = `translateX(${shift.toFixed(1)}px)`;
       }
       el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`;
       el.style.opacity = String(a.portalScale);
@@ -377,51 +393,6 @@ function Label({
   );
 }
 
-function ResidentMenu({
-  x,
-  y,
-  onOpen,
-  onDismiss,
-  onClose,
-}: {
-  x: number;
-  y: number;
-  onOpen: () => void;
-  /** Absent when there's no turn to dismiss. */
-  onDismiss: (() => void) | null;
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    const close = () => onClose();
-    window.addEventListener("mousedown", close);
-    window.addEventListener("blur", close);
-    return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("blur", close);
-    };
-  }, [onClose]);
-  const act = (fn: () => void) => () => {
-    fn();
-    onClose();
-  };
-  return (
-    <div
-      className="context-menu fun-menu"
-      style={{ left: x, top: y }}
-      onMouseDown={(e) => e.stopPropagation()}
-    >
-      <button type="button" onClick={act(onOpen)}>
-        Open
-      </button>
-      {onDismiss && (
-        <button type="button" onClick={act(onDismiss)}>
-          Dismiss
-        </button>
-      )}
-    </div>
-  );
-}
-
 export default function FunWorld({
   workspaces,
   sessions,
@@ -429,7 +400,7 @@ export default function FunWorld({
   working,
   selectedId,
   onSelect,
-  onDismiss,
+  menuActions,
   panelRef,
 }: FunWorldProps) {
   const avatars = useAvatars();
@@ -451,6 +422,8 @@ export default function FunWorld({
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(
     null,
   );
+
+  const menuFor = menu ? workspaces.find((w) => w.id === menu.id) : undefined;
 
   const residents = useMemo(
     () =>
@@ -564,16 +537,17 @@ export default function FunWorld({
           />
         ))}
       </div>
-      {menu && (
-        <ResidentMenu
+      {menuFor && menu && (
+        <ContextMenu
           x={menu.x}
           y={menu.y}
-          onOpen={() => onSelect(menu.id)}
-          onDismiss={(() => {
-            const w = workspaces.find((w) => w.id === menu.id);
-            return w && needsTurn(w) ? () => onDismiss(w) : null;
-          })()}
+          workspace={menuFor}
+          hasTurn={needsTurn(menuFor)}
+          liveChildren={
+            workspaces.filter((w) => w.parent === menuFor.id).length
+          }
           onClose={() => setMenu(null)}
+          {...menuActions}
         />
       )}
     </div>
