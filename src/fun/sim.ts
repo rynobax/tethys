@@ -457,7 +457,7 @@ export class Sim {
     a.placed = true;
   }
 
-  /** After a resize: back inside the meadow, or over to the other one. */
+  /** After a resize: back onto its ground, or over to the other meadow. */
   private settle(a: Agent) {
     const r = this.residents.get(a.id);
     if (!r) return;
@@ -466,7 +466,8 @@ export class Sim {
       a.spot = null;
       this.place(a, r);
     }
-    const region = this.region(a.side);
+    // Its own ground, not just the meadow, so nobody is left on the stage.
+    const region = this.ground(a.side, r.mood);
     if (!region) return;
     a.pos.x = clamp(a.pos.x, region.xMin, region.xMax);
     a.pos.z = clamp(a.pos.z, region.zMin, region.zMax);
