@@ -59,8 +59,9 @@ function moodOf(w: Workspace, inputs: ResidentInputs): Mood {
     if (signal === "ready" || signal === "no_reviewer") return "needs_you";
     return inputs.working(w) ? "working" : "shipping";
   }
-  if (inputs.needsTurn(w)) return "needs_you";
+  // Merged, all that's left is to delete it, even with a turn unread.
   if (w.shipment?.kind === "shipped") return "shipped";
+  if (inputs.needsTurn(w)) return "needs_you";
   if (inputs.working(w)) return "working";
   const session = inputs.sessions.get(w.id);
   if (!session?.running) return "asleep";
