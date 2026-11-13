@@ -85,6 +85,11 @@ const VOICE_HOLD_MS = 900;
 export const SEAT_LIFT = 0.1;
 /** Likewise on a log by the lounge's fire. */
 const LOG_LIFT = 0.07;
+/** How high the chosen one floats in its light, in its own units. */
+export const CHOSEN_HOVER = 0.75;
+/** Leaning back that far, chest to the sky, about the middle of its body. */
+const CHOSEN_LEAN = -1.15;
+const CHOSEN_PIVOT = 0.4;
 
 export interface Voice {
   lastKeyAt: number;
@@ -709,6 +714,10 @@ export function Character({
   const crate = useRef<THREE.Group>(null);
   const stick = useRef<THREE.Group>(null);
   const ring = useRef<THREE.Mesh>(null);
+  const shadow = useRef<THREE.Mesh>(null);
+  /** How far up its root stands, on a stage, chair or log. */
+  const lift = useRef(0);
+  const sparkles = useRef<THREE.Group>(null);
   /** 0..1, how hard the chosen one is listening to the voice from above. */
   const listen = useRef(0);
   const propeller = useRef<THREE.Group>(null);
@@ -726,17 +735,18 @@ export function Character({
     const t = sim.time() + a.phase;
     const local = sim.time() - a.since;
 
-    root.current.position.set(
-      a.pos.x,
-      a.activity === "pitch"
-        ? STAGE_HEIGHT
-        : a.activity === "seated"
-          ? STAGE_HEIGHT + SEAT_LIFT
-          : a.activity === "lounge"
-            ? LOG_LIFT
-            : 0,
-      a.pos.z,
-    );
+    // Chosen, it rises from wherever it was standing or sitting.
+    if (a.activity !== "chosen") {
+      lift.current =
+        a.activity === "pitch"
+          ? STAGE_HEIGHT
+          : a.activity === "seated"
+            ? STAGE_HEIGHT + SEAT_LIFT
+            : a.activity === "lounge"
+              ? LOG_LIFT
+              : 0;
+    }
+    root.current.position.set(a.pos.x, lift.current, a.pos.z);
     root.current.rotation.y =
       a.facing +
       (a.activity === "portal_out" || a.activity === "portal_in"
@@ -749,8 +759,18 @@ export function Character({
     figure.current!.visible = !isEgg;
     // Asleep it lies on its back, face to the sky; otherwise upright.
     const lying = a.activity === "sleep";
-    figure.current!.rotation.x = lying ? -1.45 : 0;
-    figure.current!.position.y = lying ? 0.3 : 0;
+    const fig = figure.current!;
+    fig.rotation.x = lying ? -1.45 : 0;
+    fig.position.set(0, lying ? 0.3 : 0, 0);
+    const f = a.aloft;
+    shadow.current!.scale.setScalar(1 - 0.45 * f);
+    const sp = sparkles.current!;
+    sp.visible = f > 0.02;
+    if (sp.visible) {
+      sp.position.y = (CHOSEN_HOVER + 0.35) * f;
+      sp.rotation.y = t * 1.4;
+      sp.scale.setScalar(f);
+    }
     if (ring.current) {
       ring.current.visible = resident.selected;
       ring.current.scale.setScalar(1 + Math.sin(t * 3) * 0.05);
@@ -782,8 +802,10 @@ export function Character({
 
     const working = a.activity === "work";
     const pitching = a.activity === "pitch";
+    // Nothing in its hands while it's chosen: they're flung wide.
+    const chosen = a.activity === "chosen";
     // Carried to the stage, then set on its pedestal to be pitched.
-    const shipping = mood === "shipping" && !pitching;
+    const shipping = mood === "shipping" && !pitching && !chosen;
     station.current!.visible = working;
     tool.current!.visible =
       working &&
@@ -792,7 +814,7 @@ export function Character({
         spec.work === "sweeping");
     book.current!.visible = working && spec.work === "reading";
     parcel.current!.visible = shipping && !working;
-    const carrying = a.carrying && !working;
+    const carrying = a.carrying && !working && !chosen;
     crate.current!.visible = carrying && !shipping;
     // Toasting a marshmallow some of the time it sits by the fire.
     const toasting = a.activity === "lounge" && Math.sin(t * 0.35) > 0;
@@ -891,10 +913,38 @@ export function Character({
       R.rotation.z = -0.15;
     }
 
-    // Hearing the voice: rise a little, turn to the viewer, look up in awe
-    // with arms raised and eyes wide, whatever it was in the middle of.
+    // Chosen: lifted off the ground into its light, chest to the sky, arms
+    // flung wide, eyes shut in bliss and feet dangling, whatever it was doing.
+    if (f > 0.001) {
+      fig.rotation.x += (CHOSEN_LEAN - fig.rotation.x) * f;
+      fig.position.y +=
+        (CHOSEN_HOVER +
+          Math.sin(t * 1.6) * 0.05 +
+          CHOSEN_PIVOT * (1 - Math.cos(CHOSEN_LEAN)) -
+          fig.position.y) *
+        f;
+      // About the middle of the body, so it stays in the middle of the beam.
+      fig.position.z = -CHOSEN_PIVOT * Math.sin(CHOSEN_LEAN) * f;
+      b.rotation.y += (Math.sin(t * 0.7) * 0.3 - b.rotation.y) * f;
+      b.rotation.z += Math.sin(t * 1.1) * 0.05 * f;
+      const sweep = Math.sin(t * 1.6) * 0.15;
+      L.rotation.x *= 1 - f;
+      R.rotation.x *= 1 - f;
+      L.rotation.z += (-1.75 - sweep - L.rotation.z) * f;
+      R.rotation.z += (1.75 + sweep - R.rotation.z) * f;
+      const dangle = Math.sin(t * 2.2) * 0.04 * f;
+      footL.current!.position.y -= 0.03 * f;
+      footR.current!.position.y -= 0.03 * f;
+      footL.current!.position.z += dangle;
+      footR.current!.position.z -= dangle;
+      eyes.current!.scale.y += (0.15 - eyes.current!.scale.y) * f;
+    }
+
+    // Hearing the voice: rise higher, turn to the viewer, look up in awe with
+    // arms raised and eyes wide open, trembling a little.
     if (k > 0.001) {
-      root.current.position.y += k * 0.3 + Math.sin(t * 3) * 0.03 * k;
+      fig.position.y += k * 0.3 + Math.sin(t * 3) * 0.03 * k;
+      b.rotation.z += Math.sin(t * 38) * 0.04 * k * f;
       b.rotation.y += (-a.facing - b.rotation.y) * k;
       b.rotation.x += (-0.45 - b.rotation.x) * k;
       L.rotation.x *= 1 - k;
@@ -902,7 +952,8 @@ export function Character({
       L.rotation.z += (-2.5 - L.rotation.z) * k;
       R.rotation.z += (2.5 - R.rotation.z) * k;
       const wide = 1 + 0.35 * k;
-      eyes.current!.scale.set(wide, eyes.current!.scale.y * wide, wide);
+      const open = eyes.current!.scale.y + (1 - eyes.current!.scale.y) * k;
+      eyes.current!.scale.set(wide, open * wide, wide);
     } else {
       eyes.current!.scale.x = 1;
       eyes.current!.scale.z = 1;
@@ -938,7 +989,7 @@ export function Character({
         <cylinderGeometry args={[0.45, 0.45, 1.2, 8]} />
         <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
-      <mesh rotation-x={-Math.PI / 2} position-y={0.01}>
+      <mesh ref={shadow} rotation-x={-Math.PI / 2} position-y={0.01}>
         <circleGeometry args={[0.36, 18]} />
         <meshBasicMaterial
           color="#000000"
@@ -951,6 +1002,21 @@ export function Character({
         <torusGeometry args={[0.55, 0.035, 6, 36]} />
         <meshBasicMaterial color="#ffffff" />
       </mesh>
+      <group ref={sparkles} visible={false}>
+        {Array.from({ length: 5 }, (_, i) => (
+          <mesh
+            key={i}
+            position={[
+              Math.cos((i / 5) * Math.PI * 2) * 0.55,
+              Math.sin(i * 2.1) * 0.25,
+              Math.sin((i / 5) * Math.PI * 2) * 0.55,
+            ]}
+          >
+            <octahedronGeometry args={[0.045]} />
+            <meshBasicMaterial color="#fff3c4" />
+          </mesh>
+        ))}
+      </group>
 
       <group ref={egg}>
         <mesh position-y={0.42} scale={[1, 1.3, 1]}>

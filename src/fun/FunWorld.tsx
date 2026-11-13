@@ -18,6 +18,7 @@ import {
   DIMS,
   HAT_ROOM,
   SEAT_LIFT,
+  CHOSEN_HOVER,
   type Anchors,
   type CharacterHandlers,
   type Voice,
@@ -268,7 +269,9 @@ function LabelProjector({
           : a.activity === "seated"
             ? STAGE_HEIGHT + SEAT_LIFT
             : 0;
-      v.set(a.pos.x, head * a.size + 0.1 + lift, a.pos.z).project(camera);
+      const aloft = a.aloft * CHOSEN_HOVER * a.size;
+      v.set(a.pos.x, head * a.size + 0.1 + lift + aloft, a.pos.z);
+      v.project(camera);
       const x = ((v.x + 1) / 2) * size.width;
       const y = ((1 - v.y) / 2) * size.height;
       el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`;

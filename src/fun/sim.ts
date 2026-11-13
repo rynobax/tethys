@@ -83,7 +83,9 @@ export type Activity =
   | "pitch"
   | "seated"
   | "lounge"
-  | "board";
+  | "board"
+  /** Selected: floating in its shaft of light, whatever it was doing. */
+  | "chosen";
 
 type Post =
   "attention" | "work" | "pitch" | "seated" | "lounge" | "sleep" | "board";
@@ -126,6 +128,10 @@ export interface Agent {
   /** Lounging: by the fire, or up for a stroll, and until when. */
   rest: "seat" | "stroll";
   restUntil: number;
+  /** The mood it was chosen in; a new one sends it on to where that belongs. */
+  chosenMood: Mood | null;
+  /** 0..1, how far it has risen off the ground into its light. */
+  aloft: number;
 }
 
 const PORTAL_SECONDS = 0.6;
@@ -224,10 +230,12 @@ export class Sim {
   step(dt: number) {
     if (!this.layout) return;
     this.now += dt;
-    // The speaker takes a seat at the back of the queue and the next gets up.
+    // The speaker takes a seat at the back of the queue and the next gets up,
+    // unless it's the chosen one, which holds the floor.
     if (
       this.queue.length > 1 &&
-      this.now - this.speakerSince > PITCH_TURN_SECONDS
+      this.now - this.speakerSince > PITCH_TURN_SECONDS &&
+      this.agents.get(this.queue[0])?.activity !== "chosen"
     ) {
       this.queue.push(this.queue.shift()!);
       this.speakerSince = this.now;
@@ -411,6 +419,8 @@ export class Sim {
       carrying: false,
       rest: Math.random() < 0.7 ? "seat" : "stroll",
       restUntil: this.now + rand(15, 45),
+      chosenMood: null,
+      aloft: 0,
     };
     this.place(a, r);
     return a;
@@ -548,6 +558,7 @@ export class Sim {
     }
     const region = this.ground(a.side, r.mood);
     if (!region) return;
+    if (this.basking(a, r)) return;
     const holder = this.holder(a);
 
     switch (r.mood) {
@@ -598,6 +609,24 @@ export class Sim {
     } else {
       this.lounge(a, r, region);
     }
+  }
+
+  /**
+   * The chosen one drops whatever it's doing and basks in its light. A walk to
+   * where its mood belongs is finished first, and a change of mood sends it on
+   * again, so it's always found where it would be anyway.
+   */
+  private basking(a: Agent, r: Resident): boolean {
+    if (!r.selected) return false;
+    if (a.activity === "chosen") return a.chosenMood === r.mood;
+    const errand =
+      a.intent === "wander" || a.intent === "follow" || a.intent === "haul";
+    if (a.activity === "walk" && !errand) return false;
+    a.target = null;
+    a.intent = null;
+    a.chosenMood = r.mood;
+    this.setActivity(a, "chosen");
+    return true;
   }
 
   /**
@@ -784,6 +813,8 @@ export class Sim {
   }
 
   private move(a: Agent, dt: number, speed: number) {
+    const rise = a.activity === "chosen" ? 1 : 0;
+    a.aloft += (rise - a.aloft) * Math.min(1, dt * (rise ? 2.5 : 4));
     if (a.activity === "portal_out") {
       a.portalScale = Math.max(0, 1 - (this.now - a.since) / PORTAL_SECONDS);
       return;
@@ -812,7 +843,8 @@ export class Sim {
     } else if (
       a.activity === "attention" ||
       a.activity === "pitch" ||
-      a.activity === "seated"
+      a.activity === "seated" ||
+      a.activity === "chosen"
     ) {
       wantFacing = 0;
     } else if (a.activity === "work") {
