@@ -246,17 +246,35 @@ function DivineBeam({
   );
 }
 
+/** Clear space kept between a name tag and the terminal pane or window edge. */
+const LABEL_GAP = 6;
+
 function LabelProjector({
   sim,
   residents,
   labels,
+  stage,
 }: {
   sim: Sim;
   residents: Resident[];
   labels: RefObject<Map<string, HTMLDivElement>>;
+  stage: Stage | null;
 }) {
   const v = useMemo(() => new THREE.Vector3(), []);
+  // Each tag's width, kept by an observer rather than read every frame.
+  const widths = useMemo(() => new WeakMap<Element, number>(), []);
+  const observer = useMemo(
+    () =>
+      new ResizeObserver((entries) => {
+        for (const e of entries) {
+          widths.set(e.target, e.borderBoxSize[0]?.inlineSize ?? 0);
+        }
+      }),
+    [widths],
+  );
+  useEffect(() => () => observer.disconnect(), [observer]);
   useFrame(({ camera, size }) => {
+    const toPx = (x: number) => size.width / 2 + x * PIXELS_PER_UNIT;
     for (const r of residents) {
       const el = labels.current.get(r.id);
       const a = sim.agents.get(r.id);
@@ -272,8 +290,22 @@ function LabelProjector({
       const aloft = a.aloft * CHOSEN_HOVER * a.size;
       v.set(a.pos.x, head * a.size + 0.1 + lift + aloft, a.pos.z);
       v.project(camera);
-      const x = ((v.x + 1) / 2) * size.width;
+      let x = ((v.x + 1) / 2) * size.width;
       const y = ((1 - v.y) / 2) * size.height;
+      if (!widths.has(el)) {
+        widths.set(el, el.offsetWidth);
+        observer.observe(el);
+      }
+      // Kept on screen, and above all out from under the terminal pane: the
+      // pane wins when a long tag can't have both.
+      const half = widths.get(el)! / 2 + LABEL_GAP;
+      x = Math.min(Math.max(x, half), size.width - half);
+      if (stage) {
+        x =
+          a.side === "left"
+            ? Math.min(x, toPx(stage.panel.xMin) - half)
+            : Math.max(x, toPx(stage.panel.xMax) + half);
+      }
       el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`;
       el.style.opacity = String(a.portalScale);
       // Sitting about, a resident gets a smaller tag so more fit side by side.
@@ -332,7 +364,7 @@ function Label({
       )}
       {resident.note && <span className="fun-note">{resident.note}</span>}
       <span className="fun-pill">
-        {resident.branch}
+        <span className="fun-branch">{resident.branch}</span>
         {progress && progress.total > 0 && (
           <span className="fun-progress">
             {progress.done}/{progress.total}
@@ -505,7 +537,12 @@ export default function FunWorld({
           ) : null;
         })}
         <DivineBeam sim={sim} selectedId={selectedId} voice={voice.current} />
-        <LabelProjector sim={sim} residents={residents} labels={labels} />
+        <LabelProjector
+          sim={sim}
+          residents={residents}
+          labels={labels}
+          stage={stage}
+        />
       </Canvas>
       <div className="fun-labels">
         {residents.map((r) => (

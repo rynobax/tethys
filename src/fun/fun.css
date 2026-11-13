@@ -37,8 +37,7 @@
   align-items: center;
   gap: 5px;
   max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  box-sizing: border-box;
   padding: 2px 7px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.82);
@@ -46,13 +45,21 @@
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
 }
 
-.fun-label.compact .fun-pill {
-  display: inline-block;
-  max-width: 116px;
+.fun-branch {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.fun-label.compact .fun-pill {
+  max-width: 116px;
   font-size: 10px;
   padding: 1px 6px;
+}
+
+.fun-label.selected .fun-pill,
+.fun-label.hovered .fun-pill {
+  max-width: 280px;
 }
 
 .fun-label.child .fun-pill {
@@ -86,6 +93,7 @@
 }
 
 .fun-progress {
+  flex-shrink: 0;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
   color: #5b45c9;
