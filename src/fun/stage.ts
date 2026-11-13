@@ -40,7 +40,7 @@ export const STAGE_HEIGHT = 0.2;
 /** A seated resident's footprint: a compact name tag wide, a short figure tall. */
 const CHAIR_WIDTH_PX = 140;
 const CHAIR_ROW_PX = 76;
-const CHAIR_ROWS = 2;
+const CHAIR_ROWS = 3;
 /** How far a portal sits in from its meadow's edge by the panel. */
 const PORTAL_INSET = 1;
 /** Below this the left meadow is too narrow to give a corner to a lake. */
@@ -173,10 +173,12 @@ function pitch(region: Region): Pitch | null {
   const middleOut = (a: Vec2, b: Vec2) =>
     Math.abs(a.x - centre) - Math.abs(b.x - centre);
 
-  // As many tag-widths as fit across, centred, each row offset half a chair
+  // Rows of as many tag-widths as fit across, centred, the first right behind
+  // the podium and filled before the next behind it, each offset half a chair
   // from the one in front so no tag sits straight above another.
   const n = Math.max(1, Math.floor(width / colGap) + 1);
   const chairs: Vec2[] = [];
+  const chairRows: number[] = [];
   for (let r = 0; r < CHAIR_ROWS; r++) {
     const z = front - (r + 1) * rowGap;
     const count = r % 2 ? Math.max(1, n - 1) : n;
@@ -185,15 +187,16 @@ function pitch(region: Region): Pitch | null {
       z,
     }));
     chairs.push(...row.sort(middleOut));
+    chairRows.push(...row.map(() => r));
   }
-  const back = front - CHAIR_ROWS * rowGap;
-
-  const stage = {
+  // The stage for each number of rows in use, growing back from the podium.
+  const stages = Array.from({ length: CHAIR_ROWS }, (_, r) => ({
     xMin: region.xMin - 0.6,
     xMax: region.xMax + 0.6,
-    zMin: back - 0.7,
+    zMin: front - (r + 1) * rowGap - 0.7,
     zMax: front + 0.6,
-  };
+  }));
+  const stage = stages[CHAIR_ROWS - 1];
   const crowd: Vec2[] = [];
   for (const [z, shift] of [
     [region.zMax + 0.2, 0],
@@ -208,7 +211,9 @@ function pitch(region: Region): Pitch | null {
   return {
     podium: { x: centre, z: front },
     chairs,
+    chairRows,
     crowd,
+    stages,
     stage,
     top: stage.zMin - 0.4,
   };

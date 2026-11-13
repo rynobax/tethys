@@ -5,6 +5,7 @@ import type {
   Lake,
   Lounge,
   Pitch,
+  Region,
   Seat,
   Side,
   Sim,
@@ -406,10 +407,15 @@ function Onlooker({ at, seed }: { at: Vec2; seed: number }) {
 
 /** A low stage with bunting at the back, and its audience in front. */
 /** A stage chair, drawn only while someone has it, so the queue can be counted. */
-function Chair({ at, index, sim }: { at: Vec2; index: number; sim: Sim }) {
+/**
+ * The row behind the podium is always set out; a row behind that is put out
+ * whole, and the stage grows back to hold it, as soon as the queue needs it.
+ */
+function Chair({ at, row, sim }: { at: Vec2; row: number; sim: Sim }) {
   const group = useRef<THREE.Group>(null);
   useFrame(() => {
-    if (group.current) group.current.visible = sim.chairTaken(index);
+    if (!group.current) return;
+    group.current.visible = row < sim.chairRowsOut();
   });
   const wood = "#7a5236";
   return (
@@ -897,16 +903,8 @@ function WorkshopArea({ workshop }: { workshop: Workshop }) {
   );
 }
 
-function PitchArea({
-  pitch,
-  env,
-  sim,
-}: {
-  pitch: Pitch;
-  env: Environment;
-  sim: Sim;
-}) {
-  const { stage, crowd } = pitch;
+/** The stage itself: boards on a low platform, and bunting across the back. */
+function Boards({ stage, env }: { stage: Region; env: Environment }) {
   const w = stage.xMax - stage.xMin;
   const d = stage.zMax - stage.zMin;
   const cx = (stage.xMin + stage.xMax) / 2;
@@ -955,10 +953,44 @@ function PitchArea({
           </mesh>
         );
       })}
-      {pitch.chairs.map((p, i) => (
-        <Chair key={i} at={p} index={i} sim={sim} />
+    </>
+  );
+}
+
+function PitchArea({
+  pitch,
+  env,
+  sim,
+}: {
+  pitch: Pitch;
+  env: Environment;
+  sim: Sim;
+}) {
+  const groups = useRef<(THREE.Group | null)[]>([]);
+  // One stage per number of rows out, and only the one in use shown.
+  useFrame(() => {
+    const out = sim.chairRowsOut();
+    groups.current.forEach((g, i) => {
+      if (g) g.visible = i === out - 1;
+    });
+  });
+  return (
+    <>
+      {pitch.stages.map((st, i) => (
+        <group
+          key={i}
+          ref={(g) => {
+            groups.current[i] = g;
+          }}
+          visible={i === 0}
+        >
+          <Boards stage={st} env={env} />
+        </group>
       ))}
-      {crowd.map((p, i) => (
+      {pitch.chairs.map((p, i) => (
+        <Chair key={i} at={p} row={pitch.chairRows[i]} sim={sim} />
+      ))}
+      {pitch.crowd.map((p, i) => (
         <Onlooker key={i} at={p} seed={i + 1} />
       ))}
     </>

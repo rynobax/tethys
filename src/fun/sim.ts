@@ -96,12 +96,17 @@ export interface Workshop {
 export interface Pitch {
   /** Where the one pitching stands. */
   podium: Vec2;
-  /** Where the rest wait their turn, best first. */
+  /** Where the rest wait their turn, best first: the row behind the podium,
+   *  then the one behind that. */
   chairs: Vec2[];
+  /** Each chair's row, 0 right behind the podium. */
+  chairRows: number[];
+  /** The stage with that many rows out, less one: it grows back as needed. */
+  stages: Region[];
   crowd: Vec2[];
-  /** The stage's footprint. */
+  /** The stage at its largest, with every row out. */
   stage: Region;
-  /** Everyone else waiting keeps above this while anyone is pitching. */
+  /** Above the largest stage, where waiting residents keep. */
   top: number;
 }
 
@@ -309,6 +314,11 @@ export class Sim {
       this.now - this.speakerSince > PITCH_TURN_SECONDS &&
       this.agents.get(this.queue[0])?.activity !== "chosen"
     ) {
+      // The speaker sits down in the chair its successor gets up from.
+      const [speaker, next] = this.queue;
+      const seat = this.chairs.get(next);
+      this.chairs.delete(next);
+      if (seat !== undefined) this.chairs.set(speaker, seat);
       this.queue.push(this.queue.shift()!);
       this.speakerSince = this.now;
     }
@@ -337,6 +347,21 @@ export class Sim {
   chairTaken(index: number): boolean {
     for (const i of this.chairs.values()) if (i === index) return true;
     return false;
+  }
+
+  /** How many rows of chairs are out: enough for everyone waiting to pitch. */
+  chairRowsOut(): number {
+    const pitch = this.layout?.pitch;
+    if (!pitch) return 0;
+    const waiting = Math.max(0, this.queue.length - 1);
+    const needed = pitch.chairRows[Math.min(waiting, pitch.chairs.length) - 1];
+    return Math.max(1, (needed ?? 0) + 1);
+  }
+
+  /** The stage as it stands, with only the rows that are out. */
+  stageNow(): Region | null {
+    const pitch = this.layout?.pitch;
+    return pitch ? pitch.stages[this.chairRowsOut() - 1] : null;
   }
 
   /** Whether someone has this pool ring, so it isn't also drawn empty. */
@@ -447,7 +472,8 @@ export class Sim {
     if (mood === "shipped" && lake) return lake.shore;
     const pitch = this.layout?.pitch;
     if (!pitch || !this.pitching || mood === "shipping") return region;
-    return { ...region, zMax: Math.max(region.zMin + 1, pitch.top) };
+    const top = this.stageNow()!.zMin - 0.4;
+    return { ...region, zMax: Math.max(region.zMin + 1, top) };
   }
 
   private randomPoint(
@@ -729,7 +755,7 @@ export class Sim {
         if (!pitch) break;
         const post = this.pitchPost(a);
         if (!post && !a.spot) {
-          a.spot = this.spacedPoint(a.id, a.side, pitch.stage);
+          a.spot = this.spacedPoint(a.id, a.side, this.stageNow()!);
         }
         this.head(a, post?.spot ?? a.spot!, post?.post ?? "seated");
         return;
@@ -916,6 +942,11 @@ export class Sim {
     const pitch = this.layout?.pitch;
     if (a.side !== "left" || !pitch) return null;
     if (this.queue[0] === a.id) return { spot: pitch.podium, post: "pitch" };
+    // A row put away as the queue shrank: forward into one that's out.
+    const held = this.chairs.get(a.id);
+    if (held !== undefined && pitch.chairRows[held] >= this.chairRowsOut()) {
+      this.chairs.delete(a.id);
+    }
     const chair = claim(this.chairs, a.id, pitch.chairs);
     return chair ? { spot: chair, post: "seated" } : null;
   }
