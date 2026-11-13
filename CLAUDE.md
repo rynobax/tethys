@@ -37,9 +37,8 @@ Read the one for the area you're changing. They hold the reasons and traps the c
 | Claude vs codex, the codex command line, terminal replay | `docs/agents.md` |
 | `mcp__tethys__*` tools | `docs/mcp-tools.md` |
 | Setup queue, per-worktree env | `docs/provisioning.md` |
-| Shipping and Nudges | `docs/shipping.md` |
 | Child workspaces and the session inbox | `docs/children.md` |
-| Tracked PRs and stacks | `docs/prs.md` |
+| Tracked PRs, stacks, Shipping | `docs/prs.md` |
 | Workspace tabs, artifacts, the PR webview | `docs/workspace-tabs.md` |
 | Fun mode and its screenshot script | `docs/fun-mode.md` |
 | Logs and the memory watchdog | `docs/diagnostics.md` |
