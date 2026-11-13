@@ -1,6 +1,5 @@
 mod agent;
 mod artifacts;
-mod avatar;
 mod branch_name;
 mod budget;
 mod child_events;
@@ -56,7 +55,6 @@ use tauri_plugin_dialog::DialogExt;
 use tracing::{error, info, warn};
 
 use crate::artifacts::ArtifactStore;
-use crate::avatar::Avatars;
 use crate::agent_bin::AgentBins;
 use crate::github::GithubPoller;
 use crate::paths::Paths;
@@ -170,18 +168,10 @@ pub fn run() {
             let artifacts: Arc<ArtifactStore> =
                 Arc::new(ArtifactStore::new(handle.clone(), store.clone()));
             app.manage(artifacts.clone());
-            let avatars = tauri::async_runtime::block_on(Avatars::load(
-                handle.clone(),
-                paths.avatars_file(),
-                store.clone(),
-                agent_bins.clone(),
-            ));
-            app.manage(avatars.clone());
             let supervisor: Arc<SessionSupervisor> = Arc::new(SessionSupervisor::new(
                 handle.clone(),
                 store.clone(),
                 artifacts,
-                avatars,
             ));
             app.manage(supervisor.clone());
 
@@ -306,9 +296,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_workspaces,
-            commands::list_avatars,
-            commands::ensure_avatars,
-            commands::reroll_avatar,
             commands::list_budget_requests,
             commands::decide_budget_request,
             commands::create_workspace,

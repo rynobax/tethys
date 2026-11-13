@@ -1,6 +1,7 @@
 import type { SessionInfo, Workspace, WorkspaceId } from "../types";
 import { shippingPrs, shippingSignal } from "../workspaceDerived";
-import { defaultSpec, normalizeSpec, type AvatarSpec } from "./spec";
+import { ANIMAL_NAMES, type AnimalName } from "./animals";
+import { hashString, workFor, type Work } from "./spec";
 
 /** What a resident is up to, read off Tethys state. Renderer-agnostic. */
 export type Mood =
@@ -24,9 +25,9 @@ export interface Resident {
   /** 0 for a top-level workspace; children are drawn smaller per level. */
   depth: number;
   selected: boolean;
-  spec: AvatarSpec;
-  /** Whether `spec` came from a design rather than the default bean. */
-  designed: boolean;
+  /** Its family's animal, shared with its parent and children. */
+  animal: AnimalName;
+  work: Work;
   progress: { done: number; total: number } | null;
   /** A few words beside the branch, e.g. the PRs being pitched. */
   note: string | null;
@@ -40,7 +41,7 @@ export interface ResidentInputs {
   needsTurn: (w: Workspace) => boolean;
   working: (w: Workspace) => boolean;
   selectedId: WorkspaceId | null;
-  avatars: Map<WorkspaceId, unknown>;
+  animals: ReadonlyMap<WorkspaceId, AnimalName>;
 }
 
 function moodOf(w: Workspace, inputs: ResidentInputs): Mood {
@@ -98,8 +99,6 @@ export function toResidents(inputs: ResidentInputs): Resident[] {
     return depth;
   };
   return live.map((w) => {
-    const fallback = defaultSpec(w.id, w.branch);
-    const raw = inputs.avatars.get(w.id);
     return {
       id: w.id,
       branch: w.branch,
@@ -107,8 +106,10 @@ export function toResidents(inputs: ResidentInputs): Resident[] {
       parentId: w.parent && byId.has(w.parent) ? w.parent : null,
       depth: depthOf(w),
       selected: w.id === inputs.selectedId,
-      spec: raw ? normalizeSpec(raw, fallback) : fallback,
-      designed: raw !== undefined,
+      animal:
+        inputs.animals.get(w.id) ??
+        ANIMAL_NAMES[hashString(w.id) % ANIMAL_NAMES.length],
+      work: workFor(w.id),
       progress: w.progress,
       note: noteOf(w),
       readyToMerge: shipSignal(w) === "ready",

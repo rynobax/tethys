@@ -20,8 +20,13 @@
 //   ids                     print the samples
 //   eval:EXPR               print a page expression, e.g. about
 //                           `window.__fun.sim.agents`
+//   pose:ACTIVITY[,FACING]  with --gallery: every animal in that pose (walk,
+//                           work, sleep, seated, lounge, garden, attention, ...)
 //
 // Options: --width 1728 --height 1000 --dark --seed N --port 5199
+// --gallery shows every animal, grown up and as a child, instead of the world.
+// --query "zoom=200&only=fox" adds to the page's query: the gallery takes
+// zoom, only (animals, comma separated), pose and facing.
 // The preview's dev server is started on --port if nothing answers there.
 
 import { spawn } from "node:child_process";
@@ -37,6 +42,8 @@ const commands = [];
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === "--dark") opts.dark = true;
+  else if (a === "--gallery") opts.gallery = true;
+  else if (a === "--query") opts.query = args[++i];
   else if (a.startsWith("--")) opts[a.slice(2)] = Number(args[++i]);
   else commands.push(a);
 }
@@ -44,7 +51,7 @@ if (commands.length === 0) {
   console.error(
     readFileSync(new URL(import.meta.url), "utf8")
       .split("\n")
-      .slice(1, 23)
+      .slice(1, 28)
       .join("\n"),
   );
   process.exit(1);
@@ -208,7 +215,7 @@ async function main() {
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }`,
   });
   await cdp.send("Page.navigate", {
-    url: `http://localhost:${opts.port}/fun-preview.html?shot`,
+    url: `http://localhost:${opts.port}/fun-preview.html?shot${opts.gallery ? "&gallery" : ""}${opts.query ? `&${opts.query}` : ""}`,
   });
   for (let i = 0; ; i++) {
     if (await evaluate(cdp, "!!window.__fun").catch(() => false)) break;
@@ -238,6 +245,13 @@ async function main() {
       await evaluate(
         cdp,
         `window.__fun.select(${rest ? JSON.stringify(rest) : "null"})`,
+      );
+      await evaluate(cdp, "window.__fun.step(0.05)");
+    } else if (verb === "pose") {
+      const [activity, facing = "0.35"] = rest.split(",");
+      await evaluate(
+        cdp,
+        `window.__fun.pose(${JSON.stringify(activity)}, ${Number(facing)})`,
       );
       await evaluate(cdp, "window.__fun.step(0.05)");
     } else if (verb === "eval") {

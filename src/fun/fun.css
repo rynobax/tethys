@@ -128,26 +128,6 @@
   color: #2a2a2e;
 }
 
-.fun-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 5px 9px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.94);
-  color: #2a2a2e;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
-}
-
-.fun-card-name {
-  font-weight: 700;
-  font-size: 12px;
-}
-
-.fun-card-tagline {
-  color: #5c5c66;
-}
-
 @keyframes fun-bounce {
   0%,
   100% {

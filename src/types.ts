@@ -254,9 +254,3 @@ export interface ArtifactChangedEvent {
   /** The artifact that arrived or was bumped; null after a dismissal. */
   artifact_id: string | null;
 }
-
-/** Fun mode's character for a workspace; `spec` is normalized by `src/fun`. */
-export interface Avatar {
-  spec: unknown;
-  generated_at: string;
-}

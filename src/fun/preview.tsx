@@ -1,6 +1,7 @@
 /**
  * Fun mode without Tauri: `pnpm vite --port 5199`, then open /fun-preview.html.
- * Every mood on screen at once, with real designs, for iterating on the look.
+ * Every mood on screen at once, for iterating on the look; `?gallery` for
+ * every animal side by side instead.
  */
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
@@ -8,195 +9,14 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import type { GithubPrStatus, SessionInfo, Workspace } from "../types";
 import FunWorld, { type ManualClock } from "./FunWorld";
+import Gallery from "./Gallery";
 import "../App.css";
-
-const DESIGNS: Record<string, unknown> = {
-  flaky: {
-    name: "Jelly Bean",
-    tagline: "chasing the cookie race, one wobble at a time",
-    body: "blob",
-    body_color: "#7FE5C0",
-    accent_color: "#FF7AA2",
-    eyes: "wide",
-    hat: "beanie",
-    accessory: "none",
-    work: "typing",
-    prop: {
-      label: "session cookie",
-      parts: [
-        {
-          shape: "cylinder",
-          color: "#E8A045",
-          position: [0, -0.15, 0],
-          scale: [0.8, 0.15, 0.8],
-          rotation: [0, 0, 0],
-        },
-        {
-          shape: "sphere",
-          color: "#6B2D5C",
-          position: [-0.2, -0.05, 0.1],
-          scale: [0.14, 0.14, 0.14],
-          rotation: [0, 0, 0],
-        },
-        {
-          shape: "sphere",
-          color: "#6B2D5C",
-          position: [0.15, -0.05, -0.1],
-          scale: [0.14, 0.14, 0.14],
-          rotation: [0, 0, 0],
-        },
-        {
-          shape: "sphere",
-          color: "#6B2D5C",
-          position: [0.1, -0.05, 0.2],
-          scale: [0.14, 0.14, 0.14],
-          rotation: [0, 0, 0],
-        },
-      ],
-    },
-  },
-  migration: {
-    name: "Nora Malize",
-    tagline: "unpacking blobs into tidy columns, one row at a time",
-    body: "round",
-    body_color: "#b8a1ff",
-    accent_color: "#ffd166",
-    eyes: "dots",
-    hat: "hardhat",
-    accessory: "backpack",
-    work: "sweeping",
-    prop: {
-      label: "migration crate",
-      parts: [
-        {
-          shape: "box",
-          color: "#5b8def",
-          position: [0, -0.2, 0],
-          scale: [0.8, 0.6, 0.8],
-          rotation: [0, 0, 0],
-        },
-        {
-          shape: "box",
-          color: "#ffd166",
-          position: [0, 0.12, 0],
-          scale: [0.86, 0.08, 0.86],
-          rotation: [0, 0, 0],
-        },
-        {
-          shape: "cone",
-          color: "#ffd166",
-          position: [0, 0.36, 0],
-          scale: [0.3, 0.3, 0.3],
-          rotation: [0, 0, 0],
-        },
-      ],
-    },
-  },
-  perf: {
-    name: "Batchling",
-    tagline: "one trip to the db instead of 1,400 tiny ones",
-    body: "round",
-    body_color: "#7FD8BE",
-    accent_color: "#FF8FA3",
-    eyes: "wide",
-    hat: "headphones",
-    accessory: "backpack",
-    work: "typing",
-    prop: {
-      label: "stack of crates carried in one trip",
-      parts: [
-        {
-          shape: "box",
-          color: "#FFB347",
-          position: [0, -0.35, 0],
-          scale: [0.9, 0.3, 0.9],
-          rotation: [0, 0, 0],
-        },
-        {
-          shape: "box",
-          color: "#FFD166",
-          position: [0, -0.05, 0],
-          scale: [0.7, 0.3, 0.7],
-          rotation: [0, 0, 0],
-        },
-        {
-          shape: "box",
-          color: "#F4A261",
-          position: [0, 0.25, 0],
-          scale: [0.5, 0.3, 0.5],
-          rotation: [0, 0, 0],
-        },
-      ],
-    },
-  },
-  security: {
-    name: "Sir Locksalot",
-    tagline: "guarding the bucket, one ../ at a time",
-    body: "tall",
-    body_color: "#7fd8c0",
-    accent_color: "#ff7aa2",
-    eyes: "visor",
-    hat: "none",
-    accessory: "cape",
-    work: "typing",
-    prop: {
-      label: "padlock on the upload gate",
-      parts: [
-        {
-          shape: "torus",
-          color: "#ffd166",
-          position: [0, 0.2, 0],
-          scale: [0.5, 0.5, 0.15],
-          rotation: [0, 0, 0],
-        },
-        {
-          shape: "box",
-          color: "#ffd166",
-          position: [0, -0.12, 0],
-          scale: [0.7, 0.5, 0.25],
-          rotation: [0, 0, 0],
-        },
-      ],
-    },
-  },
-  orchestrate: {
-    name: "Tidy Tally",
-    tagline: "sweeping 9 lint rules into their own workspaces",
-    body: "round",
-    body_color: "#8fe3c4",
-    accent_color: "#ff8fab",
-    eyes: "dots",
-    hat: "beanie",
-    accessory: "backpack",
-    work: "sweeping",
-    prop: {
-      label: "lint broom",
-      parts: [
-        {
-          shape: "cylinder",
-          color: "#c9a66b",
-          position: [0, 0.05, 0],
-          scale: [0.08, 0.9, 0.08],
-          rotation: [0, 0, 20],
-        },
-        {
-          shape: "box",
-          color: "#ffd166",
-          position: [0.12, -0.4, 0],
-          scale: [0.45, 0.22, 0.14],
-          rotation: [0, 0, 20],
-        },
-      ],
-    },
-  },
-};
 
 const running = { running: true } as SessionInfo;
 
 interface Sample {
   id: string;
   branch: string;
-  design?: string;
   mood:
     | "needs_you"
     | "working"
@@ -214,24 +34,21 @@ interface Sample {
 }
 
 const SAMPLES: Sample[] = [
-  { id: "a", branch: "fix-flaky-login", design: "flaky", mood: "needs_you" },
+  { id: "a", branch: "fix-flaky-login", mood: "needs_you" },
   {
     id: "b",
     branch: "reports-normalize",
-    design: "migration",
     mood: "working",
   },
-  { id: "c", branch: "worklist-n-plus-1", design: "perf", mood: "working" },
+  { id: "c", branch: "worklist-n-plus-1", mood: "working" },
   {
     id: "d",
     branch: "upload-traversal",
-    design: "security",
     mood: "needs_you",
   },
   {
     id: "e",
     branch: "lint-rollout",
-    design: "orchestrate",
     mood: "idle",
     progress: { done: 3, total: 9 },
   },
@@ -239,27 +56,25 @@ const SAMPLES: Sample[] = [
   { id: "e2", branch: "lint-exhaustive-deps", mood: "working", parent: "e" },
   { id: "e3", branch: "lint-no-shadow", mood: "idle", parent: "e" },
   { id: "f", branch: "old-experiment", mood: "asleep" },
-  { id: "f2", branch: "spike-pdf-export", design: "perf", mood: "idle" },
-  { id: "f3", branch: "try-new-linter", design: "security", mood: "idle" },
+  { id: "f2", branch: "spike-pdf-export", mood: "idle" },
+  { id: "f3", branch: "try-new-linter", mood: "idle" },
   { id: "f4", branch: "dead-end-idea", mood: "asleep" },
   { id: "k", branch: "metadata-prefetch-cache", mood: "needs_you" },
   { id: "l", branch: "acr-score-form-insert-via-intent", mood: "needs_you" },
   {
     id: "m",
     branch: "reporter-settings-menu",
-    design: "migration",
     mood: "needs_you",
   },
   { id: "g", branch: "new-thing", mood: "creating" },
   { id: "h", branch: "next-in-line", mood: "queued" },
-  { id: "i", branch: "ship-the-thing", design: "perf", mood: "shipping" },
-  { id: "j", branch: "already-merged", design: "flaky", mood: "shipped" },
-  { id: "n", branch: "hutch", design: "security", mood: "shipping" },
+  { id: "i", branch: "ship-the-thing", mood: "shipping" },
+  { id: "j", branch: "already-merged", mood: "shipped" },
+  { id: "n", branch: "hutch", mood: "shipping" },
   { id: "o", branch: "metadata-template-id", mood: "shipping" },
   {
     id: "p",
     branch: "approved-and-green",
-    design: "migration",
     mood: "shipping",
     approved: true,
   },
@@ -326,17 +141,7 @@ const workspace = (s: Sample): Workspace => ({
   progress: s.progress ?? null,
 });
 
-mockIPC((cmd) => {
-  if (cmd === "list_avatars") {
-    return Object.fromEntries(
-      SAMPLES.filter((s) => s.design).map((s) => [
-        s.id,
-        { spec: DESIGNS[s.design!], generated_at: "" },
-      ]),
-    );
-  }
-  return null;
-});
+mockIPC(() => null);
 
 function Preview() {
   const panelRef = useRef<HTMLElement>(null);
@@ -425,6 +230,6 @@ function Preview() {
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <Preview />
+    {location.search.includes("gallery") ? <Gallery /> : <Preview />}
   </StrictMode>,
 );

@@ -168,7 +168,7 @@ type Post =
   | "board"
   | "garden"
   | "queue";
-type Intent = "wander" | "portal" | "follow" | "store" | "dock" | Post;
+type Intent = "wander" | "portal" | "store" | "dock" | Post;
 
 /** What a working resident is busy with, for a while. */
 export type Task = "station" | "garden" | "board";
@@ -221,14 +221,8 @@ export interface Agent {
 
 const PORTAL_SECONDS = 0.6;
 const ARRIVE = 0.2;
-const FOLLOW_ARRIVE = 0.35;
 /** No closer to the target in this long and it gives up. */
 const STUCK_SECONDS = 1.2;
-const FOLLOW_CHANCE = 0.75;
-/** How far a child can get from the parent holding its leash. */
-export const LEASH_LENGTH = 2.2;
-/** Children pick spots this far in, so the leash usually hangs slack. */
-const LEASH_REACH = LEASH_LENGTH * 0.7;
 const WANDER_RADIUS = 4;
 const CANDIDATES = 8;
 
@@ -413,7 +407,6 @@ export class Sim {
       this.move(a, dt, hurry ? SPEED_HURRY : SPEED_STROLL + (1 - a.size));
     }
     this.separate();
-    this.tug();
     for (const a of this.agents.values()) this.clear(a);
   }
 
@@ -476,23 +469,6 @@ export class Sim {
     return !!a && !!ring && a.activity === "sleep" && dist(a.pos, ring) < 0.05;
   }
 
-  /**
-   * Whether a child is on its parent's leash right now: both in the right
-   * meadow, both out and about. The left meadow is spots, not walks.
-   */
-  leashed(childId: string, parentId: string): boolean {
-    const child = this.agents.get(childId);
-    const parent = this.agents.get(parentId);
-    if (!child || !parent || !child.placed || !parent.placed) return false;
-    if (this.residents.get(childId)?.parentId !== parentId) return false;
-    const free = (a: Agent) =>
-      a.side === "right" &&
-      a.activity !== "egg" &&
-      a.activity !== "portal_out" &&
-      a.activity !== "portal_in";
-    return free(child) && free(parent);
-  }
-
   private books() {
     return [
       this.waitSlots,
@@ -503,32 +479,6 @@ export class Sim {
       this.plotsHeld,
       this.docks,
     ];
-  }
-
-  /** The parent on the other end of this agent's leash, if it's on one. */
-  private holder(a: Agent): Agent | undefined {
-    const parent = this.parentOf(a);
-    return parent && this.leashed(a.id, parent.id) ? parent : undefined;
-  }
-
-  /**
-   * A parent that walks off drags its children along, whatever they're doing.
-   * Parents first, so a grandchild is pulled after its own parent moved.
-   */
-  private tug() {
-    const byDepth = [...this.agents.values()].sort((a, b) => b.size - a.size);
-    for (const child of byDepth) {
-      const parent = this.holder(child);
-      if (!parent) continue;
-      const dx = child.pos.x - parent.pos.x;
-      const dz = child.pos.z - parent.pos.z;
-      const d = Math.hypot(dx, dz);
-      if (d <= LEASH_LENGTH) continue;
-      child.pos.x = parent.pos.x + (dx / d) * LEASH_LENGTH;
-      child.pos.z = parent.pos.z + (dz / d) * LEASH_LENGTH;
-      // Dragged off its station: it sets up again within reach.
-      if (child.activity === "work") child.spot = null;
-    }
   }
 
   private region(side: Side): Region | null {
@@ -693,7 +643,7 @@ export class Sim {
   private loungerFor(a: Agent, r: Resident): Vec2 | null {
     const lounge = this.layout?.lounge;
     if (!lounge || a.side !== "right" || !RESTING.has(r.mood)) return null;
-    if (r.mood === "asleep" || r.parentId || a.rest !== "seat") return null;
+    if (r.mood === "asleep" || a.rest !== "seat") return null;
     return claim(this.seats, a.id, lounge.seats);
   }
 
@@ -816,12 +766,10 @@ export class Sim {
     }
     const region = this.ground(a.side, r.mood);
     if (!region) return;
-    const holder = this.holder(a);
-
     switch (r.mood) {
       case "asleep": {
         const nap =
-          a.side === "right" && !holder
+          a.side === "right"
             ? claim(this.naps, a.id, this.layout?.lounge?.naps ?? [])
             : null;
         if (nap) {
@@ -852,27 +800,22 @@ export class Sim {
         return;
       }
       case "working":
-        this.work(a, region, holder);
+        this.work(a, region);
         return;
       case "shipped": {
         // In line for the boat, or about the shore once the line is full.
-        const place = holder ? null : this.dockSpot(a);
+        const place = this.dockSpot(a);
         if (!place) break;
         a.spot = null;
         this.head(a, place, "queue");
         return;
       }
     }
-    if (
-      holder ||
-      !this.layout?.lounge ||
-      a.side !== "right" ||
-      !RESTING.has(r.mood)
-    ) {
+    if (!this.layout?.lounge || a.side !== "right" || !RESTING.has(r.mood)) {
       a.spot = null;
-      this.roam(a, r, region);
+      this.roam(a, region);
     } else {
-      this.lounge(a, r, region);
+      this.lounge(a, region);
     }
   }
 
@@ -940,12 +883,11 @@ export class Sim {
 
   /**
    * A working resident picks a task and keeps at it a while: its own work at a
-   * spot of its own, the garden, or a whiteboard. On a leash, it works at a
-   * spot within reach instead.
+   * spot of its own, the garden, or a whiteboard.
    */
-  private work(a: Agent, area: Region, holder: Agent | undefined) {
+  private work(a: Agent, area: Region) {
     const shop = this.layout?.workshop;
-    if (holder || !shop) {
+    if (!shop) {
       a.task = "station";
     } else if (!a.task || (this.now > a.taskUntil && a.carrying === null)) {
       const freeBoard = shop.boards.some(
@@ -974,9 +916,7 @@ export class Sim {
     }
     // Re-picked too when a resize has moved the workshop.
     if (!a.spot || this.stuck(a) || !inside(area, a.spot)) {
-      a.spot = holder
-        ? this.spacedPoint(a.id, a.side, area, holder.pos, LEASH_REACH)
-        : this.spacedPoint(a.id, a.side, area, a.pos, 3);
+      a.spot = this.spacedPoint(a.id, a.side, area, a.pos, 3);
     }
     this.head(a, a.spot, "work");
   }
@@ -1091,7 +1031,7 @@ export class Sim {
    * On a lounger for a while, then up for a stroll round the pool, and back.
    * No seat free, and it strolls until one is.
    */
-  private lounge(a: Agent, r: Resident, area: Region) {
+  private lounge(a: Agent, area: Region) {
     const lounge = this.layout!.lounge!;
     if (this.now > a.restUntil) {
       a.rest = a.rest === "seat" ? "stroll" : "seat";
@@ -1106,7 +1046,7 @@ export class Sim {
     }
     if (a.rest === "seat") a.rest = "stroll";
     a.spot = null;
-    this.roam(a, r, area);
+    this.roam(a, area);
   }
 
   /** Walk to a spot and stay there doing `post`. */
@@ -1143,25 +1083,10 @@ export class Sim {
     return chair ? { spot: chair, post: "seated" } : null;
   }
 
-  private roam(a: Agent, r: Resident, region: Region) {
-    const parent = r.parentId ? this.agents.get(r.parentId) : undefined;
-    const parentRoams =
-      parent &&
-      parent.side === a.side &&
-      ROAMING.has(this.residents.get(parent.id)?.mood ?? "asleep");
-
+  private roam(a: Agent, region: Region) {
     if (a.activity === "walk") {
-      if (a.intent === "follow") {
-        if (!parentRoams) {
-          this.pause(a, 0.5, 1.5);
-          return;
-        }
-        a.target = this.behind(parent, a);
-      }
-      const reach = a.intent === "follow" ? FOLLOW_ARRIVE : ARRIVE;
-      if (a.target && dist(a.pos, a.target) < reach) {
-        if (a.intent === "follow") this.pause(a, 0.2, 0.7);
-        else this.pause(a, 1.5, 5);
+      if (a.target && dist(a.pos, a.target) < ARRIVE) {
+        this.pause(a, 1.5, 5);
       } else if (this.stuck(a)) {
         this.pause(a, 0.3, 1.2);
       }
@@ -1174,15 +1099,7 @@ export class Sim {
       return;
     }
 
-    if (parentRoams && Math.random() < FOLLOW_CHANCE) {
-      this.walkTo(a, this.behind(parent, a), "follow");
-    } else {
-      const holder = this.holder(a);
-      const target = holder
-        ? this.spacedPoint(a.id, a.side, region, holder.pos, LEASH_REACH)
-        : this.spacedPoint(a.id, a.side, region, a.pos);
-      this.walkTo(a, target, "wander");
-    }
+    this.walkTo(a, this.spacedPoint(a.id, a.side, region, a.pos), "wander");
   }
 
   private toPortal(a: Agent) {
@@ -1197,21 +1114,6 @@ export class Sim {
     }
     if (a.activity === "portal_out") return;
     this.walkTo(a, { ...portal }, "portal");
-  }
-
-  /** Ducklings: a trailing spot behind the parent, staggered per child. */
-  private behind(parent: Agent, child: Agent): Vec2 {
-    const siblings = [...this.agents.values()]
-      .filter((o) => this.residents.get(o.id)?.parentId === parent.id)
-      .map((o) => o.id)
-      .sort();
-    const i = Math.max(0, siblings.indexOf(child.id));
-    const back = 0.6 + i * 0.45;
-    const spread = (i % 2 ? 1 : -1) * 0.2;
-    return {
-      x: parent.pos.x - Math.sin(parent.facing) * back + spread,
-      z: parent.pos.z - Math.cos(parent.facing) * back,
-    };
   }
 
   private move(a: Agent, dt: number, speed: number) {

@@ -10,7 +10,7 @@ Tauri 2 · Rust core (`src-tauri/`) · React + TypeScript (`src/`) · xterm.js o
 
 ## Running
 
-`pnpm tauri dev`. State is in `~/Library/Application Support/app.tethys.dev/` (`state.json`, `avatars.json`, `repos.toml`, `logs/`, sockets).
+`pnpm tauri dev`. State is in `~/Library/Application Support/app.tethys.dev/` (`state.json`, `repos.toml`, `logs/`, sockets).
 
 Boot rewrites Tethys's hook entries in `~/.claude/settings.json` (idempotent) and each workspace root's generated `CLAUDE.md` (`workspace_doc.rs`, prose in `repos.toml`'s `[workspace_doc]`).
 

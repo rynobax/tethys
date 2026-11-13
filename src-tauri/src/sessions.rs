@@ -11,7 +11,6 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::artifacts::{self, ArtifactStore};
-use crate::avatar::Avatars;
 use crate::error::{AppError, AppResult};
 use crate::agent::Agent;
 use crate::paths::Paths;
@@ -93,7 +92,6 @@ pub struct SessionSupervisor {
     serving_agents: Mutex<HashSet<u32>>,
     turn: Arc<TurnTracker>,
     artifacts: Arc<ArtifactStore>,
-    avatars: Arc<Avatars>,
     store: Arc<Store>,
     app: AppHandle,
 }
@@ -103,7 +101,6 @@ impl SessionSupervisor {
         app: AppHandle,
         store: Arc<Store>,
         artifacts: Arc<ArtifactStore>,
-        avatars: Arc<Avatars>,
     ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
@@ -113,7 +110,6 @@ impl SessionSupervisor {
             serving_agents: Mutex::new(HashSet::new()),
             turn: Arc::new(TurnTracker::new()),
             artifacts,
-            avatars,
             store,
             app,
         }
@@ -457,9 +453,6 @@ impl SessionSupervisor {
         self.set_turn_from_hook(&msg, SessionRuntimeState::Idle, None)
             .await;
         let Some((ws_id, _)) = self.resolve_session(&msg).await else { return };
-        // After the first turn rather than the first prompt: by now the
-        // transcript says what the work is, not just a link to it.
-        self.avatars.ensure(&ws_id).await;
         let Some(message) = msg.last_assistant_message.as_deref() else { return };
         self.artifacts.record_diagrams(&ws_id, message).await;
         let pages = artifacts::pages_mentioned(message, msg.cwd.as_deref());

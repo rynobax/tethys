@@ -9,22 +9,19 @@ import {
 } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
-import * as api from "../ipc/commands";
 import { ContextMenu, type WorkspaceMenuActions } from "../Sidebar";
-import { useAppEvent } from "../ipc/events";
 import { useTheme } from "../theme";
 import type { SessionInfo, Workspace, WorkspaceId } from "../types";
+import { ANIMALS, type AnimalName } from "./animals";
+import { YOUNG_HEAD } from "./animals/rig";
 import {
   Character,
-  DIMS,
-  HAT_ROOM,
   SEAT_LIFT,
   CHOSEN_HOVER,
-  type Anchors,
   type CharacterHandlers,
   type Voice,
 } from "./Character";
-import { Leash } from "./Leash";
+import { allocate, loadAnimals, sameAnimals, saveAnimals } from "./family";
 import { toResidents, type Resident } from "./residents";
 import { DUSK, MEADOW, Scenery, type Environment } from "./Scenery";
 import { Sim, type Activity } from "./sim";
@@ -71,25 +68,24 @@ export interface ManualClock {
 /** Steps a manual clock takes the sim in, matching the display's pace. */
 const MANUAL_STEP = 1 / 60;
 
-function useAvatars(): Map<WorkspaceId, unknown> {
-  const [avatars, setAvatars] = useState<Map<WorkspaceId, unknown>>(new Map());
-  const refresh = useCallback(() => {
-    api
-      .listAvatars()
-      .then((all) =>
-        setAvatars(new Map(Object.entries(all).map(([id, a]) => [id, a.spec]))),
-      )
-      .catch((e) => console.error("list_avatars failed:", e));
-  }, []);
-  useEffect(() => {
-    refresh();
-    // Workspaces from before fun mode existed get designed on first visit.
-    api
-      .ensureAvatars()
-      .catch((e) => console.error("ensure_avatars failed:", e));
-  }, [refresh]);
-  useAppEvent("avatar:changed", refresh);
-  return avatars;
+/** Each workspace's animal, kept across restarts. */
+function useAnimals(
+  workspaces: Workspace[],
+): ReadonlyMap<WorkspaceId, AnimalName> {
+  const held = useRef<Map<WorkspaceId, AnimalName> | null>(null);
+  const animals = useMemo(() => {
+    held.current ??= loadAnimals();
+    const next = allocate(
+      held.current,
+      workspaces
+        .filter((w) => !w.deleted_at)
+        .map((w) => ({ id: w.id, parent: w.parent })),
+    );
+    if (!sameAnimals(next, held.current)) held.current = next;
+    return held.current;
+  }, [workspaces]);
+  useEffect(() => saveAnimals(animals), [animals]);
+  return animals;
 }
 
 function useStage(panelRef: RefObject<HTMLElement | null>): Stage | null {
@@ -376,7 +372,9 @@ function LabelProjector({
       const a = sim.agents.get(r.id);
       if (!el || !a) continue;
       const head =
-        a.activity === "egg" ? 0.95 : DIMS[r.spec.body].top + HAT_ROOM;
+        a.activity === "egg"
+          ? 0.95
+          : ANIMALS[r.animal].top * (r.depth > 0 ? YOUNG_HEAD : 1) + 0.1;
       const lift =
         a.activity === "pitch"
           ? STAGE_HEIGHT
@@ -393,8 +391,7 @@ function LabelProjector({
           ? DOCK_STAGGER_PX
           : 0);
       // Kept on screen, and above all out from under the terminal pane: the
-      // pane wins when a long tag can't have both. The hover card is wider
-      // than the tag and slides on its own, so the tag stays over its head.
+      // pane wins when a long tag can't have both.
       const clamp = (x: number, width: number) => {
         const half = width / 2 + LABEL_GAP;
         x = Math.min(Math.max(x, half), size.width - half);
@@ -408,11 +405,6 @@ function LabelProjector({
         widthOf(el.querySelector(".fun-note")),
       );
       x = clamp(x, tag);
-      const card = el.querySelector<HTMLElement>(".fun-card");
-      if (card) {
-        const shift = clamp(x, widthOf(card)) - x;
-        card.style.transform = `translateX(${shift.toFixed(1)}px)`;
-      }
       el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`;
       el.style.opacity = String(a.portalScale);
       // Sitting about, a resident gets a smaller tag so more fit side by side.
@@ -433,7 +425,7 @@ function Label({
   register: (el: HTMLDivElement | null) => void;
   handlers: CharacterHandlers;
 }) {
-  const { mood, spec, progress } = resident;
+  const { mood, progress } = resident;
   const badge =
     mood === "needs_you"
       ? "!"
@@ -461,14 +453,6 @@ function Label({
       onMouseLeave={() => handlers.onHover(null)}
     >
       {badge && <span className="fun-badge">{badge}</span>}
-      {hovered && resident.designed && (
-        <span className="fun-card">
-          <span className="fun-card-name">{spec.name}</span>
-          {spec.tagline && (
-            <span className="fun-card-tagline">{spec.tagline}</span>
-          )}
-        </span>
-      )}
       {resident.note && <span className="fun-note">{resident.note}</span>}
       <span className="fun-pill">
         <span className="fun-branch">{resident.branch}</span>
@@ -493,12 +477,11 @@ export default function FunWorld({
   panelRef,
   onManualClock,
 }: FunWorldProps) {
-  const avatars = useAvatars();
+  const animals = useAnimals(workspaces);
   const stage = useStage(panelRef);
   const env = useEnvironment();
   const sim = useMemo(() => new Sim(), []);
   const labels = useRef(new Map<string, HTMLDivElement>());
-  const anchors = useRef<Anchors>(new Map());
   const voice = useRef<Voice>({ lastKeyAt: -Infinity });
   // Capture phase, since the terminal stops the keys it handles from bubbling.
   useEffect(() => {
@@ -526,9 +509,9 @@ export default function FunWorld({
         needsTurn,
         working,
         selectedId,
-        avatars,
+        animals,
       }),
-    [workspaces, sessions, needsTurn, working, selectedId, avatars],
+    [workspaces, sessions, needsTurn, working, selectedId, animals],
   );
 
   // Layout first, so new residents spawn inside today's meadows.
@@ -551,14 +534,6 @@ export default function FunWorld({
       document.body.style.cursor = "";
     };
   }, [hovered]);
-
-  // A child's collar and leash are in its parent's colours.
-  const byId = useMemo(
-    () => new Map(residents.map((r) => [r.id, r])),
-    [residents],
-  );
-  const leashColor = (r: Resident) =>
-    r.parentId ? (byId.get(r.parentId)?.spec.accent_color ?? null) : null;
 
   const handlers: CharacterHandlers = useMemo(
     () => ({
@@ -609,25 +584,9 @@ export default function FunWorld({
             resident={r}
             sim={sim}
             handlers={handlers}
-            anchors={anchors.current}
-            collarColor={leashColor(r)}
             voice={voice.current}
           />
         ))}
-        {/* After every Character, so both ends have been posed this frame. */}
-        {residents.map((r) => {
-          const color = leashColor(r);
-          return r.parentId && color ? (
-            <Leash
-              key={r.id}
-              parentId={r.parentId}
-              childId={r.id}
-              sim={sim}
-              anchors={anchors.current}
-              color={color}
-            />
-          ) : null;
-        })}
         <DivineBeam sim={sim} selectedId={selectedId} voice={voice.current} />
         <LabelProjector
           sim={sim}
