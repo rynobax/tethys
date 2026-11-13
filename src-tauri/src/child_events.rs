@@ -2,7 +2,9 @@
 //! agent handing out work can move on without being told by hand.
 //!
 //! The event is queued on the parent and delivered through its session's
-//! inbox (`session_inbox`).
+//! inbox (`session_inbox`). A parent woken by it is usually busy handing out
+//! work, and what Ryan needs to look at is the children, so while it still has
+//! some, the turn the news starts ends dismissed rather than as his.
 
 use tracing::{debug, info, warn};
 
@@ -12,10 +14,16 @@ use crate::github::status::PrState;
 use crate::github::GithubPrStatus;
 use crate::registry::RegistryLoad;
 use crate::state::Workspace;
+use crate::sessions::SessionSupervisor;
 use crate::store::Store;
 
 /// Takes the child as it was at deletion: its PRs are read off this copy.
-pub async fn child_deleted(store: &Store, registry: &RegistryLoad, child: Workspace) {
+pub async fn child_deleted(
+    store: &Store,
+    supervisor: &SessionSupervisor,
+    registry: &RegistryLoad,
+    child: Workspace,
+) {
     let Some(parent_id) = child.parent.clone() else {
         return;
     };
@@ -44,7 +52,13 @@ pub async fn child_deleted(store: &Store, registry: &RegistryLoad, child: Worksp
         return;
     }
     info!(parent = %parent_id, child = %child.id, "queued child-deleted event");
-    crate::session_inbox::deliver(store, &parent_id).await;
+    // Read before posting: once it lands, the session is working on it.
+    let resting = supervisor.resting_session(&parent_id).await;
+    let posted = crate::session_inbox::deliver(store, &parent_id).await;
+    let still_a_parent = store.read(|s| s.live_children(&parent_id) > 0).await;
+    if let Some(session_id) = resting.filter(|_| posted && still_a_parent) {
+        supervisor.hush(&session_id);
+    }
 }
 
 /// Detached PRs too: clearing a chip from the sidebar doesn't make the PR

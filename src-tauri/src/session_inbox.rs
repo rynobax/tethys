@@ -18,7 +18,8 @@ use crate::store::Store;
 const POST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Leaves the queue alone when there's no inbox to post to or the post fails.
-pub async fn deliver(store: &Store, workspace_id: &str) {
+/// Returns whether anything was posted.
+pub async fn deliver(store: &Store, workspace_id: &str) -> bool {
     let taken = store
         .update_workspace_quiet(workspace_id, |ws| {
             let Some(inbox) = ws.session.as_ref().and_then(|s| s.inbox.clone()) else {
@@ -31,11 +32,14 @@ pub async fn deliver(store: &Store, workspace_id: &str) {
         })
         .await;
     let Ok(Some((inbox, messages))) = taken else {
-        return;
+        return false;
     };
 
     match post(&inbox, &messages.join("\n\n")).await {
-        Ok(()) => info!(workspace = %workspace_id, count = messages.len(), "posted pending messages to inbox"),
+        Ok(()) => {
+            info!(workspace = %workspace_id, count = messages.len(), "posted pending messages to inbox");
+            true
+        }
         Err(e) => {
             debug!(workspace = %workspace_id, error = %e, "inbox post failed; messages wait for a hook");
             let _ = store
@@ -44,6 +48,7 @@ pub async fn deliver(store: &Store, workspace_id: &str) {
                     Ok(())
                 })
                 .await;
+            false
         }
     }
 }

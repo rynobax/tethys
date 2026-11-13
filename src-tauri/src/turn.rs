@@ -1,7 +1,7 @@
 //! A session's turn state — the "your turn" indicator. Pure: persisting and
 //! emitting are the supervisor's job.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -65,11 +65,26 @@ pub struct TurnChanged {
 #[derive(Default)]
 pub struct TurnTracker {
     map: Mutex<HashMap<String, TurnState>>,
+    /// Sessions a child's news woke, whose coming to rest isn't Ryan's turn
+    /// until he types (`hush`).
+    hushed: Mutex<HashSet<String>>,
 }
 
 impl TurnTracker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Until `unhush`, the session coming to rest lands dismissed, by hook or
+    /// probe alike; the probe flips a just-stopped turn back to working often
+    /// enough that dismissing once at the Stop wouldn't hold. Waiting on a
+    /// permission prompt still lights.
+    pub fn hush(&self, session_id: &str) {
+        self.hushed.lock().unwrap().insert(session_id.to_string());
+    }
+
+    pub fn unhush(&self, session_id: &str) {
+        self.hushed.lock().unwrap().remove(session_id);
     }
 
     /// `Some` only for a change the user can see.
@@ -84,8 +99,9 @@ impl TurnTracker {
         let known = map.contains_key(session_id);
         let current = map.entry(session_id.to_string()).or_default();
         let exited = known && current.state == SessionRuntimeState::Dormant;
+        let before = current.clone();
 
-        let changed = match signal {
+        let mut changed = match signal {
             // Seeds tell nobody: `get_session` reads this map directly.
             // Idle, as the probe will report it: a fresh TUI is at its prompt.
             TurnSignal::Spawned => {
@@ -177,6 +193,15 @@ impl TurnTracker {
             }
         };
 
+        if changed
+            && current.state == SessionRuntimeState::Idle
+            && !current.acknowledged
+            && self.hushed.lock().unwrap().contains(session_id)
+        {
+            current.acknowledged = true;
+            changed = *current != before;
+        }
+
         changed.then(|| TurnChanged {
             workspace_id: workspace_id.to_string(),
             session_id: session_id.to_string(),
@@ -221,6 +246,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_hushed_session_comes_to_rest_dismissed() {
+        let t = TurnTracker::new();
+        t.observe(S, WS, hook(Idle, None));
+        t.observe(S, WS, TurnSignal::Acknowledged);
+        t.hush(S);
+        t.observe(S, WS, hook(Working, None));
+        let changed = t.observe(S, WS, hook(Idle, None)).expect("leaves working");
+        assert!(changed.turn_acknowledged);
+        // The probe lagging behind the Stop doesn't light it either.
+        t.observe(S, WS, TurnSignal::Probe { state: Working });
+        t.observe(S, WS, TurnSignal::Probe { state: Idle });
+        assert!(!t.get(S).needs_turn(true));
+    }
+
+    #[test]
+    fn a_hushed_session_still_lights_for_a_permission_prompt() {
+        let t = TurnTracker::new();
+        t.hush(S);
+        t.observe(S, WS, hook(Working, None));
+        t.observe(S, WS, hook(WaitingInput, Some("permission_prompt")));
+        assert!(t.get(S).needs_turn(true));
+    }
+
+    #[test]
+    fn unhushing_lets_the_next_rest_light() {
+        let t = TurnTracker::new();
+        t.hush(S);
+        t.observe(S, WS, hook(Working, None));
+        t.unhush(S);
+        t.observe(S, WS, hook(Idle, None));
+        assert!(t.get(S).needs_turn(true));
+    }
 
     #[test]
     fn a_spawned_session_is_idle_at_its_prompt_and_emits_nothing() {

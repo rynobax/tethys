@@ -384,6 +384,7 @@ pub async fn add_repo_to_workspace(
 pub async fn delete_workspace(
     app: AppHandle,
     store: State<'_, Arc<Store>>,
+    supervisor: State<'_, Arc<SessionSupervisor>>,
     registry: State<'_, Arc<RegistryLoad>>,
     tmux_bin: State<'_, TmuxBin>,
     id: WorkspaceId,
@@ -414,9 +415,10 @@ pub async fn delete_workspace(
     // Fetching the child's PRs can take seconds; the delete shouldn't wait.
     if deleted.parent.is_some() {
         let store = store.inner().clone();
+        let supervisor = supervisor.inner().clone();
         let registry = registry.inner().clone();
         tauri::async_runtime::spawn(async move {
-            crate::child_events::child_deleted(&store, &registry, deleted).await;
+            crate::child_events::child_deleted(&store, &supervisor, &registry, deleted).await;
         });
     }
     Ok(())

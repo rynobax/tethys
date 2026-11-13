@@ -162,6 +162,22 @@ impl SessionSupervisor {
         }
     }
 
+    /// The workspace's session, if a post into its inbox would start a turn
+    /// rather than land inside one Ryan may have started.
+    pub async fn resting_session(&self, workspace_id: &str) -> Option<SessionId> {
+        let session_id = self
+            .store
+            .read(|s| s.find_workspace(workspace_id)?.session.as_ref().map(|m| m.id.clone()))
+            .await?;
+        let info = self.info(&session_id)?;
+        (info.running && !info.working).then_some(session_id)
+    }
+
+    /// See `TurnTracker::hush`.
+    pub fn hush(&self, session_id: &str) {
+        self.turn.hush(session_id);
+    }
+
     pub fn set_serving_agents(&self, agents: HashSet<u32>) {
         *self.serving_agents.lock().unwrap() = agents;
     }
@@ -691,6 +707,8 @@ impl SessionSupervisor {
 
     pub fn send_input(&self, session_id: &str, data: &[u8]) -> AppResult<()> {
         self.touch(session_id);
+        // Ryan typing makes whatever comes next his turn again.
+        self.turn.unhush(session_id);
         let sessions = self.sessions.lock().unwrap();
         sessions
             .get(session_id)
@@ -738,6 +756,7 @@ impl SessionSupervisor {
     pub fn forget(&self, session_id: &str) {
         self.sessions.lock().unwrap().remove(session_id);
         self.budget_notices.lock().unwrap().remove(session_id);
+        self.turn.unhush(session_id);
     }
 
     pub fn record_budget_kill(&self, session_id: &str, notice: String) {
