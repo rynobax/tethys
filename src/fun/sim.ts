@@ -55,6 +55,11 @@ export interface Lake {
   /** Where the pier meets the shore, and its end, where the boat is moored. */
   pierFoot: Vec2;
   pierEnd: Vec2;
+  /** Where the boat is moored, alongside the pier's end. */
+  berth: Vec2;
+  /** The line for the boat, first by the boat: along the pier, then on up
+   *  the shore. */
+  dock: Vec2[];
   /** Off the edge of the window, where a boat sails to and is gone. */
   exit: Vec2;
 }
@@ -148,6 +153,8 @@ export type Activity =
   | "chosen"
   /** Just merged: popping the champagne where it stands. */
   | "pop"
+  /** Merged: in the line on the pier, waiting to be deleted. */
+  | "queue"
   /** Deleted after merging: in a boat, sailing off across the lake. */
   | "sail";
 
@@ -159,7 +166,8 @@ type Post =
   | "lounge"
   | "sleep"
   | "board"
-  | "garden";
+  | "garden"
+  | "queue";
 type Intent = "wander" | "portal" | "follow" | "store" | "dock" | Post;
 
 /** What a working resident is busy with, for a while. */
@@ -270,6 +278,7 @@ export class Sim {
   private naps = new Map<string, number>();
   private boards = new Map<string, number>();
   private plotsHeld = new Map<string, number>();
+  private docks = new Map<string, number>();
   private plots: Plot[] = [];
   /** The harvest stacked at the shed, oldest first, and when the oldest goes. */
   private stored: number[] = [];
@@ -293,6 +302,7 @@ export class Sim {
     prune(this.seats, layout.lounge?.seats.length ?? 0);
     prune(this.naps, layout.lounge?.naps.length ?? 0);
     prune(this.boards, layout.workshop?.boards.length ?? 0);
+    prune(this.docks, layout.lake?.dock.length ?? 0);
     const plots = layout.workshop?.garden.plots.length ?? 0;
     prune(this.plotsHeld, plots);
     // The first time, a garden already under way rather than bare earth.
@@ -491,6 +501,7 @@ export class Sim {
       this.naps,
       this.boards,
       this.plotsHeld,
+      this.docks,
     ];
   }
 
@@ -753,6 +764,7 @@ export class Sim {
       this.seats.delete(a.id);
     }
     if (r.mood !== "asleep" || !right) this.naps.delete(a.id);
+    if (r.mood !== "shipped" || right) this.docks.delete(a.id);
     if (r.mood !== "working" || !right || a.task !== "board") {
       this.boards.delete(a.id);
     }
@@ -842,6 +854,14 @@ export class Sim {
       case "working":
         this.work(a, region, holder);
         return;
+      case "shipped": {
+        // In line for the boat, or about the shore once the line is full.
+        const place = holder ? null : this.dockSpot(a);
+        if (!place) break;
+        a.spot = null;
+        this.head(a, place, "queue");
+        return;
+      }
     }
     if (
       holder ||
@@ -877,8 +897,12 @@ export class Sim {
       return;
     }
     if (a.voyage === "dock") {
-      // Blocked on the way, it makes for the pier's end from where it is.
-      if (dist(a.pos, lake.pierFoot) < 0.3 || this.stuck(a)) {
+      // Blocked on the way, or already in the line on the pier, it makes for
+      // the pier's end from where it is.
+      const onPier =
+        Math.abs(a.pos.z - lake.pierEnd.z) < 0.3 &&
+        a.pos.x < lake.pierFoot.x + 0.1;
+      if (dist(a.pos, lake.pierFoot) < 0.3 || onPier || this.stuck(a)) {
         a.voyage = "pier";
       } else {
         this.walkTo(a, lake.pierFoot, "dock");
@@ -886,7 +910,8 @@ export class Sim {
       }
     }
     if (dist(a.pos, lake.pierEnd) < 0.15) {
-      a.pos = { ...lake.pierEnd };
+      // Stepped down into the boat.
+      a.pos = { ...lake.berth };
       a.target = { ...lake.exit };
       this.setActivity(a, "sail");
     } else {
@@ -1031,6 +1056,25 @@ export class Sim {
     });
     if (best !== null) this.plotsHeld.set(a.id, best);
     return best;
+  }
+
+  /** Its place in the line for the boat, moving up whenever one ahead is
+   *  free; `null` when the line is full. */
+  private dockSpot(a: Agent): Vec2 | null {
+    const dock = this.layout?.lake?.dock ?? [];
+    const held = this.docks.get(a.id);
+    const taken = new Set(this.docks.values());
+    const free = dock.findIndex((_, i) => !taken.has(i));
+    if (free >= 0 && (held === undefined || free < held)) {
+      this.docks.set(a.id, free);
+    }
+    const i = this.docks.get(a.id);
+    return i === undefined ? null : dock[i];
+  }
+
+  /** Its place in the line for the boat, so alternate name tags can stagger. */
+  dockIndex(id: string): number | undefined {
+    return this.docks.get(id);
   }
 
   /** A plot's crop and growth, for the scene. */
@@ -1215,6 +1259,9 @@ export class Sim {
       wantFacing = 0.35 * Math.sin(a.phase);
     } else if (a.activity === "garden") {
       wantFacing = 0;
+    } else if (a.activity === "queue") {
+      // Turned towards the boat, half to the viewer.
+      wantFacing = -1.1;
     } else if (a.activity === "board") {
       // Back to the viewer, facing the board behind its spot.
       wantFacing = Math.PI;
@@ -1239,9 +1286,10 @@ export class Sim {
   private blocks(a: Agent): Region[] {
     const goal = a.target;
     const margin = a.size * 0.3;
+    // A goal just outside a block but within the margin is still heading in.
     return (this.layout?.blocks ?? [])
-      .filter((b) => !goal || !inside(b, goal))
-      .map((b) => grow(b, margin));
+      .map((b) => grow(b, margin))
+      .filter((b) => !goal || !inside(b, goal));
   }
 
   private clearance(a: Agent, o: Obstacle) {

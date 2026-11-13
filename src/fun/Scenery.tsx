@@ -691,6 +691,9 @@ function LoungeArea({
 }
 
 /** A little sailboat, its bow towards +z; a sailor sits amidships. */
+/** The boat as moored; a sailor's is scaled to match, less its own size. */
+export const BOAT_SCALE = 1.15;
+
 export function Boat() {
   const hull = "#c8714a";
   return (
@@ -784,6 +787,11 @@ function LakeArea({
   );
   const pierLength = pierFoot.x - pierEnd.x;
   const posts = Math.max(2, Math.round(pierLength / 0.5));
+  // Planks on past the shore under the whole line for the boat.
+  const walkEnd = Math.max(
+    pierFoot.x,
+    (lake.dock[lake.dock.length - 1]?.x ?? 0) + 0.45,
+  );
   return (
     <>
       <mesh
@@ -832,8 +840,8 @@ function LakeArea({
         </mesh>
       ))}
       {/* The pier: planks on posts, from the shore out over the water. */}
-      <mesh position={[(pierFoot.x + pierEnd.x) / 2, 0.07, pierEnd.z]}>
-        <boxGeometry args={[pierLength + 0.3, 0.04, 0.42]} />
+      <mesh position={[(walkEnd + pierEnd.x - 0.15) / 2, 0.07, pierEnd.z]}>
+        <boxGeometry args={[walkEnd - pierEnd.x + 0.15, 0.04, 0.42]} />
         <meshStandardMaterial color="#a77b50" flatShading />
       </mesh>
       {Array.from({ length: posts }, (_, i) =>
@@ -852,8 +860,8 @@ function LakeArea({
         )),
       )}
       {/* Moored alongside the pier's end, bow out to the open water. */}
-      <group position={[pierEnd.x - 0.2, 0.02, pierEnd.z + 0.45]}>
-        <group ref={boat} rotation-y={-Math.PI / 2} scale={0.75}>
+      <group position={[lake.berth.x, 0.02, lake.berth.z]}>
+        <group ref={boat} rotation-y={-Math.PI / 2} scale={BOAT_SCALE}>
           <Boat />
         </group>
       </group>

@@ -4,7 +4,7 @@ import * as THREE from "three";
 import type { Resident } from "./residents";
 import type { Agent, Sim } from "./sim";
 import { useCropMaterials } from "./Garden";
-import { Boat, Drink, FloatRing } from "./Scenery";
+import { BOAT_SCALE, Boat, Drink, FloatRing } from "./Scenery";
 import { hashString } from "./spec";
 import { STAGE_HEIGHT } from "./stage";
 import type {
@@ -837,6 +837,8 @@ export function Character({
     // Off across the lake, sat in its boat as it rocks on the water.
     const sailing = a.activity === "sail";
     boat.current!.visible = sailing;
+    // The moored boat's size, whatever size its sailor is.
+    boat.current!.scale.setScalar(BOAT_SCALE / a.size);
     if (sailing) {
       root.current.position.y = 0.02 + Math.sin(t * 1.6) * 0.02;
       root.current.rotation.z = Math.sin(t * 1.2) * 0.05;
@@ -982,6 +984,7 @@ export function Character({
         break;
       }
       case "pause":
+      case "queue":
         b.scale.y = 1 + Math.sin(t * 2.2) * 0.02;
         b.rotation.y = Math.sin(t * 0.7) * 0.3;
         if (mood === "shipped" && Math.sin(t * 1.7) > 0.85) {
@@ -1187,7 +1190,7 @@ export function Character({
           </mesh>
         ))}
       </group>
-      <group ref={boat} scale={1.1} visible={false}>
+      <group ref={boat} visible={false}>
         <Boat />
       </group>
       <group

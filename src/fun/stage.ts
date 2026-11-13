@@ -43,6 +43,9 @@ const CHAIR_ROW_PX = 76;
 const CHAIR_ROWS = 3;
 /** How far a portal sits in from its meadow's edge by the panel. */
 const PORTAL_INSET = 1;
+/** Between places in the line for the boat: wide enough for a compact name
+ *  tag over every other one, the rest staggered up a row. */
+const DOCK_STEP = 1.1;
 /** Below this the left meadow is too narrow to give a corner to a lake. */
 const MIN_LAKE_WIDTH = 4;
 
@@ -283,16 +286,24 @@ function lake(region: Region, visible: Bounds): Lake | null {
     zMax: region.zMin + 3.4,
   };
   const z = (water.zMin + water.zMax) / 2 + 0.5;
+  const shore = {
+    xMin: region.xMin,
+    xMax: Math.min(region.xMax, water.xMax + 2.6),
+    zMin: region.zMin,
+    zMax: water.zMax + 2.2,
+  };
+  const pierEnd = { x: water.xMax - 1.2, z };
+  const dock: Vec2[] = [];
+  for (let x = pierEnd.x + 0.3; x <= shore.xMax - 0.2; x += DOCK_STEP) {
+    dock.push({ x, z });
+  }
   return {
     water,
-    shore: {
-      xMin: region.xMin,
-      xMax: Math.min(region.xMax, water.xMax + 2.6),
-      zMin: region.zMin,
-      zMax: water.zMax + 2.2,
-    },
+    shore,
     pierFoot: { x: water.xMax + 0.35, z },
-    pierEnd: { x: water.xMax - 1.2, z },
+    pierEnd,
+    berth: { x: pierEnd.x - 0.25, z: z + 0.62 },
+    dock,
     exit: { x: visible.xMin - 1.2, z: z - 0.4 },
   };
 }

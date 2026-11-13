@@ -240,7 +240,15 @@ function Aim() {
 }
 
 /** Pins each DOM label above its resident's head. */
-const COMPACT: ReadonlySet<Activity> = new Set(["seated", "lounge", "sleep"]);
+const COMPACT: ReadonlySet<Activity> = new Set([
+  "seated",
+  "lounge",
+  "sleep",
+  "queue",
+]);
+/** How far every other tag in the line for the boat is lifted, clear of its
+ *  neighbours'. */
+const DOCK_STAGGER_PX = 26;
 
 /**
  * A shaft of light from above the screen onto the chosen one, brighter while
@@ -379,7 +387,11 @@ function LabelProjector({
       v.set(a.pos.x, head * a.size + 0.1 + lift + aloft, a.pos.z);
       v.project(camera);
       let x = ((v.x + 1) / 2) * size.width;
-      const y = ((1 - v.y) / 2) * size.height;
+      const y =
+        ((1 - v.y) / 2) * size.height -
+        (a.activity === "queue" && (sim.dockIndex(r.id) ?? 0) % 2
+          ? DOCK_STAGGER_PX
+          : 0);
       // Kept on screen, and above all out from under the terminal pane: the
       // pane wins when a long tag can't have both. The hover card is wider
       // than the tag and slides on its own, so the tag stays over its head.
