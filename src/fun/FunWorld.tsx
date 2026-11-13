@@ -52,7 +52,23 @@ export interface FunWorldProps {
   menuActions: WorkspaceMenuActions;
   /** The terminal panel; the meadows are whatever it leaves either side. */
   panelRef: RefObject<HTMLElement | null>;
+  /**
+   * For screenshots: given, the world stands still and is handed a clock to
+   * move it by hand (`scripts/fun-shot.mjs`). Never set in the app.
+   */
+  onManualClock?: (clock: ManualClock) => void;
 }
+
+/** Time in the world, moved by hand. */
+export interface ManualClock {
+  /** Runs the world on by `seconds`, then draws one frame of where it is. */
+  step: (seconds: number) => Promise<void>;
+  /** For a script to read where everyone is. */
+  sim: Sim;
+}
+
+/** Steps a manual clock takes the sim in, matching the display's pace. */
+const MANUAL_STEP = 1 / 60;
 
 function useAvatars(): Map<WorkspaceId, unknown> {
   const [avatars, setAvatars] = useState<Map<WorkspaceId, unknown>>(new Map());
@@ -91,11 +107,21 @@ function useStage(panelRef: RefObject<HTMLElement | null>): Stage | null {
         }),
       );
     };
-    measure();
     const observer = new ResizeObserver(measure);
-    if (panelRef.current) observer.observe(panelRef.current);
+    // The panel can mount after the world does, so wait for it to be there.
+    let raf = 0;
+    const watch = () => {
+      if (!panelRef.current) {
+        raf = requestAnimationFrame(watch);
+        return;
+      }
+      measure();
+      observer.observe(panelRef.current);
+    };
+    watch();
     window.addEventListener("resize", measure);
     return () => {
+      cancelAnimationFrame(raf);
       observer.disconnect();
       window.removeEventListener("resize", measure);
     };
@@ -123,9 +149,42 @@ function useEnvironment(): Environment {
  * glancing at while working somewhere else. The browser stops calling it
  * while the window is hidden.
  */
-function FrameDriver() {
+function FrameDriver({
+  sim,
+  onDeparted,
+  onManualClock,
+}: {
+  sim: Sim;
+  onDeparted: () => void;
+  onManualClock?: (clock: ManualClock) => void;
+}) {
   const advance = useThree((s) => s.advance);
+  // By hand: the sim is stepped here in fixed steps without drawing each one,
+  // then a frame is drawn at the clock's new time. React gets a turn first and
+  // between steps, so a change of state or a departure lands as it would live.
   useEffect(() => {
+    if (!onManualClock) return;
+    let now = 0;
+    const settle = () => new Promise((r) => setTimeout(r, 0));
+    onManualClock({
+      sim,
+      step: async (seconds) => {
+        await settle();
+        for (let left = seconds; left > 1e-6; left -= MANUAL_STEP) {
+          sim.step(Math.min(MANUAL_STEP, left));
+          if (sim.takeDeparted().length) {
+            onDeparted();
+            await settle();
+          }
+        }
+        now += seconds;
+        await settle();
+        advance(now);
+      },
+    });
+  }, [onManualClock, sim, onDeparted, advance]);
+  useEffect(() => {
+    if (onManualClock) return;
     let raf = 0;
     let last = 0;
     const interval = 1000 / MAX_FPS;
@@ -139,20 +198,24 @@ function FrameDriver() {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [advance]);
+  }, [advance, onManualClock]);
   return null;
 }
 
 function SimDriver({
   sim,
   onDeparted,
+  manual,
 }: {
   sim: Sim;
   /** Some deleted resident's boat has sailed off the window. */
   onDeparted: () => void;
+  /** Stepped by a manual clock instead, so frames only draw. */
+  manual: boolean;
 }) {
   // Mounted before every Character, so they all pose the same step.
   useFrame((_, delta) => {
+    if (manual) return;
     sim.step(Math.min(delta, 0.1));
     if (sim.takeDeparted().length) onDeparted();
   });
@@ -415,6 +478,7 @@ export default function FunWorld({
   onSelect,
   menuActions,
   panelRef,
+  onManualClock,
 }: FunWorldProps) {
   const avatars = useAvatars();
   const stage = useStage(panelRef);
@@ -501,8 +565,12 @@ export default function FunWorld({
       >
         <color attach="background" args={[env.ground]} />
         <Aim />
-        <FrameDriver />
-        <SimDriver sim={sim} onDeparted={onDeparted} />
+        <FrameDriver
+          sim={sim}
+          onDeparted={onDeparted}
+          onManualClock={onManualClock}
+        />
+        <SimDriver sim={sim} onDeparted={onDeparted} manual={!!onManualClock} />
         {stage && (
           <Scenery
             stage={stage}

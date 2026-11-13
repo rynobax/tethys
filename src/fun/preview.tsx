@@ -3,10 +3,11 @@
  * Every mood on screen at once, with real designs, for iterating on the look.
  */
 import { mockIPC } from "@tauri-apps/api/mocks";
-import { StrictMode, useEffect, useRef, useState } from "react";
+import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import type { GithubPrStatus, SessionInfo, Workspace } from "../types";
-import FunWorld from "./FunWorld";
+import FunWorld, { type ManualClock } from "./FunWorld";
 import "../App.css";
 
 const DESIGNS: Record<string, unknown> = {
@@ -362,6 +363,25 @@ function Preview() {
     };
   }, []);
   const bySample = new Map(samples.map((s) => [s.id, s]));
+  // `?shot`: time stands still, and `window.__fun` moves it and changes the
+  // samples, for `scripts/fun-shot.mjs`. Changes are flushed straight away so
+  // the next step already sees them.
+  const shot = location.search.includes("shot");
+  const onManualClock = useCallback((clock: ManualClock) => {
+    const set = (fn: (ss: Sample[]) => Sample[]) =>
+      flushSync(() => setSamples(fn));
+    Object.assign(window, {
+      __fun: {
+        step: clock.step,
+        sim: clock.sim,
+        mood: (id: string, mood: Sample["mood"]) =>
+          set((ss) => ss.map((s) => (s.id === id ? { ...s, mood } : s))),
+        remove: (id: string) => set((ss) => ss.filter((s) => s.id !== id)),
+        select: (id: string | null) => flushSync(() => setSelected(id)),
+        ids: () => SAMPLES.map((s) => `${s.id} ${s.branch} ${s.mood}`),
+      },
+    });
+  }, []);
   return (
     <div className="app fun">
       <FunWorld
@@ -382,6 +402,7 @@ function Preview() {
         }}
         onSelect={setSelected}
         panelRef={panelRef}
+        onManualClock={shot ? onManualClock : undefined}
       />
       {/* The real detail pane's skeleton, so the pane sizes as it does live. */}
       <main className="detail" ref={panelRef}>

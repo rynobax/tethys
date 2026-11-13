@@ -1231,7 +1231,12 @@ export function Character({
               <capsuleGeometry args={[0.065, 0.18, 3, 6]} />
               <Mat color={spec.body_color} />
             </mesh>
-            <group ref={bottle} position={[0, -0.3, 0.03]} visible={false}>
+            <group
+              ref={bottle}
+              position={[0, -0.3, 0.03]}
+              scale={1.5}
+              visible={false}
+            >
               <Champagne cork={cork} spray={spray} />
             </group>
             <group ref={drink} position={[0, -0.32, 0.03]} scale={1.4}>

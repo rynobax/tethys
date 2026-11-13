@@ -166,8 +166,6 @@ export interface Agent {
   /** Lounging: on a lounger, or up for a stroll, and until when. */
   rest: "seat" | "stroll";
   restUntil: number;
-  /** The mood it was chosen in; a new one sends it on to where that belongs. */
-  chosenMood: Mood | null;
   /** 0..1, how far it has risen off the ground into its light. */
   aloft: number;
   /** Popping the champagne until then, having just been merged. */
@@ -545,7 +543,6 @@ export class Sim {
       carrying: false,
       rest: Math.random() < 0.7 ? "seat" : "stroll",
       restUntil: this.now + rand(15, 45),
-      chosenMood: null,
       aloft: 0,
       popUntil: 0,
       voyage: null,
@@ -695,13 +692,13 @@ export class Sim {
       this.setActivity(a, "egg");
       return;
     }
+    if (this.basking(a, r)) return;
     if (a.side !== this.homeSide(r.mood)) {
       this.toPortal(a);
       return;
     }
     const region = this.ground(a.side, r.mood);
     if (!region) return;
-    if (this.basking(a, r)) return;
     const holder = this.holder(a);
 
     switch (r.mood) {
@@ -799,19 +796,14 @@ export class Sim {
   }
 
   /**
-   * The chosen one drops whatever it's doing and basks in its light. A walk to
-   * where its mood belongs is finished first, and a change of mood sends it on
-   * again, so it's always found where it would be anyway.
+   * The chosen one drops whatever it's doing and basks in its light, right
+   * where it is, for as long as it's chosen. Nothing moves it on meanwhile,
+   * not even a change of mood: that waits until Ryan looks elsewhere.
    */
   private basking(a: Agent, r: Resident): boolean {
     if (!r.selected) return false;
-    if (a.activity === "chosen") return a.chosenMood === r.mood;
-    const errand =
-      a.intent === "wander" || a.intent === "follow" || a.intent === "haul";
-    if (a.activity === "walk" && !errand) return false;
     a.target = null;
     a.intent = null;
-    a.chosenMood = r.mood;
     this.setActivity(a, "chosen");
     return true;
   }
