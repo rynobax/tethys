@@ -17,13 +17,15 @@ import {
   Character,
   DIMS,
   HAT_ROOM,
+  SEAT_LIFT,
   type Anchors,
   type CharacterHandlers,
+  type Voice,
 } from "./Character";
 import { Leash } from "./Leash";
 import { toResidents, type Resident } from "./residents";
 import { DUSK, MEADOW, Scenery, type Environment } from "./Scenery";
-import { Sim } from "./sim";
+import { Sim, type Activity } from "./sim";
 import {
   CAMERA_DISTANCE,
   PITCH,
@@ -157,6 +159,92 @@ function Aim() {
 }
 
 /** Pins each DOM label above its resident's head. */
+const COMPACT: ReadonlySet<Activity> = new Set(["seated", "lounge", "sleep"]);
+
+/**
+ * A shaft of light from above the screen onto the chosen one, brighter while
+ * Ryan types, with motes drifting down it.
+ */
+function DivineBeam({
+  sim,
+  selectedId,
+  voice,
+}: {
+  sim: Sim;
+  selectedId: WorkspaceId | null;
+  voice: Voice;
+}) {
+  const group = useRef<THREE.Group>(null);
+  const outer = useRef<THREE.MeshBasicMaterial>(null);
+  const core = useRef<THREE.MeshBasicMaterial>(null);
+  const motes = useRef<(THREE.Mesh | null)[]>([]);
+  const glow = useRef(0);
+  useFrame((state, delta) => {
+    const g = group.current;
+    const a = selectedId ? sim.agents.get(selectedId) : undefined;
+    if (!g) return;
+    g.visible = !!a && a.placed;
+    if (!a) return;
+    g.position.set(a.pos.x, 0, a.pos.z);
+    g.scale.setScalar(Math.max(0.001, a.portalScale));
+    const hearing = performance.now() - voice.lastKeyAt < 900;
+    glow.current += ((hearing ? 1 : 0) - glow.current) * Math.min(1, delta * 4);
+    const t = state.clock.elapsedTime;
+    if (outer.current) {
+      outer.current.opacity =
+        0.07 + 0.08 * glow.current + Math.sin(t * 2) * 0.01;
+    }
+    if (core.current) core.current.opacity = 0.08 + 0.14 * glow.current;
+    motes.current.forEach((m, i) => {
+      if (!m) return;
+      const fall = (t * (0.9 + glow.current * 1.5) + i * 0.61) % 4;
+      m.position.set(
+        Math.sin(i * 2.4) * 0.28,
+        4.2 - fall,
+        Math.cos(i * 2.4) * 0.28,
+      );
+      m.rotation.y = t * 2 + i;
+    });
+  });
+  return (
+    <group ref={group} visible={false}>
+      <mesh position-y={15}>
+        <cylinderGeometry args={[0.75, 0.5, 30, 20, 1, true]} />
+        <meshBasicMaterial
+          ref={outer}
+          color="#fff1c1"
+          transparent
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
+      <mesh position-y={15}>
+        <cylinderGeometry args={[0.3, 0.22, 30, 14, 1, true]} />
+        <meshBasicMaterial
+          ref={core}
+          color="#ffffff"
+          transparent
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
+      {Array.from({ length: 10 }, (_, i) => (
+        <mesh
+          key={i}
+          ref={(m) => {
+            motes.current[i] = m;
+          }}
+        >
+          <octahedronGeometry args={[0.035]} />
+          <meshBasicMaterial color="#fff6d6" />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
 function LabelProjector({
   sim,
   residents,
@@ -174,12 +262,19 @@ function LabelProjector({
       if (!el || !a) continue;
       const head =
         a.activity === "egg" ? 0.95 : DIMS[r.spec.body].top + HAT_ROOM;
-      const lift = a.activity === "pitch" ? STAGE_HEIGHT : 0;
+      const lift =
+        a.activity === "pitch"
+          ? STAGE_HEIGHT
+          : a.activity === "seated"
+            ? STAGE_HEIGHT + SEAT_LIFT
+            : 0;
       v.set(a.pos.x, head * a.size + 0.1 + lift, a.pos.z).project(camera);
       const x = ((v.x + 1) / 2) * size.width;
       const y = ((1 - v.y) / 2) * size.height;
       el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`;
       el.style.opacity = String(a.portalScale);
+      // Sitting about, a resident gets a smaller tag so more fit side by side.
+      el.classList.toggle("compact", COMPACT.has(a.activity));
     }
   });
   return null;
@@ -302,6 +397,15 @@ export default function FunWorld({
   const sim = useMemo(() => new Sim(), []);
   const labels = useRef(new Map<string, HTMLDivElement>());
   const anchors = useRef<Anchors>(new Map());
+  const voice = useRef<Voice>({ lastKeyAt: -Infinity });
+  // Capture phase, since the terminal stops the keys it handles from bubbling.
+  useEffect(() => {
+    const heard = () => {
+      voice.current.lastKeyAt = performance.now();
+    };
+    window.addEventListener("keydown", heard, true);
+    return () => window.removeEventListener("keydown", heard, true);
+  }, []);
   const [hovered, setHovered] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(
     null,
@@ -369,6 +473,7 @@ export default function FunWorld({
             stage={stage}
             env={env}
             pitching={residents.some((r) => r.mood === "shipping")}
+            sim={sim}
           />
         )}
         {residents.map((r) => (
@@ -379,6 +484,7 @@ export default function FunWorld({
             handlers={handlers}
             anchors={anchors.current}
             collarColor={leashColor(r)}
+            voice={voice.current}
           />
         ))}
         {/* After every Character, so both ends have been posed this frame. */}
@@ -395,6 +501,7 @@ export default function FunWorld({
             />
           ) : null;
         })}
+        <DivineBeam sim={sim} selectedId={selectedId} voice={voice.current} />
         <LabelProjector sim={sim} residents={residents} labels={labels} />
       </Canvas>
       <div className="fun-labels">

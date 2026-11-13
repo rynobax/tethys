@@ -79,6 +79,17 @@ export const DIMS: Record<Body, Dims> = {
   },
 };
 
+/** Typing reaches the chosen one for this long after each keystroke. */
+const VOICE_HOLD_MS = 900;
+/** How far above the stage a seated resident's root sits, on its chair. */
+export const SEAT_LIFT = 0.1;
+/** Likewise on a log by the lounge's fire. */
+const LOG_LIFT = 0.07;
+
+export interface Voice {
+  lastKeyAt: number;
+}
+
 /** Room above the body a hat can take, for placing labels. */
 export const HAT_ROOM = 0.35;
 
@@ -666,6 +677,7 @@ export function Character({
   handlers,
   anchors,
   collarColor,
+  voice,
 }: {
   resident: Resident;
   sim: Sim;
@@ -673,6 +685,8 @@ export function Character({
   anchors: Anchors;
   /** Its parent's colour, for a child; `null` wears no collar. */
   collarColor: string | null;
+  /** When Ryan last typed, which the chosen one hears. */
+  voice: Voice;
 }) {
   const spec: AvatarSpec = resident.spec;
   const d = DIMS[spec.body];
@@ -692,8 +706,11 @@ export function Character({
   const groundProp = useRef<THREE.Group>(null);
   const parcel = useRef<THREE.Group>(null);
   const pedestal = useRef<THREE.Group>(null);
+  const crate = useRef<THREE.Group>(null);
+  const stick = useRef<THREE.Group>(null);
   const ring = useRef<THREE.Mesh>(null);
-  const alert = useRef<THREE.Mesh>(null);
+  /** 0..1, how hard the chosen one is listening to the voice from above. */
+  const listen = useRef(0);
   const propeller = useRef<THREE.Group>(null);
 
   const footColor = useMemo(
@@ -711,7 +728,13 @@ export function Character({
 
     root.current.position.set(
       a.pos.x,
-      a.activity === "pitch" ? STAGE_HEIGHT : 0,
+      a.activity === "pitch"
+        ? STAGE_HEIGHT
+        : a.activity === "seated"
+          ? STAGE_HEIGHT + SEAT_LIFT
+          : a.activity === "lounge"
+            ? LOG_LIFT
+            : 0,
       a.pos.z,
     );
     root.current.rotation.y =
@@ -724,19 +747,29 @@ export function Character({
     const isEgg = a.activity === "egg";
     egg.current!.visible = isEgg;
     figure.current!.visible = !isEgg;
+    // Asleep it lies on its back, face to the sky; otherwise upright.
+    const lying = a.activity === "sleep";
+    figure.current!.rotation.x = lying ? -1.45 : 0;
+    figure.current!.position.y = lying ? 0.3 : 0;
     if (ring.current) {
       ring.current.visible = resident.selected;
       ring.current.scale.setScalar(1 + Math.sin(t * 3) * 0.05);
     }
-    if (alert.current) {
-      alert.current.visible = mood === "needs_you";
-      alert.current.scale.setScalar(1 + Math.sin(t * 6) * 0.12);
-    }
+    // Typing is the voice from above; only the chosen one hears it.
+    const hearing =
+      resident.selected && performance.now() - voice.lastKeyAt < VOICE_HOLD_MS;
+    listen.current +=
+      ((hearing ? 1 : 0) - listen.current) *
+      Math.min(1, delta * (hearing ? 10 : 2.5));
+    const k = listen.current;
     if (propeller.current) propeller.current.rotation.y += delta * 14;
 
     if (isEgg) {
       const e = egg.current!;
-      if (mood === "hatching") {
+      e.position.y = k * 0.25;
+      if (k > 0.01) {
+        e.rotation.z = Math.sin(t * 28) * 0.12 * k;
+      } else if (mood === "hatching") {
         const burst = Math.sin(t * 1.3) > 0.2 ? 1 : 0.15;
         e.rotation.z = Math.sin(t * 16) * 0.16 * burst;
       } else if (mood === "failed") {
@@ -759,7 +792,12 @@ export function Character({
         spec.work === "sweeping");
     book.current!.visible = working && spec.work === "reading";
     parcel.current!.visible = shipping && !working;
-    const handsBusy = working || shipping;
+    const carrying = a.carrying && !working;
+    crate.current!.visible = carrying && !shipping;
+    // Toasting a marshmallow some of the time it sits by the fire.
+    const toasting = a.activity === "lounge" && Math.sin(t * 0.35) > 0;
+    stick.current!.visible = toasting;
+    const handsBusy = working || shipping || carrying;
     if (heldProp.current) heldProp.current.visible = !handsBusy;
     if (groundProp.current) groundProp.current.visible = working;
     pedestal.current!.visible = pitching;
@@ -808,12 +846,35 @@ export function Character({
         R.rotation.z = 2.75 + Math.sin(t * 9) * 0.28;
         break;
       case "sleep":
-        b.scale.y = 0.9 + Math.sin(t * 1.4) * 0.025;
-        b.rotation.z = 0.18;
+        b.scale.y = 0.95 + Math.sin(t * 1.4) * 0.03;
+        break;
+      case "lounge": {
+        const swing = Math.sin(t * 2.4) * 0.05;
+        footL.current!.position.set(-0.13, 0.1, 0.22 + swing);
+        footR.current!.position.set(0.13, 0.1, 0.22 - swing);
+        b.rotation.x = -0.06;
+        L.rotation.x = -0.5;
+        R.rotation.x = toasting ? -1.25 + Math.sin(t * 1.5) * 0.06 : -0.5;
+        break;
+      }
+      case "board":
+        // Scribbling at the board, back to the viewer.
+        R.rotation.x = -2.1 + Math.sin(t * 9) * 0.15;
+        R.rotation.z = 0.25 + Math.sin(t * 6) * 0.25;
+        b.rotation.z = Math.sin(t * 3) * 0.04;
         break;
       case "work":
         poseWork(spec.work, t, local, b, L, R);
         break;
+      case "seated": {
+        // Feet dangling off the chair, swinging, and a look round now and then.
+        const swing = Math.sin(t * 3.2) * 0.07;
+        footL.current!.position.set(-0.13, 0.12, 0.24 + swing);
+        footR.current!.position.set(0.13, 0.12, 0.24 - swing);
+        b.rotation.x = -0.08;
+        b.rotation.y = Math.sin(t * 0.45) > 0.6 ? Math.sin(t * 0.9) * 0.5 : 0;
+        break;
+      }
       case "pitch":
         // One hand sweeping up at the crowd, the other presenting the parcel.
         b.position.y = Math.abs(Math.sin(t * 2.6)) * 0.05;
@@ -828,6 +889,23 @@ export function Character({
       R.rotation.x = -1.15;
       L.rotation.z = 0.15;
       R.rotation.z = -0.15;
+    }
+
+    // Hearing the voice: rise a little, turn to the viewer, look up in awe
+    // with arms raised and eyes wide, whatever it was in the middle of.
+    if (k > 0.001) {
+      root.current.position.y += k * 0.3 + Math.sin(t * 3) * 0.03 * k;
+      b.rotation.y += (-a.facing - b.rotation.y) * k;
+      b.rotation.x += (-0.45 - b.rotation.x) * k;
+      L.rotation.x *= 1 - k;
+      R.rotation.x *= 1 - k;
+      L.rotation.z += (-2.5 - L.rotation.z) * k;
+      R.rotation.z += (2.5 - R.rotation.z) * k;
+      const wide = 1 + 0.35 * k;
+      eyes.current!.scale.set(wide, eyes.current!.scale.y * wide, wide);
+    } else {
+      eyes.current!.scale.x = 1;
+      eyes.current!.scale.z = 1;
     }
   });
 
@@ -872,10 +950,6 @@ export function Character({
       <mesh ref={ring} rotation-x={-Math.PI / 2} position-y={0.02}>
         <torusGeometry args={[0.55, 0.035, 6, 36]} />
         <meshBasicMaterial color="#ffffff" />
-      </mesh>
-      <mesh ref={alert} rotation-x={-Math.PI / 2} position-y={0.015}>
-        <torusGeometry args={[0.46, 0.05, 6, 36]} />
-        <meshBasicMaterial color="#ffd54f" />
       </mesh>
 
       <group ref={egg}>
@@ -944,6 +1018,16 @@ export function Character({
               <capsuleGeometry args={[0.065, 0.18, 3, 6]} />
               <Mat color={spec.body_color} />
             </mesh>
+            <group ref={stick} position-y={-0.3} rotation-x={Math.PI / 2}>
+              <mesh position-y={0.25}>
+                <cylinderGeometry args={[0.012, 0.012, 0.5, 4]} />
+                <Mat color="#8a6440" />
+              </mesh>
+              <mesh position-y={0.52}>
+                <cylinderGeometry args={[0.05, 0.05, 0.08, 8]} />
+                <Mat color="#fff3e0" />
+              </mesh>
+            </group>
             <group ref={tool} position-y={-0.3}>
               <Tool work={spec.work} />
             </group>
@@ -961,6 +1045,18 @@ export function Character({
               <mesh key={s} position-x={s * 0.1} rotation-y={s * -0.3}>
                 <boxGeometry args={[0.2, 0.26, 0.02]} />
                 <Mat color={s < 0 ? spec.accent_color : "#fdf6e3"} />
+              </mesh>
+            ))}
+          </group>
+          <group ref={crate} position={[0, d.shoulder - 0.18, d.faceZ + 0.2]}>
+            <mesh>
+              <boxGeometry args={[0.32, 0.28, 0.28]} />
+              <Mat color="#c08a5b" />
+            </mesh>
+            {[-0.1, 0.1].map((y) => (
+              <mesh key={y} position-y={y}>
+                <boxGeometry args={[0.34, 0.04, 0.3]} />
+                <Mat color="#9a6b47" />
               </mesh>
             ))}
           </group>

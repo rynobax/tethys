@@ -1,7 +1,7 @@
 import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
-import type { Pitch, Side, Vec2 } from "./sim";
+import type { Lounge, Pitch, Side, Sim, Vec2, Workshop } from "./sim";
 import { STAGE_HEIGHT, type Stage } from "./stage";
 
 /** Everything about the look that isn't a resident. Swap it to reskin. */
@@ -18,6 +18,8 @@ export interface Environment {
   rock: string;
   flowers: string[];
   portal: string;
+  /** The lounge's bare-earth clearing. */
+  clearing: string;
   fireflies: boolean;
 }
 
@@ -34,6 +36,7 @@ export const MEADOW: Environment = {
   rock: "#bdb8b0",
   flowers: ["#ff8fab", "#ffd166", "#ffffff", "#b39ddb"],
   portal: "#9b6bff",
+  clearing: "#d9c08f",
   fireflies: false,
 };
 
@@ -50,6 +53,7 @@ export const DUSK: Environment = {
   rock: "#7c7f86",
   flowers: ["#f48fb1", "#ffe082", "#b39ddb"],
   portal: "#b388ff",
+  clearing: "#6b5a43",
   fireflies: true,
 };
 
@@ -118,12 +122,18 @@ function scatter(stage: Stage, side: Side): Decor {
     x: region.xMin + rng() * (region.xMax - region.xMin),
     z: region.zMin + rng() * (region.zMax - region.zMin),
   });
-  for (let i = 0; i < area * 0.04; i++)
-    decor.rocks.push({
-      ...point(),
-      s: 0.12 + rng() * 0.16,
-      r: rng() * Math.PI,
-    });
+  // Rocks keep out of the zones, where they'd sit under someone's feet.
+  const zones = [stage.layout.lounge?.area, stage.layout.workshop?.area];
+  const inZone = (p: Vec2) =>
+    side === "right" &&
+    zones.some(
+      (z) => z && p.x > z.xMin && p.x < z.xMax && p.z > z.zMin && p.z < z.zMax,
+    );
+  for (let i = 0; i < area * 0.04; i++) {
+    const p = point();
+    if (inZone(p)) continue;
+    decor.rocks.push({ ...p, s: 0.12 + rng() * 0.16, r: rng() * Math.PI });
+  }
   for (let i = 0; i < area * 0.35; i++)
     decor.flowers.push({ ...point(), c: Math.floor(rng() * 4) });
   for (let i = 0; i < area * 0.3; i++) decor.tufts.push(point());
@@ -355,7 +365,200 @@ function Onlooker({ at, seed }: { at: Vec2; seed: number }) {
 }
 
 /** A low stage with bunting at the back, and its audience in front. */
-function PitchArea({ pitch, env }: { pitch: Pitch; env: Environment }) {
+/** A stage chair, drawn only while someone has it, so the queue can be counted. */
+function Chair({ at, index, sim }: { at: Vec2; index: number; sim: Sim }) {
+  const group = useRef<THREE.Group>(null);
+  useFrame(() => {
+    if (group.current) group.current.visible = sim.chairTaken(index);
+  });
+  const wood = "#7a5236";
+  return (
+    <group ref={group} position={[at.x, STAGE_HEIGHT, at.z]} visible={false}>
+      <mesh position-y={0.16}>
+        <boxGeometry args={[0.4, 0.04, 0.36]} />
+        <meshStandardMaterial color={wood} flatShading />
+      </mesh>
+      {[
+        [-0.17, -0.15],
+        [0.17, -0.15],
+        [-0.17, 0.15],
+        [0.17, 0.15],
+      ].map(([x, z]) => (
+        <mesh key={`${x}${z}`} position={[x, 0.07, z]}>
+          <boxGeometry args={[0.04, 0.14, 0.04]} />
+          <meshStandardMaterial color={wood} flatShading />
+        </mesh>
+      ))}
+      <mesh position={[0, 0.34, -0.17]}>
+        <boxGeometry args={[0.4, 0.32, 0.04]} />
+        <meshStandardMaterial color={wood} flatShading />
+      </mesh>
+    </group>
+  );
+}
+
+/** A dirt clearing with a campfire, log seats round it and bedrolls about. */
+function LoungeArea({ lounge, env }: { lounge: Lounge; env: Environment }) {
+  const flames = useRef<THREE.Group>(null);
+  const light = useRef<THREE.PointLight>(null);
+  useFrame((state) => {
+    const t = state.clock.elapsedTime;
+    flames.current?.children.forEach((f, i) => {
+      f.scale.y = 1 + Math.sin(t * (7 + i * 2.3) + i) * 0.22;
+      f.rotation.y = t * (0.6 + i * 0.2);
+    });
+    if (light.current) light.current.intensity = 2.4 + Math.sin(t * 9) * 0.4;
+  });
+  const { area, fire } = lounge;
+  const rx = (area.xMax - area.xMin) / 2 + 0.3;
+  const rz = (area.zMax - area.zMin) / 2;
+  return (
+    <>
+      <mesh
+        rotation-x={-Math.PI / 2}
+        position={[fire.x, 0.004, (area.zMin + area.zMax) / 2]}
+        scale={[rx, rz, 1]}
+      >
+        <circleGeometry args={[1, 28]} />
+        <meshStandardMaterial color={env.clearing} />
+      </mesh>
+      <group position={[fire.x, 0, fire.z]}>
+        {Array.from({ length: 7 }, (_, i) => (
+          <mesh
+            key={i}
+            position={[
+              Math.cos((i / 7) * Math.PI * 2) * 0.32,
+              0.05,
+              Math.sin((i / 7) * Math.PI * 2) * 0.32,
+            ]}
+          >
+            <dodecahedronGeometry args={[0.08, 0]} />
+            <meshStandardMaterial color={env.rock} flatShading />
+          </mesh>
+        ))}
+        {[0, 1].map((i) => (
+          <mesh key={i} position-y={0.06} rotation={[0, i * 1.4, Math.PI / 2]}>
+            <cylinderGeometry args={[0.045, 0.045, 0.5, 6]} />
+            <meshStandardMaterial color={env.trunk} flatShading />
+          </mesh>
+        ))}
+        <group ref={flames} position-y={0.1}>
+          {["#ff9f1c", "#ffcd3c", "#ff6b35"].map((c, i) => (
+            <mesh key={c} position={[(i - 1) * 0.06, 0.12, 0]}>
+              <coneGeometry args={[0.1 - i * 0.015, 0.34 - i * 0.05, 5]} />
+              <meshBasicMaterial color={c} />
+            </mesh>
+          ))}
+        </group>
+        <pointLight
+          ref={light}
+          position-y={0.5}
+          color="#ffb050"
+          distance={5}
+          decay={1}
+        />
+      </group>
+      {lounge.seats.map((p, i) => {
+        // Lengthways round the fire, so whoever sits faces it.
+        const angle = Math.atan2(p.x - fire.x, p.z - fire.z);
+        return (
+          <mesh
+            key={i}
+            position={[p.x, 0.07, p.z]}
+            rotation={[0, angle + Math.PI / 2, Math.PI / 2]}
+          >
+            <cylinderGeometry args={[0.08, 0.08, 0.5, 7]} />
+            <meshStandardMaterial color={env.trunk} flatShading />
+          </mesh>
+        );
+      })}
+      {lounge.naps.map((p, i) => (
+        <group key={i} position={[p.x, 0, p.z - 0.3]}>
+          <mesh position-y={0.025}>
+            <boxGeometry args={[0.42, 0.05, 0.85]} />
+            <meshStandardMaterial
+              color={env.flowers[i % env.flowers.length]}
+              flatShading
+            />
+          </mesh>
+          <mesh position={[0, 0.06, -0.32]}>
+            <boxGeometry args={[0.3, 0.07, 0.16]} />
+            <meshStandardMaterial color="#f4efe4" flatShading />
+          </mesh>
+        </group>
+      ))}
+    </>
+  );
+}
+
+/** A paved yard, two whiteboards along the back, and two piles of crates. */
+function WorkshopArea({
+  workshop,
+  bottom,
+}: {
+  workshop: Workshop;
+  bottom: number;
+}) {
+  const { area } = workshop;
+  const w = area.xMax - area.xMin + 0.6;
+  const d = bottom - area.zMin;
+  return (
+    <>
+      <mesh
+        rotation-x={-Math.PI / 2}
+        position={[(area.xMin + area.xMax) / 2, 0.004, area.zMin + d / 2]}
+      >
+        <planeGeometry args={[w, d]} />
+        <meshStandardMaterial color="#8f8a80" transparent opacity={0.35} />
+      </mesh>
+      {workshop.boards.map((p, i) => (
+        <group key={i} position={[p.x, 0, p.z - 0.5]}>
+          {[-0.36, 0.36].map((x) => (
+            <mesh key={x} position={[x, 0.42, 0]}>
+              <cylinderGeometry args={[0.025, 0.025, 0.84, 5]} />
+              <meshStandardMaterial color="#6b6f76" flatShading />
+            </mesh>
+          ))}
+          <mesh position-y={0.62}>
+            <boxGeometry args={[0.8, 0.48, 0.03]} />
+            <meshStandardMaterial color="#f7f7f2" />
+          </mesh>
+          {/* A few scribbles, so it reads as written on. */}
+          {[0.12, 0.02, -0.08].map((y, j) => (
+            <mesh key={y} position={[-0.06 + j * 0.05, 0.62 + y, 0.017]}>
+              <planeGeometry args={[0.5 - j * 0.12, 0.025]} />
+              <meshBasicMaterial color={["#3d6fd1", "#d14d3d", "#2e9e5b"][j]} />
+            </mesh>
+          ))}
+        </group>
+      ))}
+      {workshop.piles.map((p, i) => (
+        <group key={i} position={[p.x, 0, p.z]}>
+          {[
+            [0, 0, 0],
+            [0.22, 0, 0.05],
+            [0.1, 0.2, 0.02],
+          ].map(([x, y, z], j) => (
+            <mesh key={j} position={[x - 0.1, y + 0.1, z]} rotation-y={j * 0.3}>
+              <boxGeometry args={[0.2, 0.2, 0.2]} />
+              <meshStandardMaterial color="#c08a5b" flatShading />
+            </mesh>
+          ))}
+        </group>
+      ))}
+    </>
+  );
+}
+
+function PitchArea({
+  pitch,
+  env,
+  sim,
+}: {
+  pitch: Pitch;
+  env: Environment;
+  sim: Sim;
+}) {
   const { stage, crowd } = pitch;
   const w = stage.xMax - stage.xMin;
   const d = stage.zMax - stage.zMin;
@@ -405,6 +608,9 @@ function PitchArea({ pitch, env }: { pitch: Pitch; env: Environment }) {
           </mesh>
         );
       })}
+      {pitch.chairs.map((p, i) => (
+        <Chair key={i} at={p} index={i} sim={sim} />
+      ))}
       {crowd.map((p, i) => (
         <Onlooker key={i} at={p} seed={i + 1} />
       ))}
@@ -416,12 +622,15 @@ export function Scenery({
   stage,
   env,
   pitching,
+  sim,
 }: {
   stage: Stage;
   env: Environment;
   /** Whether anyone is Shipping and waiting, which is when the stage is up. */
   pitching: boolean;
+  sim: Sim;
 }) {
+  const { lounge, workshop, pitch } = stage.layout;
   const decor = useMemo(
     () => (["left", "right"] as const).map((side) => scatter(stage, side)),
     [stage],
@@ -494,9 +703,14 @@ export function Scenery({
         const at = stage.layout.portals[side];
         return at ? <Portal key={side} at={at} color={env.portal} /> : null;
       })}
-      {pitching && stage.layout.pitch && (
-        <PitchArea pitch={stage.layout.pitch} env={env} />
+      {lounge && <LoungeArea lounge={lounge} env={env} />}
+      {workshop && (
+        <WorkshopArea
+          workshop={workshop}
+          bottom={pitching && pitch ? pitch.top : workshop.area.zMax}
+        />
       )}
+      {pitching && pitch && <PitchArea pitch={pitch} env={env} sim={sim} />}
       {env.fireflies && <Fireflies stage={stage} />}
     </>
   );
