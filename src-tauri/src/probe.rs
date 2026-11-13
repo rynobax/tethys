@@ -22,6 +22,8 @@ use crate::state::SessionRuntimeState;
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Probe {
+    /// The agent's own pid, which the budget sweep keys servers by.
+    pub pid: Option<u32>,
     #[serde(rename = "sessionId")]
     pub session_id: Option<String>,
     pub status: Option<String>,
@@ -41,10 +43,12 @@ fn sessions_dir() -> Option<PathBuf> {
 
 /// `None` defers to the hooks. `shell` is a turn that ended with a background
 /// shell still running; the agent wakes when it finishes, so it isn't Ryan's
-/// turn yet. A backgrounded dev server never finishes and so reads as working
-/// for as long as it runs.
-pub fn state_from_status(status: &str) -> Option<SessionRuntimeState> {
+/// turn yet. A dev server never finishes, though, so when every background
+/// shell is `serving` (holds a listening socket, `budget::serving_agents`) the
+/// turn is over.
+pub fn state_from_status(status: &str, serving: bool) -> Option<SessionRuntimeState> {
     match status {
+        "shell" if serving => Some(SessionRuntimeState::Idle),
         "busy" | "shell" => Some(SessionRuntimeState::Working),
         "waiting" => Some(SessionRuntimeState::WaitingInput),
         "idle" => Some(SessionRuntimeState::Idle),
@@ -98,7 +102,16 @@ mod tests {
 
     #[test]
     fn a_background_shell_is_still_working() {
-        assert_eq!(state_from_status("shell"), Some(SessionRuntimeState::Working));
+        assert_eq!(state_from_status("shell", false), Some(SessionRuntimeState::Working));
     }
 
+    #[test]
+    fn a_background_server_ends_the_turn() {
+        assert_eq!(state_from_status("shell", true), Some(SessionRuntimeState::Idle));
+    }
+
+    #[test]
+    fn serving_only_matters_after_the_turn() {
+        assert_eq!(state_from_status("busy", true), Some(SessionRuntimeState::Working));
+    }
 }

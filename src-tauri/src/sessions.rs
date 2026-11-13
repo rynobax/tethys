@@ -88,6 +88,9 @@ pub struct SessionSupervisor {
     /// Why the memory budget killed something, held until a hook can tell
     /// the agent.
     budget_notices: Mutex<HashMap<SessionId, Vec<String>>>,
+    /// Agent pids whose background shells are all servers, from the budget
+    /// sweep.
+    serving_agents: Mutex<HashSet<u32>>,
     turn: Arc<TurnTracker>,
     artifacts: Arc<ArtifactStore>,
     avatars: Arc<Avatars>,
@@ -107,6 +110,7 @@ impl SessionSupervisor {
             pending: Mutex::new(HashMap::new()),
             activity: Mutex::new(HashMap::new()),
             budget_notices: Mutex::new(HashMap::new()),
+            serving_agents: Mutex::new(HashSet::new()),
             turn: Arc::new(TurnTracker::new()),
             artifacts,
             avatars,
@@ -158,12 +162,18 @@ impl SessionSupervisor {
         }
     }
 
+    pub fn set_serving_agents(&self, agents: HashSet<u32>) {
+        *self.serving_agents.lock().unwrap() = agents;
+    }
+
     pub async fn reconcile_probes(&self, probes: &[crate::probe::Probe]) {
+        let serving = self.serving_agents.lock().unwrap().clone();
         let parsed: Vec<ProbeView> = probes
             .iter()
             .filter_map(|p| {
                 let sid = p.session_id.as_deref()?;
-                let state = crate::probe::state_from_status(p.status.as_deref()?)?;
+                let serving = p.pid.is_some_and(|pid| serving.contains(&pid));
+                let state = crate::probe::state_from_status(p.status.as_deref()?, serving)?;
                 Some(ProbeView {
                     sid,
                     cwd: p.cwd.as_deref(),
