@@ -414,7 +414,7 @@ export class Sim {
       if (
         a &&
         r.mood === "shipped" &&
-        (was === "shipping" || was === "needs_you")
+        (was === "shipping" || was === "needs_you" || was === "ready")
       ) {
         a.popUntil = this.now + POP_SECONDS;
       }
@@ -558,7 +558,10 @@ export class Sim {
   private homeSide(mood: Mood): Side {
     const lakeside = mood === "shipped" && !!this.layout?.lake;
     const want: Side =
-      mood === "needs_you" || mood === "shipping" || lakeside
+      mood === "needs_you" ||
+      mood === "shipping" ||
+      mood === "ready" ||
+      lakeside
         ? "left"
         : "right";
     return this.region(want) || !this.region(other(want)) ? want : other(want);
@@ -574,7 +577,8 @@ export class Sim {
       return region;
     }
     const lake = this.layout?.lake;
-    if (mood === "shipped" && lake) return lake.shore;
+    // The merged in line for the boat, the ready to merge about the shore.
+    if ((mood === "shipped" || mood === "ready") && lake) return lake.shore;
     // Off the street, so nobody stands about in front of the houses.
     const street = this.layout?.street;
     const open =

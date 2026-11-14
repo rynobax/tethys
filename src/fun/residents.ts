@@ -14,6 +14,9 @@ export type Mood =
   | "idle"
   /** Shipping and waiting on other people: pitching to the crowd. */
   | "shipping"
+  /** Shipping, approved and green: by the lake, champagne in hand, for Ryan
+   *  to merge. */
+  | "ready"
   | "shipped";
 
 /** One workspace as the world sees it. */
@@ -64,8 +67,9 @@ function moodOf(w: Workspace, inputs: ResidentInputs): Mood {
   // turns are mostly ones Tethys started.
   const signal = shipSignal(w);
   if (signal) {
-    if (signal === "ready" || signal === "no_reviewer") return "needs_you";
-    return inputs.working(w) ? "working" : "shipping";
+    if (signal === "no_reviewer") return "needs_you";
+    if (inputs.working(w)) return "working";
+    return signal === "ready" ? "ready" : "shipping";
   }
   // Merged, all that's left is to delete it, even with a turn unread.
   if (w.shipment?.kind === "shipped") return "shipped";
@@ -84,7 +88,6 @@ function shipSignal(w: Workspace) {
 
 function noteOf(w: Workspace): string | null {
   const signal = shipSignal(w);
-  if (signal === "ready") return "ready to merge";
   if (signal === "no_reviewer") return "no reviewer";
   return null;
 }
