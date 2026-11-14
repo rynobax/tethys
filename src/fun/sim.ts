@@ -90,7 +90,7 @@ export interface Obstacle extends Vec2 {
   r: number;
 }
 
-/** Where dismissed residents relax: on a lounger by the pool, or asleep on it. */
+/** Where idle residents relax: on a lounger by the pool, or asleep on it. */
 export interface Lounge {
   area: Region;
   pool: Region;
@@ -247,7 +247,8 @@ export interface Agent {
   chore: Chore | null;
   carrying: number | null;
   /** Lounging: on a lounger, or up for a stroll, and until when. */
-  rest: "seat" | "stroll";
+  /** Idle by the pool: on a lounger, asleep on a ring, or strolling. */
+  rest: Rest;
   restUntil: number;
   /** 0..1, how far it has risen off the ground into its light. */
   aloft: number;
@@ -302,7 +303,20 @@ const HOUSE_SETTLE = 1;
 /** How long a parent cheers each task done. */
 const CHEER_SECONDS = 2.6;
 /** The ones Ryan has dismissed, who go to the lounge. */
-const RESTING: ReadonlySet<Mood> = new Set(["idle", "asleep"]);
+const RESTING: ReadonlySet<Mood> = new Set(["idle"]);
+
+type Rest = "seat" | "float" | "stroll";
+const REST_SECONDS: Record<Rest, () => number> = {
+  seat: () => rand(20, 50),
+  float: () => rand(25, 60),
+  stroll: () => rand(6, 14),
+};
+/** Mostly a lounger, sometimes a nap on the water, now and then a stroll. */
+function pickRest(stroll = true): Rest {
+  const roll = Math.random();
+  if (roll < 0.6) return "seat";
+  return roll < 0.85 || !stroll ? "float" : "stroll";
+}
 /** How long a resident pops its champagne for once it's merged. */
 const POP_SECONDS = 3.5;
 const SPEED_SAIL = 0.9;
@@ -682,7 +696,7 @@ export class Sim {
       taskUntil: 0,
       chore: null,
       carrying: null,
-      rest: Math.random() < 0.7 ? "seat" : "stroll",
+      rest: pickRest(),
       restUntil: this.now + rand(15, 45),
       aloft: 0,
       popUntil: 0,
@@ -709,9 +723,7 @@ export class Sim {
         ? this.attentionSpot(a)
         : r.mood === "shipping"
           ? (this.pitchPost(a)?.spot ?? null)
-          : r.mood === "asleep" && a.side === "right"
-            ? claim(this.naps, a.id, this.layout?.lounge?.naps ?? [])
-            : (this.quiltingPlace(a, r)?.seat ?? this.loungerFor(a, r));
+          : (this.quiltingPlace(a, r)?.seat ?? this.loungerFor(a, r));
     const parent = this.parentOf(a);
     a.pos = slot
       ? { x: slot.x, z: slot.z }
@@ -729,7 +741,8 @@ export class Sim {
   private loungerFor(a: Agent, r: Resident): Vec2 | null {
     const lounge = this.layout?.lounge;
     if (!lounge || a.side !== "right" || !RESTING.has(r.mood)) return null;
-    if (r.mood === "asleep" || a.rest !== "seat") return null;
+    if (a.rest === "float") return claim(this.naps, a.id, lounge.naps);
+    if (a.rest !== "seat") return null;
     return claim(this.seats, a.id, lounge.seats);
   }
 
@@ -801,7 +814,9 @@ export class Sim {
     if (!ROAMING.has(r.mood) || !right || a.rest !== "seat") {
       this.seats.delete(a.id);
     }
-    if (r.mood !== "asleep" || !right) this.naps.delete(a.id);
+    if (!ROAMING.has(r.mood) || !right || a.rest !== "float") {
+      this.naps.delete(a.id);
+    }
     if (r.mood !== "shipped" || right) this.docks.delete(a.id);
     if (!r.quilts || !QUILTING.has(r.mood) || !right) {
       this.quilters.delete(a.id);
@@ -860,20 +875,6 @@ export class Sim {
     const region = this.ground(a.side, r.mood);
     if (!region) return;
     switch (r.mood) {
-      case "asleep": {
-        const nap =
-          a.side === "right"
-            ? claim(this.naps, a.id, this.layout?.lounge?.naps ?? [])
-            : null;
-        if (nap) {
-          this.head(a, nap, "sleep");
-        } else {
-          a.target = null;
-          a.spot = null;
-          this.setActivity(a, "sleep");
-        }
-        return;
-      }
       case "needs_you": {
         const slot = this.attentionSpot(a);
         if (!slot && !a.spot) {
@@ -1278,8 +1279,9 @@ export class Sim {
   private lounge(a: Agent, area: Region) {
     const lounge = this.layout!.lounge!;
     if (this.now > a.restUntil) {
-      a.rest = a.rest === "seat" ? "stroll" : "seat";
-      a.restUntil = this.now + (a.rest === "seat" ? rand(20, 50) : rand(6, 14));
+      // A stroll between each sit or nap.
+      a.rest = a.rest === "stroll" ? pickRest(false) : "stroll";
+      a.restUntil = this.now + REST_SECONDS[a.rest]();
     }
     const seat =
       a.rest === "seat" ? claim(this.seats, a.id, lounge.seats) : null;
@@ -1288,7 +1290,15 @@ export class Sim {
       this.head(a, seat, "lounge");
       return;
     }
-    if (a.rest === "seat") a.rest = "stroll";
+    const ring =
+      a.rest === "float" ? claim(this.naps, a.id, lounge.naps) : null;
+    if (ring) {
+      a.spot = null;
+      this.head(a, ring, "sleep");
+      return;
+    }
+    // Nothing free: a stroll until there is.
+    a.rest = "stroll";
     a.spot = null;
     this.roam(a, area);
   }

@@ -1,4 +1,4 @@
-import type { Folder, SessionInfo, Workspace, WorkspaceId } from "../types";
+import type { Folder, Workspace, WorkspaceId } from "../types";
 import { shippingPrs, shippingSignal } from "../workspaceDerived";
 import { ANIMAL_NAMES, type AnimalName } from "./animals";
 import { hashString, workFor, type Work } from "./spec";
@@ -10,7 +10,6 @@ export type Mood =
   | "failed"
   | "needs_you"
   | "working"
-  | "asleep"
   | "idle"
   /** Shipping and waiting on other people: pitching to the crowd. */
   | "shipping"
@@ -45,7 +44,6 @@ export interface Resident {
 
 export interface ResidentInputs {
   workspaces: Workspace[];
-  sessions: Map<WorkspaceId, SessionInfo | null>;
   needsTurn: (w: Workspace) => boolean;
   working: (w: Workspace) => boolean;
   selectedId: WorkspaceId | null;
@@ -75,8 +73,8 @@ function moodOf(w: Workspace, inputs: ResidentInputs): Mood {
   if (w.shipment?.kind === "shipped") return "shipped";
   if (inputs.needsTurn(w)) return "needs_you";
   if (inputs.working(w)) return "working";
-  const session = inputs.sessions.get(w.id);
-  if (!session?.running) return "asleep";
+  // A session closed for being idle is still idle: a turn left unread
+  // still needs Ryan, above.
   return "idle";
 }
 

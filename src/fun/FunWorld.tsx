@@ -11,7 +11,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import { ContextMenu, type WorkspaceMenuActions } from "../Sidebar";
 import { useTheme } from "../theme";
-import type { Folder, SessionInfo, Workspace, WorkspaceId } from "../types";
+import type { Folder, Workspace, WorkspaceId } from "../types";
 import { ANIMALS, type AnimalName } from "./animals";
 import { YOUNG_HEAD } from "./animals/rig";
 import {
@@ -43,7 +43,6 @@ const MAX_FPS = 60;
 
 export interface FunWorldProps {
   workspaces: Workspace[];
-  sessions: Map<WorkspaceId, SessionInfo | null>;
   needsTurn: (w: Workspace) => boolean;
   working: (w: Workspace) => boolean;
   selectedId: WorkspaceId | null;
@@ -512,13 +511,11 @@ function Label({
   const badge =
     mood === "needs_you"
       ? "!"
-      : mood === "asleep"
-        ? "z"
-        : mood === "hatching"
-          ? "…"
-          : mood === "failed"
-            ? "×"
-            : null;
+      : mood === "hatching"
+        ? "…"
+        : mood === "failed"
+          ? "×"
+          : null;
   const classes = ["fun-label", `mood-${mood}`];
   if (resident.selected) classes.push("selected");
   if (hovered) classes.push("hovered");
@@ -551,7 +548,6 @@ function Label({
 
 export default function FunWorld({
   workspaces,
-  sessions,
   needsTurn,
   working,
   selectedId,
@@ -590,14 +586,13 @@ export default function FunWorld({
     () =>
       toResidents({
         workspaces,
-        sessions,
         needsTurn,
         working,
         selectedId,
         animals,
         folders,
       }),
-    [workspaces, sessions, needsTurn, working, selectedId, animals, folders],
+    [workspaces, needsTurn, working, selectedId, animals, folders],
   );
   // By hand, a change of mood is wanted in the very next step.
   const residents = useSettled(live, onManualClock ? 0 : SETTLE_MS);

@@ -7,12 +7,10 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
-import type { Folder, GithubPrStatus, SessionInfo, Workspace } from "../types";
+import type { Folder, GithubPrStatus, Workspace } from "../types";
 import FunWorld, { type ManualClock } from "./FunWorld";
 import Gallery from "./Gallery";
 import "../App.css";
-
-const running = { running: true } as SessionInfo;
 
 interface Sample {
   id: string;
@@ -21,7 +19,6 @@ interface Sample {
     | "needs_you"
     | "working"
     | "idle"
-    | "asleep"
     | "queued"
     | "creating"
     | "failed"
@@ -80,10 +77,10 @@ const SAMPLES: Sample[] = [
     parent: "e",
     folder: "lint",
   },
-  { id: "f", branch: "old-experiment", mood: "asleep", folder: "spikes" },
+  { id: "f", branch: "old-experiment", mood: "idle", folder: "spikes" },
   { id: "f2", branch: "spike-pdf-export", mood: "idle", folder: "spikes" },
   { id: "f3", branch: "try-new-linter", mood: "idle" },
-  { id: "f4", branch: "dead-end-idea", mood: "asleep" },
+  { id: "f4", branch: "dead-end-idea", mood: "idle" },
   {
     id: "k",
     branch: "metadata-prefetch-cache",
@@ -242,11 +239,6 @@ function Preview() {
     <div className="app fun">
       <FunWorld
         workspaces={samples.map(workspace)}
-        sessions={
-          new Map(
-            samples.map((s) => [s.id, s.mood === "asleep" ? null : running]),
-          )
-        }
         needsTurn={(w) => bySample.get(w.id)?.mood === "needs_you"}
         working={(w) => bySample.get(w.id)?.mood === "working"}
         selectedId={selected}

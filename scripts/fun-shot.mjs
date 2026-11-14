@@ -11,7 +11,7 @@
 // Commands, run in order:
 //   wait:SECONDS            run the world on that long
 //   mood:ID=MOOD            change a sample's mood (needs_you, working, idle,
-//                           asleep, shipping, shipped, queued, creating, failed)
+//                           shipping, shipped, queued, creating, failed)
 //   remove:ID               delete a sample
 //   progress:ID=DONE/TOTAL  set a sample's task count
 //   fold:FOLDER=1|0         shut (1) or open (0) a folder: lint, spikes, meta

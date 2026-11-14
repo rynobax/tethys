@@ -566,7 +566,6 @@ function App() {
           <Suspense fallback={null}>
             <FunWorld
               workspaces={visibleWorkspaces}
-              sessions={sessionByWorkspace}
               needsTurn={workspaceNeedsTurn}
               working={workspaceWorking}
               selectedId={selectedId}
