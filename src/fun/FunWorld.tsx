@@ -71,6 +71,70 @@ export interface ManualClock {
   sim: Sim;
 }
 
+/**
+ * How long a resident's state must hold before the world shows it. Tethys
+ * passes through states for a moment (a hook landing before the check that
+ * clears it), and each would otherwise send it walking off and back.
+ */
+const SETTLE_MS = 2000;
+
+/** What changing state means for a resident, shown together. */
+type Settled = Pick<Resident, "mood" | "readyToMerge" | "note">;
+
+const settledKey = (s: Settled) => `${s.mood}|${s.readyToMerge}|${s.note}`;
+
+/**
+ * Each resident as last shown until its new state has held for `ms`. One
+ * first seen shows its state at once.
+ */
+function useSettled(residents: Resident[], ms: number): Resident[] {
+  const shown = useRef(new Map<string, Settled>());
+  /** A state not yet shown, and when it was first seen. */
+  const pending = useRef(new Map<string, { key: string; at: number }>());
+  const [now, setNow] = useState(0);
+  const settled = useMemo(() => {
+    const t = performance.now();
+    const next = new Map<string, Settled>();
+    const out = residents.map((r) => {
+      const state: Settled = {
+        mood: r.mood,
+        readyToMerge: r.readyToMerge,
+        note: r.note,
+      };
+      const key = settledKey(state);
+      const held = shown.current.get(r.id);
+      const waiting = pending.current.get(r.id);
+      if (!held || ms <= 0 || settledKey(held) === key) {
+        pending.current.delete(r.id);
+        next.set(r.id, state);
+        return r;
+      }
+      if (waiting?.key !== key) pending.current.set(r.id, { key, at: t });
+      if (t - pending.current.get(r.id)!.at >= ms) {
+        pending.current.delete(r.id);
+        next.set(r.id, state);
+        return r;
+      }
+      next.set(r.id, held);
+      return { ...r, ...held };
+    });
+    for (const id of pending.current.keys()) {
+      if (!next.has(id)) pending.current.delete(id);
+    }
+    shown.current = next;
+    return out;
+    // `now` only wakes it to let a state that has held through.
+  }, [residents, ms, now]);
+  useEffect(() => {
+    const ats = [...pending.current.values()].map((p) => p.at + ms);
+    if (ats.length === 0) return;
+    const due = Math.min(...ats) - performance.now();
+    const timer = setTimeout(() => setNow(performance.now()), due + 20);
+    return () => clearTimeout(timer);
+  }, [settled, ms]);
+  return settled;
+}
+
 /** Steps a manual clock takes the sim in, matching the display's pace. */
 const MANUAL_STEP = 1 / 60;
 
@@ -522,7 +586,7 @@ export default function FunWorld({
 
   const menuFor = menu ? workspaces.find((w) => w.id === menu.id) : undefined;
 
-  const residents = useMemo(
+  const live = useMemo(
     () =>
       toResidents({
         workspaces,
@@ -535,6 +599,8 @@ export default function FunWorld({
       }),
     [workspaces, sessions, needsTurn, working, selectedId, animals, folders],
   );
+  // By hand, a change of mood is wanted in the very next step.
+  const residents = useSettled(live, onManualClock ? 0 : SETTLE_MS);
 
   // Layout first, so new residents spawn inside today's meadows.
   useLayoutEffect(() => {
