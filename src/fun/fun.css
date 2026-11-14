@@ -57,8 +57,7 @@
   padding: 1px 6px;
 }
 
-.fun-label.selected .fun-pill,
-.fun-label.hovered .fun-pill {
+.fun-label.selected .fun-pill {
   max-width: 280px;
 }
 
