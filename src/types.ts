@@ -69,6 +69,9 @@ export interface AgentSessionMeta {
   cwd: string;
   agent_session_id: string | null;
   transcript_path: string | null;
+  /** As last seen, kept through the session closing and Tethys restarting. */
+  runtime_state: SessionRuntimeState | null;
+  turn_acknowledged: boolean;
 }
 
 export interface Folder {

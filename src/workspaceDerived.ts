@@ -1,5 +1,18 @@
 import type { Folder, GithubPrStatus, RepoLink, Workspace } from "./types";
 
+/**
+ * Whether the workspace was left on Ryan's turn: `TurnState::needs_turn` in
+ * `turn.rs`, read off what was saved, for a session not live this run.
+ */
+export function turnLeftUnread(w: Workspace): boolean {
+  const meta = w.session;
+  return (
+    !!meta &&
+    !meta.turn_acknowledged &&
+    (meta.runtime_state === "idle" || meta.runtime_state === "waiting_input")
+  );
+}
+
 /** Several missed 45s poller ticks: polling is wedged or backed off. */
 const STALE_MS = 5 * 60 * 1000;
 

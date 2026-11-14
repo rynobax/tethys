@@ -726,7 +726,7 @@ impl SessionSupervisor {
         let mut info = h.info.clone();
         info.running = h.pty.is_running();
         let turn = self.turn.get(&h.info.id);
-        info.needs_turn = turn.needs_turn(info.running);
+        info.needs_turn = turn.needs_turn();
         info.working = turn.is_working(info.running);
         info.runtime_state = turn.state;
         info.notification_type = turn.notification_type;
@@ -817,7 +817,7 @@ fn publish_turn(app: &AppHandle, changed: &TurnChanged, running: bool) {
         TurnChangedEvent {
             changed,
             running,
-            needs_turn: snapshot.needs_turn(running),
+            needs_turn: snapshot.needs_turn(),
             working: snapshot.is_working(running),
         },
     );

@@ -17,9 +17,10 @@ pub struct TurnState {
 }
 
 impl TurnState {
-    pub fn needs_turn(&self, running: bool) -> bool {
-        running
-            && !self.acknowledged
+    /// Running or not: a turn left unread when the session closed, for being
+    /// idle or by a restart, is still Ryan's.
+    pub fn needs_turn(&self) -> bool {
+        !self.acknowledged
             && matches!(
                 self.state,
                 SessionRuntimeState::Idle | SessionRuntimeState::WaitingInput
@@ -68,6 +69,9 @@ pub struct TurnTracker {
     /// Sessions a child's news woke, whose coming to rest isn't Ryan's turn
     /// until he types (`hush`).
     hushed: Mutex<HashSet<String>>,
+    /// Sessions whose child exited with Ryan's turn unread, which keep that
+    /// state rather than going Dormant: nothing may change it but him.
+    exited: Mutex<HashSet<String>>,
 }
 
 impl TurnTracker {
@@ -98,7 +102,16 @@ impl TurnTracker {
         // A never-seen session also defaults to Dormant; it hasn't exited.
         let known = map.contains_key(session_id);
         let current = map.entry(session_id.to_string()).or_default();
-        let exited = known && current.state == SessionRuntimeState::Dormant;
+        let mut exited_set = self.exited.lock().unwrap();
+        let exited = exited_set.contains(session_id)
+            || (known && current.state == SessionRuntimeState::Dormant);
+        // A new life for the session.
+        if matches!(
+            signal,
+            TurnSignal::Spawned | TurnSignal::Reattached | TurnSignal::Restored { .. }
+        ) {
+            exited_set.remove(session_id);
+        }
         let before = current.clone();
 
         let mut changed = match signal {
@@ -135,6 +148,10 @@ impl TurnTracker {
 
             TurnSignal::ChildExited => {
                 if exited {
+                    false
+                } else if current.needs_turn() {
+                    // Left as it was: still his turn, now with nobody there.
+                    exited_set.insert(session_id.to_string());
                     false
                 } else {
                     *current = TurnState {
@@ -258,7 +275,7 @@ mod tests {
         // The probe lagging behind the Stop doesn't light it either.
         t.observe(S, WS, TurnSignal::Probe { state: Working });
         t.observe(S, WS, TurnSignal::Probe { state: Idle });
-        assert!(!t.get(S).needs_turn(true));
+        assert!(!t.get(S).needs_turn());
     }
 
     #[test]
@@ -267,7 +284,7 @@ mod tests {
         t.hush(S);
         t.observe(S, WS, hook(Working, None));
         t.observe(S, WS, hook(WaitingInput, Some("permission_prompt")));
-        assert!(t.get(S).needs_turn(true));
+        assert!(t.get(S).needs_turn());
     }
 
     #[test]
@@ -277,7 +294,7 @@ mod tests {
         t.observe(S, WS, hook(Working, None));
         t.unhush(S);
         t.observe(S, WS, hook(Idle, None));
-        assert!(t.get(S).needs_turn(true));
+        assert!(t.get(S).needs_turn());
     }
 
     #[test]
@@ -285,7 +302,7 @@ mod tests {
         let t = TurnTracker::new();
         assert_eq!(t.observe(S, WS, TurnSignal::Spawned), None);
         assert_eq!(t.get(S).state, Idle);
-        assert!(t.get(S).needs_turn(true));
+        assert!(t.get(S).needs_turn());
     }
 
     #[test]
@@ -313,7 +330,7 @@ mod tests {
         let st = t.get(S);
         assert_eq!(st.state, WaitingInput);
         assert_eq!(st.notification_type.as_deref(), Some("permission_prompt"));
-        assert!(st.needs_turn(true));
+        assert!(st.needs_turn());
     }
 
 
@@ -338,13 +355,13 @@ mod tests {
         let t = TurnTracker::new();
         t.observe(S, WS, hook(WaitingInput, Some("idle_prompt")));
         t.observe(S, WS, TurnSignal::Acknowledged);
-        assert!(!t.get(S).needs_turn(true));
+        assert!(!t.get(S).needs_turn());
 
         let changed = t
             .observe(S, WS, hook(WaitingInput, Some("idle_prompt")))
             .expect("re-lights");
         assert!(!changed.turn_acknowledged);
-        assert!(t.get(S).needs_turn(true));
+        assert!(t.get(S).needs_turn());
     }
 
     #[test]
@@ -387,7 +404,7 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(t.observe(S, WS, TurnSignal::Probe { state: Idle }), None);
         }
-        assert!(!t.get(S).needs_turn(true), "stays dismissed");
+        assert!(!t.get(S).needs_turn(), "stays dismissed");
     }
 
     #[test]
@@ -417,15 +434,47 @@ mod tests {
     #[test]
     fn child_exit_is_recorded_not_just_announced() {
         let t = TurnTracker::new();
-        t.observe(S, WS, hook(Idle, None));
-        assert!(t.get(S).needs_turn(true));
+        t.observe(S, WS, hook(Working, None));
 
         let changed = t
             .observe(S, WS, TurnSignal::ChildExited)
             .expect("published");
         assert_eq!(changed.runtime_state, Dormant);
         assert_eq!(t.get(S).state, Dormant, "the map actually changed");
-        assert!(!t.get(S).needs_turn(false));
+        assert!(!t.get(S).needs_turn());
+    }
+
+    #[test]
+    fn a_turn_left_unread_outlives_the_session() {
+        let t = TurnTracker::new();
+        t.observe(S, WS, hook(WaitingInput, Some("permission_prompt")));
+        assert_eq!(t.observe(S, WS, TurnSignal::ChildExited), None);
+        assert!(t.get(S).needs_turn());
+        // Nothing from the dead session changes it, but Ryan can.
+        assert_eq!(t.observe(S, WS, TurnSignal::Probe { state: Working }), None);
+        assert_eq!(t.observe(S, WS, hook(Working, None)), None);
+        assert!(t.get(S).needs_turn());
+        assert!(t.observe(S, WS, TurnSignal::Acknowledged).is_some());
+        assert!(!t.get(S).needs_turn());
+    }
+
+    #[test]
+    fn a_turn_dismissed_before_the_exit_stays_dismissed() {
+        let t = TurnTracker::new();
+        t.observe(S, WS, hook(Idle, None));
+        t.observe(S, WS, TurnSignal::Acknowledged);
+        t.observe(S, WS, TurnSignal::ChildExited);
+        assert_eq!(t.get(S).state, Dormant);
+        assert!(!t.get(S).needs_turn());
+    }
+
+    #[test]
+    fn a_session_started_again_hears_its_hooks() {
+        let t = TurnTracker::new();
+        t.observe(S, WS, hook(Idle, None));
+        t.observe(S, WS, TurnSignal::ChildExited);
+        t.observe(S, WS, TurnSignal::Spawned);
+        assert!(t.observe(S, WS, hook(Working, None)).is_some());
     }
 
     #[test]
@@ -462,21 +511,14 @@ mod tests {
     }
 
 
-    #[test]
-    fn a_dead_session_never_needs_a_turn() {
-        let t = TurnTracker::new();
-        t.observe(S, WS, hook(WaitingInput, Some("permission_prompt")));
-        assert!(!t.get(S).needs_turn(false));
-    }
-
 
     #[test]
     fn sessions_are_tracked_independently() {
         let t = TurnTracker::new();
         t.observe("a", WS, hook(Idle, None));
         t.observe("b", WS, hook(Working, None));
-        assert!(t.get("a").needs_turn(true));
-        assert!(!t.get("b").needs_turn(true));
+        assert!(t.get("a").needs_turn());
+        assert!(!t.get("b").needs_turn());
 
         assert_eq!(t.get("b").state, Working);
         assert_eq!(t.get("never-seen"), TurnState::default());

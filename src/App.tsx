@@ -35,6 +35,7 @@ import { applyTheme, ThemeContext } from "./theme";
 import { useBackendJob, type JobState } from "./useBackendJob";
 import { useAppEvent } from "./ipc/events";
 import { FunControls, useFunMode } from "./fun/FunToggle";
+import { turnLeftUnread } from "./workspaceDerived";
 import "./App.css";
 
 // three.js is only fetched once fun mode is first switched on.
@@ -188,10 +189,12 @@ function App() {
   useAppEvent("session:budget_requests_changed", refreshBudgetRequests);
 
   // A budget request holds the agent's turn open while the probe reports it
-  // busy, so it can't ride on the turn state.
+  // busy, so it can't ride on the turn state. With no live session this run,
+  // the turn is as it was left.
   const workspaceNeedsTurn = useCallback(
     (w: Workspace): boolean =>
-      budgetRequests.has(w.id) || (turnStates.get(w.id)?.needsTurn ?? false),
+      budgetRequests.has(w.id) ||
+      (turnStates.get(w.id)?.needsTurn ?? turnLeftUnread(w)),
     [turnStates, budgetRequests],
   );
 
@@ -214,10 +217,17 @@ function App() {
         next.set(workspaceId, session);
         return next;
       });
-      // Turn state restored at boot is never emitted.
+      // Turn state restored at boot is never emitted. Dormant, there's none
+      // live: the workspace's own record says how it was left.
       setTurnStates((prev) => {
-        const needsTurn = session?.needs_turn ?? false;
-        const working = session?.working ?? false;
+        if (!session) {
+          if (!prev.has(workspaceId)) return prev;
+          const next = new Map(prev);
+          next.delete(workspaceId);
+          return next;
+        }
+        const needsTurn = session.needs_turn;
+        const working = session.working;
         const cur = prev.get(workspaceId);
         if (cur && cur.needsTurn === needsTurn && cur.working === working) {
           return prev;
