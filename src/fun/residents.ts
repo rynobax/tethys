@@ -29,7 +29,7 @@ export interface Resident {
   animal: AnimalName;
   work: Work;
   progress: { done: number; total: number } | null;
-  /** A few words beside the branch, e.g. the PRs being pitched. */
+  /** A few words over the branch, when only Ryan can move it on. */
   note: string | null;
   /** Shipping, and every PR approved and green: only the merge to go. */
   readyToMerge: boolean;
@@ -86,11 +86,7 @@ function noteOf(w: Workspace): string | null {
   const signal = shipSignal(w);
   if (signal === "ready") return "ready to merge";
   if (signal === "no_reviewer") return "no reviewer";
-  if (!signal) return null;
-  const open = shippingPrs(w).filter(
-    (p) => p.status?.state !== "merged" && p.status?.state !== "closed",
-  );
-  return open.map((p) => `#${p.number}`).join(" ") || null;
+  return null;
 }
 
 /** Whether its folder is shut, which sends it home; never while selected. */
