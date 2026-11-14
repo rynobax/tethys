@@ -297,6 +297,8 @@ const FURNISHED: ReadonlySet<Post> = new Set([
 const QUILTING: ReadonlySet<Mood> = new Set(["idle", "working"]);
 /** Going in at a door, inside, or coming out: nobody to bump into. */
 const INDOORS: ReadonlySet<Activity> = new Set(["home_in", "home", "home_out"]);
+/** How soon after a house goes up its folk are simply inside it. */
+const HOUSE_SETTLE = 1;
 /** How long a parent cheers each task done. */
 const CHEER_SECONDS = 2.6;
 /** The ones Ryan has dismissed, who go to the lounge. */
@@ -326,6 +328,8 @@ export class Sim {
   private boards = new Map<string, number>();
   private plotsHeld = new Map<string, number>();
   private docks = new Map<string, number>();
+  /** When each house went up: one just built takes its folk straight in. */
+  private housesBuilt: number[] = [];
   /** Each quilter's place on the porch. */
   private quilters = new Map<string, number>();
   private plots: Plot[] = [];
@@ -345,6 +349,9 @@ export class Sim {
   private departed: string[] = [];
 
   setLayout(layout: Layout) {
+    this.housesBuilt = layout.houses.map(
+      (_, i) => this.housesBuilt[i] ?? this.now,
+    );
     this.layout = layout;
     prune(this.waitSlots, layout.attentionSlots.length);
     prune(this.chairs, layout.pitch?.chairs.length ?? 0);
@@ -685,6 +692,11 @@ export class Sim {
 
   /** Straight onto its home ground: no walking in on first sight. */
   private place(a: Agent, r: Resident) {
+    if (r.home !== null && this.houseFor(r)) {
+      this.inside(a, r.home);
+      a.placed = true;
+      return;
+    }
     a.side = this.homeSide(r.mood);
     const region = this.ground(a.side, r.mood);
     if (!region) return;
@@ -1124,6 +1136,15 @@ export class Sim {
     }
     if (!house) return false;
     for (const book of this.books()) book.delete(a.id);
+    // Its house only just up, as the folders load after a restart: it was
+    // home all along, rather than off across the meadow.
+    if (
+      a.activity !== "home" &&
+      this.now - (this.housesBuilt[r.home!] ?? -Infinity) < HOUSE_SETTLE
+    ) {
+      this.inside(a, r.home!);
+      return true;
+    }
     a.task = null;
     a.chore = null;
     a.carrying = null;
@@ -1157,6 +1178,18 @@ export class Sim {
     }
     this.walkTo(a, house.door, "home");
     return true;
+  }
+
+  /** Indoors at once, with no walk home. */
+  private inside(a: Agent, house: number) {
+    const door = this.layout!.houses[house].door;
+    a.side = "left";
+    a.pos = { x: door.x, z: door.z };
+    a.target = null;
+    a.intent = null;
+    a.spot = null;
+    a.indoors = house;
+    this.setActivity(a, "home");
   }
 
   /** A parent's place on the porch, claiming a free one if it has none. */
