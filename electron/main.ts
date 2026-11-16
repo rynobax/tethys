@@ -3,9 +3,11 @@ import type { ChildProcess } from "node:child_process";
 import path from "node:path";
 
 import { DaemonClient, dataDir, socketPath } from "./client";
+import { popupContextMenu } from "./context-menu";
 import { startDaemon } from "./daemon";
+import { openExternal } from "./open-external";
 import { registerPageScheme, servePages } from "./pages";
-import { openExternal, policePrViews } from "./pr-view";
+import { policePrViews } from "./pr-view";
 
 // A test run's data dir holds Electron's profile too, so it never shares the
 // single-instance lock or the GitHub login with real use.
@@ -127,6 +129,11 @@ function createWindow(): BrowserWindow {
     }
   });
   policePrViews(contents);
+  // Covers artifact frames too. Where the page handles a right-click itself
+  // (sidebar rows), this never fires.
+  contents.on("context-menu", (_event, params) => {
+    popupContextMenu(contents, params, { window: win, navigation: false });
+  });
   // Fullscreen hides the traffic lights, so the strip goes too.
   const sendFullScreen = () => contents.send("full-screen", win.isFullScreen());
   win.on("enter-full-screen", sendFullScreen);
