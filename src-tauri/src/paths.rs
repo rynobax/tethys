@@ -1,22 +1,59 @@
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager};
 
 use crate::error::{AppError, AppResult};
+
+/// Also read by `tethys-hook`, which must find the same `hook.sock`.
+pub const DATA_DIR_VAR: &str = "TETHYS_DATA_DIR";
 
 #[derive(Clone)]
 pub struct Paths {
     pub data_dir: PathBuf,
+    /// Set by `TETHYS_DATA_DIR`: a second Tethys beside the real one, which
+    /// must leave the real one's tmux server, processes and config alone.
+    pub isolated: bool,
 }
 
 impl Paths {
-    pub fn from_app(app: &AppHandle) -> AppResult<Self> {
-        let data_dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|e| AppError::Other(format!("resolving app data dir: {e}")))?;
+    /// Unset, the data dir is where Tauri put it, so existing state carries over.
+    pub fn resolve() -> AppResult<Self> {
+        let (data_dir, isolated) = match std::env::var_os(DATA_DIR_VAR).filter(|v| !v.is_empty()) {
+            Some(dir) => (PathBuf::from(dir), true),
+            None => {
+                let home = std::env::var_os("HOME")
+                    .ok_or_else(|| AppError::Other("HOME not set".into()))?;
+                let dir = PathBuf::from(home)
+                    .join("Library")
+                    .join("Application Support")
+                    .join("app.tethys.dev");
+                (dir, false)
+            }
+        };
         std::fs::create_dir_all(&data_dir)?;
-        std::fs::create_dir_all(data_dir.join("logs"))?;
-        Ok(Self { data_dir })
+        // Sessions run elsewhere and reach the sockets by this path.
+        let data_dir = std::fs::canonicalize(&data_dir)?;
+        Ok(Self { data_dir, isolated })
+    }
+
+    /// `None` for the real server. Stable per data dir, so an isolated run
+    /// reattaches its own sessions on restart.
+    pub fn isolated_tmux_label(&self) -> Option<String> {
+        if !self.isolated {
+            return None;
+        }
+        // FNV-1a: std's hasher isn't promised stable across releases.
+        let hash = self
+            .data_dir
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .fold(0xcbf29ce484222325u64, |h, b| {
+                (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
+            });
+        Some(format!("tethys-iso-{:08x}", hash as u32))
+    }
+
+    pub fn ui_socket(&self) -> PathBuf {
+        self.data_dir.join("ui.sock")
     }
 
     pub fn state_file(&self) -> PathBuf {

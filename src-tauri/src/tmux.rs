@@ -1,13 +1,28 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use crate::error::AppResult;
 use crate::shell;
 
 /// A server of our own, so the user's `~/.tmux.conf` and sessions stay out of it.
-const SOCKET_LABEL: &str = "tethys";
+#[cfg(not(test))]
+const DEFAULT_SOCKET_LABEL: &str = "tethys";
+/// Boot kills sessions it doesn't know, so nothing in a test may reach the
+/// real server.
+#[cfg(test)]
+const DEFAULT_SOCKET_LABEL: &str = "tethys-test";
 
-pub struct TmuxBin(pub PathBuf);
+static SOCKET_LABEL: OnceLock<String> = OnceLock::new();
+
+/// Before any other call here, or it has no effect.
+pub fn set_socket_label(label: String) {
+    let _ = SOCKET_LABEL.set(label);
+}
+
+fn socket_label() -> &'static str {
+    SOCKET_LABEL.get().map_or(DEFAULT_SOCKET_LABEL, String::as_str)
+}
 
 pub fn resolve() -> AppResult<PathBuf> {
     shell::which("tmux", Some("brew install tmux"))
@@ -24,7 +39,7 @@ pub fn new_session_args(
     env: &[(&str, String)],
     command: &[String],
 ) -> Vec<String> {
-    let mut args: Vec<String> = vec!["-L".into(), SOCKET_LABEL.into()];
+    let mut args: Vec<String> = vec!["-L".into(), socket_label().into()];
     args.extend(server_init_args());
     args.extend([
         "new-session".into(),
@@ -49,7 +64,7 @@ pub fn new_session_args(
 }
 
 pub fn attach_session_args(session_id: &str) -> Vec<String> {
-    let mut args: Vec<String> = vec!["-L".into(), SOCKET_LABEL.into()];
+    let mut args: Vec<String> = vec!["-L".into(), socket_label().into()];
     args.extend(server_init_args());
     args.extend([
         "attach-session".into(),
@@ -62,7 +77,7 @@ pub fn attach_session_args(session_id: &str) -> Vec<String> {
 
 pub fn has_session(tmux_bin: &Path, session_id: &str) -> bool {
     Command::new(tmux_bin)
-        .args(["-L", SOCKET_LABEL, "has-session", "-t", session_id])
+        .args(["-L", socket_label(), "has-session", "-t", session_id])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -109,7 +124,7 @@ fn server_init_args() -> Vec<String> {
 /// prepends the options.
 pub fn ensure_server_init(tmux_bin: &Path) {
     let _ = Command::new(tmux_bin)
-        .args(["-L", SOCKET_LABEL])
+        .args(["-L", socket_label()])
         .args(server_init_args())
         .status();
 }
@@ -118,7 +133,7 @@ pub fn capture_pane(tmux_bin: &Path, session_id: &str) -> Option<Vec<u8>> {
     let output = Command::new(tmux_bin)
         .args([
             "-L",
-            SOCKET_LABEL,
+            socket_label(),
             "capture-pane",
             "-p",
             "-e",
@@ -152,7 +167,7 @@ pub fn try_list_sessions(tmux_bin: &Path) -> Option<Vec<String>> {
     let output = Command::new(tmux_bin)
         .args([
             "-L",
-            SOCKET_LABEL,
+            socket_label(),
             "list-sessions",
             "-F",
             "#{session_name}",
@@ -175,7 +190,7 @@ pub fn try_list_sessions(tmux_bin: &Path) -> Option<Vec<String>> {
 /// lines. `None` when tmux can't answer.
 pub fn session_environment(tmux_bin: &Path, session_id: &str) -> Option<Vec<String>> {
     let output = Command::new(tmux_bin)
-        .args(["-L", SOCKET_LABEL, "show-environment", "-t", session_id])
+        .args(["-L", socket_label(), "show-environment", "-t", session_id])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -191,7 +206,7 @@ pub fn session_environment(tmux_bin: &Path, session_id: &str) -> Option<Vec<Stri
 
 pub fn kill_session(tmux_bin: &Path, session_id: &str) {
     let _ = Command::new(tmux_bin)
-        .args(["-L", SOCKET_LABEL, "kill-session", "-t", session_id])
+        .args(["-L", socket_label(), "kill-session", "-t", session_id])
         .status();
 }
 
@@ -219,7 +234,7 @@ mod tests {
             attach_session_args("s"),
         ] {
             assert_eq!(&args[0], "-L");
-            assert_eq!(&args[1], SOCKET_LABEL);
+            assert_eq!(&args[1], socket_label());
         }
     }
 

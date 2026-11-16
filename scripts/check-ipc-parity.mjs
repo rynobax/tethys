@@ -24,13 +24,19 @@ const rustSource = rustFiles(RUST_DIR)
 
 // ── commands ───────────────────────────────────────────────────────────────
 
+// The daemon's dispatch table: `ui_commands! { name(params), … }`.
+const commandsRs = readFileSync(join(RUST_DIR, "commands.rs"), "utf8");
+const tableStart = commandsRs.indexOf("\nui_commands! {");
+if (tableStart === -1) {
+  console.error("IPC parity check: no `ui_commands!` table in commands.rs");
+  process.exit(1);
+}
+const table = commandsRs.slice(
+  tableStart,
+  commandsRs.indexOf("\n}", tableStart),
+);
 const registered = new Set(
-  // Command fns are snake_case; `commands::ClaudeBin` and friends are types.
-  [
-    ...readFileSync(join(RUST_DIR, "lib.rs"), "utf8").matchAll(
-      /commands::([a-z]\w*)/g,
-    ),
-  ].map((m) => m[1]),
+  [...table.matchAll(/^\s+([a-z]\w*)\(/gm)].map((m) => m[1]),
 );
 
 const commandsTs = readFileSync("src/ipc/commands.ts", "utf8");
@@ -68,7 +74,7 @@ const problems = [];
 for (const name of referenced) {
   if (!registered.has(name)) {
     problems.push(
-      `command "${name}" is called from the frontend but not registered in lib.rs`,
+      `command "${name}" is called from the frontend but missing from ui_commands! in commands.rs`,
     );
   }
 }

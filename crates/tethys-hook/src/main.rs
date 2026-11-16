@@ -138,7 +138,11 @@ fn parse_args(args: impl Iterator<Item = String>) -> Option<(String, Option<Stri
 }
 
 fn socket_path() -> io::Result<PathBuf> {
-    // Mirrors `Paths::hook_socket`.
+    // Mirrors `Paths::resolve` and `Paths::hook_socket`. An isolated Tethys's
+    // tmux server hands its sessions this variable.
+    if let Some(dir) = env::var_os("TETHYS_DATA_DIR").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(dir).join("hook.sock"));
+    }
     let home = env::var_os("HOME")
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME not set"))?;
     Ok(PathBuf::from(home)

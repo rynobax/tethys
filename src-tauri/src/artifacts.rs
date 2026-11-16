@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
 use tracing::{debug, warn};
 
 use crate::state::WorkspaceId;
 use crate::store::Store;
+use crate::ui_socket::Events;
 
 const CAP_PER_WORKSPACE: usize = 12;
 
@@ -43,12 +43,12 @@ pub struct ArtifactChanged {
 
 pub struct ArtifactStore {
     store: Arc<Store>,
-    app: AppHandle,
+    events: Events,
 }
 
 impl ArtifactStore {
-    pub fn new(app: AppHandle, store: Arc<Store>) -> Self {
-        Self { store, app }
+    pub fn new(events: Events, store: Arc<Store>) -> Self {
+        Self { store, events }
     }
 
     pub async fn list(&self, workspace_id: &str) -> Vec<Artifact> {
@@ -135,7 +135,7 @@ impl ArtifactStore {
     }
 
     fn emit(&self, workspace_id: &str, artifact_id: Option<String>) {
-        let _ = self.app.emit(
+        self.events.emit(
             "artifact:changed",
             ArtifactChanged {
                 workspace_id: workspace_id.to_string(),

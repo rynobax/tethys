@@ -127,8 +127,12 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> AppResult<()> {
     Ok(())
 }
 
-/// An untrusted session still runs; it just asks.
+/// An untrusted session still runs; it just asks. An isolated Tethys leaves
+/// the config alone: it's shared with the real one.
 pub fn trust_or_warn(paths: &crate::paths::Paths, dir: &Path) {
+    if paths.isolated {
+        return;
+    }
     let Some(config) = crate::paths::codex_config_path() else {
         warn!("no HOME — cannot mark codex project trusted");
         return;
@@ -139,6 +143,9 @@ pub fn trust_or_warn(paths: &crate::paths::Paths, dir: &Path) {
 }
 
 pub fn untrust_or_warn(paths: &crate::paths::Paths, dir: &Path) {
+    if paths.isolated {
+        return;
+    }
     let Some(config) = crate::paths::codex_config_path() else { return };
     if let Err(e) = untrust(&config, &paths.codex_config_lock(), dir) {
         warn!(error = %e, dir = %dir.display(), "could not drop codex project trust");

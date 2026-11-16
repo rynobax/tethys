@@ -4,8 +4,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Emitter};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -22,6 +20,7 @@ use crate::state::{AgentSessionMeta, Inbox, SessionRuntimeState, WorkspaceId};
 use crate::store::Store;
 use crate::turn::{TurnChanged, TurnSignal, TurnState, TurnTracker};
 use crate::tmux;
+use crate::ui_socket::{ByteChannel, Events};
 
 pub struct SpawnAgent<'a> {
     pub agent: Agent,
@@ -89,12 +88,12 @@ pub struct SessionSupervisor {
     turn: Arc<TurnTracker>,
     artifacts: Arc<ArtifactStore>,
     store: Arc<Store>,
-    app: AppHandle,
+    events: Events,
 }
 
 impl SessionSupervisor {
     pub fn new(
-        app: AppHandle,
+        events: Events,
         store: Arc<Store>,
         artifacts: Arc<ArtifactStore>,
     ) -> Self {
@@ -106,7 +105,7 @@ impl SessionSupervisor {
             turn: Arc::new(TurnTracker::new()),
             artifacts,
             store,
-            app,
+            events,
         }
     }
 
@@ -147,7 +146,7 @@ impl SessionSupervisor {
             .unwrap()
             .get(session_id)
             .is_some_and(|h| h.pty.is_running());
-        publish_turn(&self.app, &changed, running);
+        publish_turn(&self.events, &changed, running);
         if let Err(e) = persist_turn(&self.store, &changed).await {
             warn!(error = %e, session_id, "persist turn state failed");
         }
@@ -313,9 +312,9 @@ impl SessionSupervisor {
                 tmux_session_name: id.clone(),
                 tmux_bin: tmux_bin.to_path_buf(),
             },
-            session_ready_hook(self.app.clone(), workspace_id.clone()),
+            session_ready_hook(self.events.clone(), workspace_id.clone()),
             session_exit_hook(
-                self.app.clone(),
+                self.events.clone(),
                 self.store.clone(),
                 self.turn.clone(),
                 workspace_id.clone(),
@@ -330,7 +329,7 @@ impl SessionSupervisor {
 
         self.sessions.lock().unwrap().insert(id.clone(), handle);
         self.turn.observe(&id, &workspace_id, seed);
-        let _ = self.app.emit(
+        self.events.emit(
             "session:changed",
             serde_json::json!({ "workspace_id": workspace_id }),
         );
@@ -674,21 +673,18 @@ impl SessionSupervisor {
         }
     }
 
-    pub fn attach(
-        &self,
-        session_id: &str,
-        channel: Channel<InvokeResponseBody>,
-    ) -> AppResult<Vec<u8>> {
+    pub fn attach(&self, session_id: &str, channel: ByteChannel) -> AppResult<()> {
         let sessions = self.sessions.lock().unwrap();
         let handle = sessions
             .get(session_id)
             .ok_or_else(|| AppError::Other(format!("session not found: {session_id}")))?;
-        Ok(handle.pty.attach(channel))
+        handle.pty.attach(channel);
+        Ok(())
     }
 
-    pub fn detach(&self, session_id: &str, channel_id: u32) {
+    pub fn detach(&self, session_id: &str, conn: u64, channel_id: u32) {
         if let Some(handle) = self.sessions.lock().unwrap().get(session_id) {
-            handle.pty.detach(channel_id);
+            handle.pty.detach(conn, channel_id);
         }
     }
 
@@ -710,6 +706,36 @@ impl SessionSupervisor {
             .ok_or_else(|| AppError::Other(format!("session not found: {session_id}")))?
             .pty
             .resize(cols, rows)
+    }
+
+    /// Runs `program` directly in the PTY, with no tmux and no agent.
+    #[cfg(test)]
+    pub fn spawn_plain(
+        &self,
+        id: &str,
+        workspace_id: &str,
+        program: &Path,
+        args: &[String],
+        seed_bytes: &[u8],
+    ) -> AppResult<SessionInfo> {
+        self.spawn_with_id(SpawnRequest {
+            id: id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            cwd: Path::new("/"),
+            args,
+            tmux_bin: program,
+            seed_bytes,
+            seed: TurnSignal::Spawned,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn subscriber_count(&self, session_id: &str) -> usize {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .map_or(0, |h| h.pty.subscriber_count())
     }
 
     /// `None` means dormant: nothing spawned or reattached this run.
@@ -788,13 +814,13 @@ fn parent_session_from_subagent_path(transcript_path: &str) -> Option<String> {
     Some(subagents_dir.parent()?.file_name()?.to_str()?.to_string())
 }
 
-fn publish_turn(app: &AppHandle, changed: &TurnChanged, running: bool) {
+fn publish_turn(events: &Events, changed: &TurnChanged, running: bool) {
     let snapshot = TurnState {
         state: changed.runtime_state,
         notification_type: changed.notification_type.clone(),
         acknowledged: changed.turn_acknowledged,
     };
-    let _ = app.emit(
+    events.emit(
         "session:turn_changed",
         TurnChangedEvent {
             changed,
@@ -833,9 +859,9 @@ async fn persist_turn(store: &Arc<Store>, changed: &TurnChanged) -> AppResult<()
         .await
 }
 
-fn session_ready_hook(app: AppHandle, workspace_id: String) -> crate::pty::OnReady {
+fn session_ready_hook(events: Events, workspace_id: String) -> crate::pty::OnReady {
     Box::new(move || {
-        let _ = app.emit(
+        events.emit(
             "session:changed",
             serde_json::json!({ "workspace_id": workspace_id }),
         );
@@ -843,17 +869,19 @@ fn session_ready_hook(app: AppHandle, workspace_id: String) -> crate::pty::OnRea
 }
 
 fn session_exit_hook(
-    app: AppHandle,
+    events: Events,
     store: Arc<Store>,
     turn: Arc<TurnTracker>,
     workspace_id: String,
     session_id: SessionId,
 ) -> OnExit {
+    // It runs on the child-watcher thread, outside the runtime.
+    let runtime = tokio::runtime::Handle::current();
     Box::new(move |code, ring| {
         trim_detach_epilogue(ring);
 
         info!(%session_id, ?code, "session child exited");
-        let _ = app.emit(
+        events.emit(
             "session:exit",
             serde_json::json!({
                 "workspace_id": workspace_id,
@@ -867,9 +895,9 @@ fn session_exit_hook(
             &workspace_id,
             TurnSignal::ChildExited,
         ) {
-            publish_turn(&app, &changed, false);
+            publish_turn(&events, &changed, false);
             let store = store.clone();
-            tauri::async_runtime::spawn(async move {
+            runtime.spawn(async move {
                 if let Err(e) = persist_turn(&store, &changed).await {
                     warn!(error = %e, "persist dormant turn state failed");
                 }

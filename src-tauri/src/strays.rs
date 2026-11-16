@@ -118,7 +118,7 @@ struct Candidate {
 
 /// A stray carries a tag no live session owns. Never Tethys or anything above
 /// it, nor anything under a guarded process, nor anything sharing Tethys's own
-/// tags — `pnpm tauri dev` run from inside a session puts the whole dev tree,
+/// tags — a dev Tethys run from inside a session puts the whole dev tree,
 /// Tethys included, under that session's tag.
 fn find_strays<'a>(
     candidates: &'a [Candidate],
@@ -320,7 +320,7 @@ mod tests {
     fn tethys_its_ancestors_and_its_dev_tree_are_spared() {
         let dev_session = tags(None, Some("dev-tok"));
         let procs = [
-            proc(400, 1, dev_session.clone()),    // pnpm tauri dev
+            proc(400, 1, dev_session.clone()),    // the dev runner
             proc(TETHYS, 400, dev_session.clone()),
             proc(401, 400, dev_session.clone()), // vite, a sibling
             proc(600, TETHYS, tags(None, Some("dead"))),

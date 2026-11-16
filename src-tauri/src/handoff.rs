@@ -122,7 +122,7 @@ impl Handoff {
         let this = self.clone();
         let task_branch = branch.clone();
         let task_id = id.clone();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             this.provision_and_start(task_id, task_branch, workspace_dir, claim, selected, brief)
                 .await;
         });

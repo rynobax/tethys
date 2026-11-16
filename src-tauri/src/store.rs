@@ -189,7 +189,7 @@ impl Store {
         });
     }
 
-    async fn flush(&self) -> AppResult<()> {
+    pub async fn flush(&self) -> AppResult<()> {
         let snapshot = {
             let guard = self.state.read().await;
             serde_json::to_vec_pretty(&*guard)?

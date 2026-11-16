@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{Mutex, Notify};
 use tracing::{info, info_span, trace, warn, Instrument};
 
@@ -16,6 +15,7 @@ use crate::registry::RegistryLoad;
 use crate::shipping::{self, Shipper};
 use crate::state::AppState;
 use crate::store::Store;
+use crate::ui_socket::Events;
 
 const BASE_INTERVAL: Duration = Duration::from_secs(45);
 const MAX_BACKOFF: Duration = Duration::from_secs(600);
@@ -54,24 +54,24 @@ pub trait PollerEvents: Send + Sync + 'static {
     fn nudged(&self, workspace_id: &str);
 }
 
-pub struct TauriEvents(pub AppHandle);
+pub struct LiveEvents {
+    pub events: Events,
+    pub shipper: Arc<Shipper>,
+}
 
-impl PollerEvents for TauriEvents {
+impl PollerEvents for LiveEvents {
     fn auth_changed(&self, snapshot: &AuthSnapshot) {
-        let _ = self.0.emit("github:auth_changed", snapshot);
+        self.events.emit("github:auth_changed", snapshot);
     }
 
     fn status_changed(&self, event: &Value) {
-        let _ = self.0.emit("github:status_changed", event);
+        self.events.emit("github:status_changed", event);
     }
 
     fn nudged(&self, workspace_id: &str) {
-        let Some(shipper) = self.0.try_state::<Arc<Shipper>>() else {
-            return;
-        };
-        let shipper = shipper.inner().clone();
+        let shipper = self.shipper.clone();
         let workspace_id = workspace_id.to_string();
-        tauri::async_runtime::spawn(async move { shipper.wake(&workspace_id).await });
+        tokio::spawn(async move { shipper.wake(&workspace_id).await });
     }
 }
 
@@ -85,13 +85,8 @@ pub struct GithubPoller {
 }
 
 impl GithubPoller {
-    pub fn new(store: Arc<Store>, registry: Arc<RegistryLoad>, app: AppHandle) -> Self {
-        Self::with_seams(
-            store,
-            registry,
-            Box::new(GhCli),
-            Box::new(TauriEvents(app)),
-        )
+    pub fn new(store: Arc<Store>, registry: Arc<RegistryLoad>, events: LiveEvents) -> Self {
+        Self::with_seams(store, registry, Box::new(GhCli), Box::new(events))
     }
 
     pub fn with_seams(

@@ -604,6 +604,7 @@ mod tests {
         Fixture {
             paths: Paths {
                 data_dir: tmp.path().join("data"),
+                isolated: true,
             },
             origin,
             worktree_root,

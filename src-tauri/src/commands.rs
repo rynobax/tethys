@@ -1,61 +1,144 @@
-use std::sync::Arc;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde::Deserialize;
-use tauri::{ipc::Channel, AppHandle, Emitter, State};
-use tracing::info;
-
-use std::path::{Path, PathBuf};
-
-use tauri::ipc::InvokeResponseBody;
+use serde_json::Value;
+use tracing::{error, info};
 
 use crate::agent::Agent;
-use crate::artifacts::{Artifact, ArtifactKind, ArtifactStore};
+use crate::artifacts::{Artifact, ArtifactKind};
 use crate::branch_name;
-use crate::budget::{Budgets, OverrideRequest};
-use crate::agent_bin::{self, AgentBins};
+use crate::budget::OverrideRequest;
+use crate::agent_bin;
 use crate::error::{AppError, AppResult};
-use crate::github::poller::{AuthSnapshot, GithubPoller};
+use crate::github::poller::AuthSnapshot;
 use crate::github::{self, GithubPrStatus};
-use crate::inprogress::InProgressWorkspaces;
 use crate::job::{JobEvent, JobTx};
-use crate::mcp::McpLaunch;
-use crate::paths::Paths;
 use crate::provision::{add_repos, provision_workspace, RepoAddition, WorkspaceProvision};
-use crate::provision_queue::ProvisionQueue;
-use crate::purge::Purger;
 use crate::reconcile::{self, Discrepancies};
 use crate::registry::{starter_template, RegistryLoad, Repo};
-use crate::sessions::{open_session, OpenSession, SessionInfo, SessionSupervisor};
-use crate::shipping::{self, Shipper};
+use crate::sessions::{open_session, OpenSession, SessionInfo};
+use crate::shipping;
 use crate::state::{Folder, FolderId, Origin, PrRef, SystemErrorEntry, Workspace, WorkspaceId};
-use crate::store::Store;
-use crate::theme::Theme;
-use crate::tmux::{self, TmuxBin};
+use crate::theme::{self, Theme};
+use crate::tmux;
+use crate::ui_socket::{Conn, JsonChannel};
+use crate::Daemon;
 
-#[tauri::command]
-pub async fn list_workspaces(store: State<'_, Arc<Store>>) -> AppResult<Vec<Workspace>> {
-    Ok(store.read(|s| s.workspaces.clone()).await)
+/// What a command sees: the daemon, and the connection that called it.
+pub struct Ctx<'a> {
+    pub d: &'a Daemon,
+    pub conn: &'a Conn,
 }
 
-#[tauri::command]
-pub fn registry_status(registry: State<'_, Arc<RegistryLoad>>) -> RegistryLoad {
-    (**registry).clone()
+impl Deref for Ctx<'_> {
+    type Target = Daemon;
+
+    fn deref(&self) -> &Daemon {
+        self.d
+    }
 }
 
-#[tauri::command]
-pub async fn github_auth_status(
-    poller: State<'_, Arc<GithubPoller>>,
-) -> AppResult<AuthSnapshot> {
-    Ok(poller.auth_snapshot().await)
+/// Generates `dispatch`. Each entry is a handler below, called with its
+/// parameters read from the request's `args` by Tauri's convention, which the
+/// frontend's wrappers were written against: top-level keys are the
+/// parameter names in camelCase, while keys inside an `args` struct are
+/// snake_case as declared.
+macro_rules! ui_commands {
+    ($($name:ident($($param:ident: $ty:ty),* $(,)?)),* $(,)?) => {
+        pub async fn dispatch(cx: &Ctx<'_>, cmd: &str, args: Value) -> AppResult<Value> {
+            match cmd {
+                $(stringify!($name) => {
+                    #[derive(Deserialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct Params {
+                        $($param: $ty),*
+                    }
+                    let Params { $($param),* } = serde_json::from_value(args).map_err(|e| {
+                        AppError::Other(format!("invalid args for command `{cmd}`: {e}"))
+                    })?;
+                    Ok(serde_json::to_value($name(cx, $($param),*).await?)?)
+                })*
+                _ => Err(AppError::Other(format!("unknown command `{cmd}`"))),
+            }
+        }
+    };
 }
 
-#[tauri::command]
-pub async fn github_reprobe_auth(
-    poller: State<'_, Arc<GithubPoller>>,
-) -> AppResult<AuthSnapshot> {
-    poller.probe_login().await;
-    Ok(poller.auth_snapshot().await)
+// Read by `scripts/check-ipc-parity.mjs`: one command per line.
+ui_commands! {
+    list_workspaces(),
+    list_budget_requests(),
+    decide_budget_request(workspace_id: WorkspaceId, approve: bool),
+    create_workspace(args: CreateWorkspaceArgs, on_event: u32),
+    add_repo_to_workspace(args: AddRepoArgs, on_event: u32),
+    delete_workspace(id: WorkspaceId),
+    cancel_delete_workspace(id: WorkspaceId),
+    list_folders(),
+    create_folder(name: String),
+    rename_folder(args: RenameFolderArgs),
+    delete_folder(id: FolderId),
+    set_folder_collapsed(args: SetFolderCollapsedArgs),
+    reorder_folders(ids: Vec<FolderId>),
+    move_workspaces_to_folder(args: MoveWorkspacesToFolderArgs),
+    reorder_workspaces(ids: Vec<WorkspaceId>),
+    run_purge_now(),
+    list_system_errors(),
+    dismiss_system_error(id: String),
+    registry_status(),
+    github_auth_status(),
+    github_reprobe_auth(),
+    request_github_poll(),
+    attach_pr(args: AttachPrArgs),
+    detach_pr(args: DetachPrArgs),
+    open_config_location(location: ConfigLocation),
+    clone_dir_path(),
+    open_in_vscode(id: WorkspaceId),
+    list_discrepancies(),
+    remove_orphan_dir(path: PathBuf),
+    forget_workspace(id: WorkspaceId),
+    get_session(workspace_id: WorkspaceId),
+    acknowledge_session_turn(workspace_id: WorkspaceId),
+    start_agent_session(workspace_id: WorkspaceId),
+    switch_agent(args: SwitchAgentArgs),
+    set_workspace_notes(args: SetWorkspaceNotesArgs),
+    start_shipping(args: StartShippingArgs),
+    stop_shipping(workspace_id: WorkspaceId),
+    list_artifacts(workspace_id: WorkspaceId),
+    dismiss_artifact(workspace_id: WorkspaceId, artifact_id: String),
+    open_artifact(workspace_id: WorkspaceId, artifact_id: String),
+    attach_session(session_id: String, on_bytes: u32),
+    detach_session(session_id: String, channel_id: u32),
+    send_input(session_id: String, data: Vec<u8>),
+    resize_session(session_id: String, cols: u16, rows: u16),
+    get_theme(),
+    load_theme(path: PathBuf),
+    reset_theme(),
+    read_clipboard_file_paths(),
+}
+
+pub async fn list_workspaces(cx: &Ctx<'_>) -> AppResult<Vec<Workspace>> {
+    Ok(cx.store.read(|s| s.workspaces.clone()).await)
+}
+
+pub async fn registry_status(cx: &Ctx<'_>) -> AppResult<RegistryLoad> {
+    Ok((*cx.registry).clone())
+}
+
+pub async fn github_auth_status(cx: &Ctx<'_>) -> AppResult<AuthSnapshot> {
+    Ok(cx.poller.auth_snapshot().await)
+}
+
+pub async fn github_reprobe_auth(cx: &Ctx<'_>) -> AppResult<AuthSnapshot> {
+    cx.poller.probe_login().await;
+    Ok(cx.poller.auth_snapshot().await)
+}
+
+/// The window took focus.
+pub async fn request_github_poll(cx: &Ctx<'_>) -> AppResult<()> {
+    cx.poller.request_tick().await;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,15 +151,10 @@ pub struct AttachPrArgs {
     pub reference: String,
 }
 
-#[tauri::command]
-pub async fn attach_pr(
-    store: State<'_, Arc<Store>>,
-    registry: State<'_, Arc<RegistryLoad>>,
-    args: AttachPrArgs,
-) -> AppResult<GithubPrStatus> {
+pub async fn attach_pr(cx: &Ctx<'_>, args: AttachPrArgs) -> AppResult<GithubPrStatus> {
     let attached = github::attach(
-        &store,
-        &registry,
+        &cx.store,
+        &cx.registry,
         &args.workspace_id,
         args.repo_key.as_deref(),
         &args.reference,
@@ -92,12 +170,8 @@ pub struct DetachPrArgs {
     pub pr_number: u32,
 }
 
-#[tauri::command]
-pub async fn detach_pr(
-    store: State<'_, Arc<Store>>,
-    args: DetachPrArgs,
-) -> AppResult<()> {
-    store
+pub async fn detach_pr(cx: &Ctx<'_>, args: DetachPrArgs) -> AppResult<()> {
+    cx.store
         .update_workspace(&args.workspace_id, |ws| {
             let link = ws.link_mut(&args.repo_key).ok_or_else(|| {
                 AppError::Other(format!("workspace has no worktree for {}", args.repo_key))
@@ -161,9 +235,8 @@ fn open_workspace_in_editor(path: &Path) -> AppResult<()> {
     Ok(())
 }
 
-#[tauri::command]
-pub fn clone_dir_path(paths: State<'_, Paths>) -> PathBuf {
-    paths.repos_clone_dir()
+pub async fn clone_dir_path(cx: &Ctx<'_>) -> AppResult<PathBuf> {
+    Ok(cx.paths.repos_clone_dir())
 }
 
 /// Named rather than a path, so nothing else is openable this way.
@@ -176,15 +249,10 @@ pub enum ConfigLocation {
     CloneDir,
 }
 
-#[tauri::command]
-pub fn open_config_location(
-    location: ConfigLocation,
-    paths: State<'_, Paths>,
-    registry: State<'_, Arc<RegistryLoad>>,
-) -> AppResult<()> {
+pub async fn open_config_location(cx: &Ctx<'_>, location: ConfigLocation) -> AppResult<()> {
     match location {
         ConfigLocation::ReposConfig => {
-            let path = paths.repos_config_file();
+            let path = cx.paths.repos_config_file();
             if !path.exists() {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
@@ -195,23 +263,20 @@ pub fn open_config_location(
             open_in_editor(&path)
         }
         ConfigLocation::WorktreeRoot => {
-            open_workspace_in_editor(&registry.require()?.worktree_root)
+            open_workspace_in_editor(&cx.registry.require()?.worktree_root)
         }
         ConfigLocation::CloneDir => {
             // Absent on a fresh install, and opening a missing path errors.
-            let path = paths.repos_clone_dir();
+            let path = cx.paths.repos_clone_dir();
             std::fs::create_dir_all(&path)?;
             open_workspace_in_editor(&path)
         }
     }
 }
 
-#[tauri::command]
-pub async fn open_in_vscode(
-    store: State<'_, Arc<Store>>,
-    id: WorkspaceId,
-) -> AppResult<()> {
-    let workspace_root: PathBuf = store
+pub async fn open_in_vscode(cx: &Ctx<'_>, id: WorkspaceId) -> AppResult<()> {
+    let workspace_root: PathBuf = cx
+        .store
         .with_workspace(&id, Workspace::root_buf)
         .await?
         .ok_or_else(|| {
@@ -221,25 +286,6 @@ pub async fn open_in_vscode(
         })?;
 
     open_workspace_in_editor(&workspace_root)
-}
-
-/// Logical pixels in the main window.
-#[tauri::command]
-pub fn show_pr_view(
-    app: AppHandle,
-    url: String,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-    viewport_height: f64,
-) -> AppResult<()> {
-    crate::pr_view::show(&app, url, x, y, width, height, viewport_height)
-}
-
-#[tauri::command]
-pub fn hide_pr_view(app: AppHandle) -> AppResult<()> {
-    crate::pr_view::hide(&app)
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,15 +299,10 @@ pub struct CreateWorkspaceArgs {
     pub folder: Option<FolderId>,
 }
 
-#[tauri::command]
 pub async fn create_workspace(
-    store: State<'_, Arc<Store>>,
-    registry: State<'_, Arc<RegistryLoad>>,
-    paths: State<'_, Paths>,
-    in_progress: State<'_, InProgressWorkspaces>,
-    queue: State<'_, ProvisionQueue>,
+    cx: &Ctx<'_>,
     args: CreateWorkspaceArgs,
-    on_event: Channel<JobEvent>,
+    on_event: u32,
 ) -> AppResult<Workspace> {
     let id = args.workspace_id.trim().to_string();
     if id.is_empty() {
@@ -285,7 +326,7 @@ pub async fn create_workspace(
         agent_bin::resolve_named(bin)?;
     }
 
-    let reg = registry.require()?;
+    let reg = cx.registry.require()?;
     let selected: Vec<Repo> = args
         .repo_selections
         .iter()
@@ -300,7 +341,7 @@ pub async fn create_workspace(
         branch,
         workspace_dir,
         claim,
-    } = branch_name::reserve(&reg.worktree_root, &in_progress, requested)?;
+    } = branch_name::reserve(&reg.worktree_root, &cx.in_progress, requested)?;
 
     let draft = Workspace::draft(
         id.clone(),
@@ -310,7 +351,7 @@ pub async fn create_workspace(
         Origin::Ui,
         args.folder.clone(),
     );
-    store
+    cx.store
         .mutate(|s| {
             // It may have been deleted while the dialog was open.
             if let Some(folder) = &draft.folder {
@@ -328,9 +369,9 @@ pub async fn create_workspace(
             Ok(())
         })
         .await?;
-    store.notify_changed(&id);
+    cx.store.notify_changed(&id);
 
-    let tx = spawn_event_forwarder(on_event);
+    let tx = spawn_event_forwarder(cx.conn.json_channel(on_event));
     if branch != requested {
         tx.status(format!("`{requested}` is taken; using `{branch}`"), None);
     }
@@ -340,10 +381,10 @@ pub async fn create_workspace(
         workspace_dir: &workspace_dir,
         repos: &selected,
         registry: reg,
-        paths: &paths,
-        store: &store,
+        paths: &cx.paths,
+        store: &cx.store,
         claim,
-        queue: &queue,
+        queue: &cx.queue,
         tx: &tx,
     })
     .await
@@ -355,53 +396,43 @@ pub struct AddRepoArgs {
     pub repo_keys: Vec<String>,
 }
 
-#[tauri::command]
 pub async fn add_repo_to_workspace(
-    store: State<'_, Arc<Store>>,
-    registry: State<'_, Arc<RegistryLoad>>,
-    paths: State<'_, Paths>,
-    queue: State<'_, ProvisionQueue>,
+    cx: &Ctx<'_>,
     args: AddRepoArgs,
-    on_event: Channel<JobEvent>,
+    on_event: u32,
 ) -> AppResult<Workspace> {
-    let reg = registry.require()?;
-    let tx = spawn_event_forwarder(on_event);
+    let reg = cx.registry.require()?;
+    let tx = spawn_event_forwarder(cx.conn.json_channel(on_event));
     add_repos(RepoAddition {
         workspace_id: &args.workspace_id,
         repo_keys: &args.repo_keys,
         registry: reg,
-        paths: &paths,
-        store: &store,
-        queue: &queue,
+        paths: &cx.paths,
+        store: &cx.store,
+        queue: &cx.queue,
         tx: &tx,
     })
     .await
 }
 
 /// Soft delete; the purger tears down once the grace window passes.
-#[tauri::command]
-pub async fn delete_workspace(
-    app: AppHandle,
-    store: State<'_, Arc<Store>>,
-    supervisor: State<'_, Arc<SessionSupervisor>>,
-    registry: State<'_, Arc<RegistryLoad>>,
-    tmux_bin: State<'_, TmuxBin>,
-    id: WorkspaceId,
-) -> AppResult<()> {
-    let children = store.read(|s| s.live_children(&id)).await;
+pub async fn delete_workspace(cx: &Ctx<'_>, id: WorkspaceId) -> AppResult<()> {
+    let children = cx.store.read(|s| s.live_children(&id)).await;
     if children > 0 {
         return Err(AppError::HasChildren(children));
     }
-    let session_id: Option<String> = store
+    let session_id: Option<String> = cx
+        .store
         .with_workspace(&id, |w| w.session.as_ref().map(|m| m.id.clone()))
         .await?;
 
     // Stop the agent writing to a worktree about to be removed.
     if let Some(sid) = session_id {
-        tmux::kill_session(&tmux_bin.0, &sid);
+        tmux::kill_session(&cx.tmux_bin, &sid);
     }
 
-    let deleted = store
+    let deleted = cx
+        .store
         .update_workspace(&id, |ws| {
             ws.deleted_at = Some(Utc::now());
             Ok(ws.clone())
@@ -409,44 +440,35 @@ pub async fn delete_workspace(
         .await?;
 
     info!(%id, "soft-deleted workspace");
-    let _ = app.emit("system_status:changed", &());
+    cx.events.emit("system_status:changed", ());
 
     // Fetching the child's PRs can take seconds; the delete shouldn't wait.
     if deleted.parent.is_some() {
-        let store = store.inner().clone();
-        let supervisor = supervisor.inner().clone();
-        let registry = registry.inner().clone();
-        tauri::async_runtime::spawn(async move {
+        let store = cx.store.clone();
+        let supervisor = cx.supervisor.clone();
+        let registry = cx.registry.clone();
+        tokio::spawn(async move {
             crate::child_events::child_deleted(&store, &supervisor, &registry, deleted).await;
         });
     }
     Ok(())
 }
 
-#[tauri::command]
-pub async fn cancel_delete_workspace(
-    app: AppHandle,
-    store: State<'_, Arc<Store>>,
-    id: WorkspaceId,
-) -> AppResult<()> {
-    store
+pub async fn cancel_delete_workspace(cx: &Ctx<'_>, id: WorkspaceId) -> AppResult<()> {
+    cx.store
         .update_workspace(&id, |ws| {
             ws.deleted_at = None;
             Ok(())
         })
         .await?;
-    let _ = app.emit("system_status:changed", &());
+    cx.events.emit("system_status:changed", ());
     Ok(())
 }
 
 /// Named ids move to the front in the given order; the rest keep their
 /// relative order behind them.
-#[tauri::command]
-pub async fn reorder_workspaces(
-    store: State<'_, Arc<Store>>,
-    ids: Vec<WorkspaceId>,
-) -> AppResult<()> {
-    store
+pub async fn reorder_workspaces(cx: &Ctx<'_>, ids: Vec<WorkspaceId>) -> AppResult<()> {
+    cx.store
         .mutate(|s| {
             for id in &ids {
                 if !s.workspaces.iter().any(|w| &w.id == id) {
@@ -469,20 +491,18 @@ pub async fn reorder_workspaces(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn list_folders(store: State<'_, Arc<Store>>) -> AppResult<Vec<Folder>> {
-    Ok(store.read(|s| s.folders.clone()).await)
+pub async fn list_folders(cx: &Ctx<'_>) -> AppResult<Vec<Folder>> {
+    Ok(cx.store.read(|s| s.folders.clone()).await)
 }
 
-#[tauri::command]
-pub async fn create_folder(store: State<'_, Arc<Store>>, name: String) -> AppResult<Folder> {
+pub async fn create_folder(cx: &Ctx<'_>, name: String) -> AppResult<Folder> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err(AppError::Other("a folder needs a name".into()));
     }
     let folder = Folder::new(name);
     let created = folder.clone();
-    store
+    cx.store
         .mutate(move |s| {
             s.folders.push(folder);
             Ok(())
@@ -498,16 +518,12 @@ pub struct RenameFolderArgs {
     pub name: String,
 }
 
-#[tauri::command]
-pub async fn rename_folder(
-    store: State<'_, Arc<Store>>,
-    args: RenameFolderArgs,
-) -> AppResult<()> {
+pub async fn rename_folder(cx: &Ctx<'_>, args: RenameFolderArgs) -> AppResult<()> {
     let name = args.name.trim().to_string();
     if name.is_empty() {
         return Err(AppError::Other("a folder needs a name".into()));
     }
-    store
+    cx.store
         .mutate(|s| {
             let folder = s
                 .find_folder_mut(&args.folder_id)
@@ -519,9 +535,8 @@ pub async fn rename_folder(
 }
 
 /// Its workspaces fall back to Default.
-#[tauri::command]
-pub async fn delete_folder(store: State<'_, Arc<Store>>, id: FolderId) -> AppResult<()> {
-    store
+pub async fn delete_folder(cx: &Ctx<'_>, id: FolderId) -> AppResult<()> {
+    cx.store
         .mutate(|s| {
             if !s.folder_exists(&id) {
                 return Err(AppError::FolderNotFound(id.clone()));
@@ -540,12 +555,8 @@ pub struct SetFolderCollapsedArgs {
     pub collapsed: bool,
 }
 
-#[tauri::command]
-pub async fn set_folder_collapsed(
-    store: State<'_, Arc<Store>>,
-    args: SetFolderCollapsedArgs,
-) -> AppResult<()> {
-    store
+pub async fn set_folder_collapsed(cx: &Ctx<'_>, args: SetFolderCollapsedArgs) -> AppResult<()> {
+    cx.store
         .mutate(|s| {
             let folder = s
                 .find_folder_mut(&args.folder_id)
@@ -557,12 +568,8 @@ pub async fn set_folder_collapsed(
 }
 
 /// Same contract and silence as [`reorder_workspaces`].
-#[tauri::command]
-pub async fn reorder_folders(
-    store: State<'_, Arc<Store>>,
-    ids: Vec<FolderId>,
-) -> AppResult<()> {
-    store
+pub async fn reorder_folders(cx: &Ctx<'_>, ids: Vec<FolderId>) -> AppResult<()> {
+    cx.store
         .mutate(|s| {
             for id in &ids {
                 if !s.folder_exists(id) {
@@ -592,16 +599,15 @@ pub struct MoveWorkspacesToFolderArgs {
 }
 
 /// Silent, like [`reorder_workspaces`].
-#[tauri::command]
 pub async fn move_workspaces_to_folder(
-    store: State<'_, Arc<Store>>,
+    cx: &Ctx<'_>,
     args: MoveWorkspacesToFolderArgs,
 ) -> AppResult<()> {
     let MoveWorkspacesToFolderArgs {
         workspace_ids,
         folder,
     } = args;
-    store
+    cx.store
         .mutate(|s| {
             if let Some(folder) = &folder {
                 if !s.folder_exists(folder) {
@@ -624,56 +630,38 @@ pub async fn move_workspaces_to_folder(
 }
 
 /// Still respects the grace window.
-#[tauri::command]
-pub fn run_purge_now(purger: State<'_, Arc<Purger>>) -> AppResult<()> {
-    purger.request_tick();
+pub async fn run_purge_now(cx: &Ctx<'_>) -> AppResult<()> {
+    cx.purger.request_tick();
     Ok(())
 }
 
-#[tauri::command]
-pub async fn list_system_errors(
-    store: State<'_, Arc<Store>>,
-) -> AppResult<Vec<SystemErrorEntry>> {
-    Ok(store.read(|s| s.system_errors.clone()).await)
+pub async fn list_system_errors(cx: &Ctx<'_>) -> AppResult<Vec<SystemErrorEntry>> {
+    Ok(cx.store.read(|s| s.system_errors.clone()).await)
 }
 
-#[tauri::command]
-pub async fn dismiss_system_error(
-    app: AppHandle,
-    store: State<'_, Arc<Store>>,
-    id: String,
-) -> AppResult<()> {
-    store
+pub async fn dismiss_system_error(cx: &Ctx<'_>, id: String) -> AppResult<()> {
+    cx.store
         .mutate(|s| {
             s.system_errors.retain(|e| e.id != id);
             Ok(())
         })
         .await?;
-    let _ = app.emit("system_status:changed", &());
+    cx.events.emit("system_status:changed", ());
     Ok(())
 }
 
-#[tauri::command]
-pub async fn list_discrepancies(
-    store: State<'_, Arc<Store>>,
-    registry: State<'_, Arc<RegistryLoad>>,
-    in_progress: State<'_, InProgressWorkspaces>,
-) -> AppResult<Discrepancies> {
-    let snapshot = store.read(|s| s.clone()).await;
-    let pending = in_progress.snapshot();
-    let reg = match &**registry {
+pub async fn list_discrepancies(cx: &Ctx<'_>) -> AppResult<Discrepancies> {
+    let snapshot = cx.store.read(|s| s.clone()).await;
+    let pending = cx.in_progress.snapshot();
+    let reg = match &*cx.registry {
         RegistryLoad::Ok { registry, .. } => Some(registry),
         _ => None,
     };
     Ok(reconcile::scan(&snapshot, reg, &pending).await)
 }
 
-#[tauri::command]
-pub async fn remove_orphan_dir(
-    registry: State<'_, Arc<RegistryLoad>>,
-    path: PathBuf,
-) -> AppResult<()> {
-    let reg = registry.require()?;
+pub async fn remove_orphan_dir(cx: &Ctx<'_>, path: PathBuf) -> AppResult<()> {
+    let reg = cx.registry.require()?;
     if !reconcile::is_under(&reg.worktree_root, &path) {
         return Err(AppError::Other(format!(
             "refusing to remove {}: not under worktree_root",
@@ -686,20 +674,17 @@ pub async fn remove_orphan_dir(
 }
 
 /// State-only removal: no git ops.
-#[tauri::command]
-pub async fn forget_workspace(
-    store: State<'_, Arc<Store>>,
-    tmux_bin: State<'_, TmuxBin>,
-    id: WorkspaceId,
-) -> AppResult<()> {
-    let session_id: Option<String> = store
+pub async fn forget_workspace(cx: &Ctx<'_>, id: WorkspaceId) -> AppResult<()> {
+    let session_id: Option<String> = cx
+        .store
         .read(|s| {
             s.find_workspace(&id)
                 .and_then(|w| w.session.as_ref().map(|m| m.id.clone()))
         })
         .await;
 
-    let removed = store
+    let removed = cx
+        .store
         .mutate(|s| {
             let before = s.workspaces.len();
             s.workspaces.retain(|w| w.id != id);
@@ -712,77 +697,58 @@ pub async fn forget_workspace(
     }
 
     if let Some(sid) = session_id {
-        tmux::kill_session(&tmux_bin.0, &sid);
+        tmux::kill_session(&cx.tmux_bin, &sid);
     }
 
     info!(%id, "forgot workspace (state-only removal)");
-    store.notify_changed(&id);
+    cx.store.notify_changed(&id);
     Ok(())
 }
 
 /// `None` until this run has spawned or reattached the session.
-#[tauri::command]
-pub async fn get_session(
-    supervisor: State<'_, Arc<SessionSupervisor>>,
-    store: State<'_, Arc<Store>>,
-    workspace_id: WorkspaceId,
-) -> AppResult<Option<SessionInfo>> {
-    let session_id = store
+pub async fn get_session(cx: &Ctx<'_>, workspace_id: WorkspaceId) -> AppResult<Option<SessionInfo>> {
+    let session_id = cx
+        .store
         .read(|s| {
             s.find_workspace(&workspace_id)
                 .and_then(|w| w.session.as_ref().map(|m| m.id.clone()))
         })
         .await;
-    Ok(session_id.and_then(|id| supervisor.info(&id)))
+    Ok(session_id.and_then(|id| cx.supervisor.info(&id)))
 }
 
-#[tauri::command]
-pub fn list_budget_requests(budgets: State<'_, Arc<Budgets>>) -> Vec<OverrideRequest> {
-    budgets.pending()
+pub async fn list_budget_requests(cx: &Ctx<'_>) -> AppResult<Vec<OverrideRequest>> {
+    Ok(cx.budgets.pending())
 }
 
-#[tauri::command]
-pub fn decide_budget_request(
-    budgets: State<'_, Arc<Budgets>>,
+pub async fn decide_budget_request(
+    cx: &Ctx<'_>,
     workspace_id: WorkspaceId,
     approve: bool,
 ) -> AppResult<()> {
-    budgets.decide(&workspace_id, approve)
+    cx.budgets.decide(&workspace_id, approve)
 }
 
-#[tauri::command]
-pub async fn acknowledge_session_turn(
-    supervisor: State<'_, Arc<SessionSupervisor>>,
-    store: State<'_, Arc<Store>>,
-    workspace_id: WorkspaceId,
-) -> AppResult<()> {
-    let session_id = store
+pub async fn acknowledge_session_turn(cx: &Ctx<'_>, workspace_id: WorkspaceId) -> AppResult<()> {
+    let session_id = cx
+        .store
         .with_workspace(&workspace_id, |w| w.session.as_ref().map(|m| m.id.clone()))
         .await?;
     if let Some(session_id) = session_id {
-        supervisor.acknowledge_turn(&session_id, &workspace_id).await;
+        cx.supervisor.acknowledge_turn(&session_id, &workspace_id).await;
     }
     Ok(())
 }
 
-#[tauri::command]
-pub async fn start_agent_session(
-    supervisor: State<'_, Arc<SessionSupervisor>>,
-    store: State<'_, Arc<Store>>,
-    agent_bins: State<'_, AgentBins>,
-    tmux_bin: State<'_, TmuxBin>,
-    paths: State<'_, Paths>,
-    mcp: State<'_, Option<McpLaunch>>,
-    workspace_id: WorkspaceId,
-) -> AppResult<SessionInfo> {
+pub async fn start_agent_session(cx: &Ctx<'_>, workspace_id: WorkspaceId) -> AppResult<SessionInfo> {
     open_session(OpenSession {
-        supervisor: &supervisor,
-        store: &store,
+        supervisor: &cx.supervisor,
+        store: &cx.store,
         workspace_id: &workspace_id,
-        agent_bins: &agent_bins,
-        tmux_bin: &tmux_bin.0,
-        paths: &paths,
-        mcp: mcp.inner().as_ref(),
+        agent_bins: &cx.agent_bins,
+        tmux_bin: &cx.tmux_bin,
+        paths: &cx.paths,
+        mcp: cx.mcp.as_ref(),
         brief: None,
     })
     .await
@@ -796,16 +762,7 @@ pub struct SwitchAgentArgs {
     pub agent_binary: String,
 }
 
-#[tauri::command]
-pub async fn switch_agent(
-    supervisor: State<'_, Arc<SessionSupervisor>>,
-    store: State<'_, Arc<Store>>,
-    agent_bins: State<'_, AgentBins>,
-    tmux_bin: State<'_, TmuxBin>,
-    paths: State<'_, Paths>,
-    mcp: State<'_, Option<McpLaunch>>,
-    args: SwitchAgentArgs,
-) -> AppResult<SessionInfo> {
+pub async fn switch_agent(cx: &Ctx<'_>, args: SwitchAgentArgs) -> AppResult<SessionInfo> {
     let binary = args.agent_binary.trim().to_string();
     if binary.is_empty() {
         return Err(AppError::Other("no agent binary name provided".into()));
@@ -813,7 +770,8 @@ pub async fn switch_agent(
     // Before tearing down the running session.
     agent_bin::resolve_named(&binary)?;
 
-    let session_id = store
+    let session_id = cx
+        .store
         .update_workspace(&args.workspace_id, |ws| {
             let previous = ws.session.as_ref().map(|m| m.id.clone());
             // Neither CLI can read the other's transcript.
@@ -828,17 +786,17 @@ pub async fn switch_agent(
 
     // So `open_session` can't just reattach the old process.
     if let Some(sid) = session_id {
-        tmux::kill_session(&tmux_bin.0, &sid);
+        tmux::kill_session(&cx.tmux_bin, &sid);
     }
 
     open_session(OpenSession {
-        supervisor: &supervisor,
-        store: &store,
+        supervisor: &cx.supervisor,
+        store: &cx.store,
         workspace_id: &args.workspace_id,
-        agent_bins: &agent_bins,
-        tmux_bin: &tmux_bin.0,
-        paths: &paths,
-        mcp: mcp.inner().as_ref(),
+        agent_bins: &cx.agent_bins,
+        tmux_bin: &cx.tmux_bin,
+        paths: &cx.paths,
+        mcp: cx.mcp.as_ref(),
         brief: None,
     })
     .await
@@ -852,12 +810,8 @@ pub struct SetWorkspaceNotesArgs {
 
 /// Quiet: the frontend owns the text while editing, and an event per debounced
 /// keystroke would churn the pane.
-#[tauri::command]
-pub async fn set_workspace_notes(
-    store: State<'_, Arc<Store>>,
-    args: SetWorkspaceNotesArgs,
-) -> AppResult<()> {
-    store
+pub async fn set_workspace_notes(cx: &Ctx<'_>, args: SetWorkspaceNotesArgs) -> AppResult<()> {
+    cx.store
         .update_workspace_quiet(&args.workspace_id, |ws| {
             ws.notes = args.notes;
             Ok(())
@@ -873,26 +827,21 @@ pub struct StartShippingArgs {
     pub prs: Vec<PrRef>,
 }
 
-#[tauri::command]
-pub async fn start_shipping(
-    store: State<'_, Arc<Store>>,
-    shipper: State<'_, Arc<Shipper>>,
-    args: StartShippingArgs,
-) -> AppResult<()> {
-    let nudged = store
+pub async fn start_shipping(cx: &Ctx<'_>, args: StartShippingArgs) -> AppResult<()> {
+    let nudged = cx
+        .store
         .update_workspace(&args.workspace_id, |ws| shipping::start(ws, args.prs))
         .await?;
     if nudged {
-        let shipper = shipper.inner().clone();
-        tauri::async_runtime::spawn(async move { shipper.wake(&args.workspace_id).await });
+        let shipper = cx.shipper.clone();
+        tokio::spawn(async move { shipper.wake(&args.workspace_id).await });
     }
     Ok(())
 }
 
 /// Also takes a workspace out of Shipped, back among the ones being worked on.
-#[tauri::command]
-pub async fn stop_shipping(store: State<'_, Arc<Store>>, workspace_id: WorkspaceId) -> AppResult<()> {
-    store
+pub async fn stop_shipping(cx: &Ctx<'_>, workspace_id: WorkspaceId) -> AppResult<()> {
+    cx.store
         .update_workspace(&workspace_id, |ws| {
             ws.shipment = None;
             Ok(())
@@ -902,23 +851,18 @@ pub async fn stop_shipping(store: State<'_, Arc<Store>>, workspace_id: Workspace
     Ok(())
 }
 
-#[tauri::command]
-pub async fn list_artifacts(
-    artifacts: State<'_, Arc<ArtifactStore>>,
-    workspace_id: WorkspaceId,
-) -> AppResult<Vec<Artifact>> {
-    Ok(artifacts.list(&workspace_id).await)
+pub async fn list_artifacts(cx: &Ctx<'_>, workspace_id: WorkspaceId) -> AppResult<Vec<Artifact>> {
+    Ok(cx.artifacts.list(&workspace_id).await)
 }
 
-/// Not plugin-opener's `openPath`, which is scoped to paths fixed in the
-/// capability file. Takes an artifact id so no arbitrary path can be opened.
-#[tauri::command]
+/// Takes an artifact id so no arbitrary path can be opened.
 pub async fn open_artifact(
-    artifacts: State<'_, Arc<ArtifactStore>>,
+    cx: &Ctx<'_>,
     workspace_id: WorkspaceId,
     artifact_id: String,
 ) -> AppResult<()> {
-    let path = artifacts
+    let path = cx
+        .artifacts
         .list(&workspace_id)
         .await
         .into_iter()
@@ -935,62 +879,58 @@ pub async fn open_artifact(
     Ok(())
 }
 
-#[tauri::command]
 pub async fn dismiss_artifact(
-    artifacts: State<'_, Arc<ArtifactStore>>,
+    cx: &Ctx<'_>,
     workspace_id: WorkspaceId,
     artifact_id: String,
 ) -> AppResult<()> {
-    artifacts.dismiss(&workspace_id, &artifact_id).await;
+    cx.artifacts.dismiss(&workspace_id, &artifact_id).await;
     Ok(())
 }
 
-#[tauri::command]
-pub fn attach_session(
-    supervisor: State<'_, Arc<SessionSupervisor>>,
-    session_id: String,
-    on_bytes: tauri::ipc::Channel<InvokeResponseBody>,
-) -> AppResult<Vec<u8>> {
-    supervisor.attach(&session_id, on_bytes)
+/// The scrollback arrives as `on_bytes`'s first frame, not in the reply: on
+/// one ordered socket, a live chunk could otherwise beat the reply to the page.
+pub async fn attach_session(cx: &Ctx<'_>, session_id: String, on_bytes: u32) -> AppResult<()> {
+    cx.supervisor
+        .attach(&session_id, cx.conn.byte_channel(on_bytes))
 }
 
-#[tauri::command]
-pub fn detach_session(
-    supervisor: State<'_, Arc<SessionSupervisor>>,
-    session_id: String,
-    channel_id: u32,
-) {
-    supervisor.detach(&session_id, channel_id);
+pub async fn detach_session(cx: &Ctx<'_>, session_id: String, channel_id: u32) -> AppResult<()> {
+    cx.supervisor.detach(&session_id, cx.conn.id(), channel_id);
+    Ok(())
 }
 
-#[tauri::command]
-pub fn send_input(
-    supervisor: State<'_, Arc<SessionSupervisor>>,
-    session_id: String,
-    data: Vec<u8>,
-) -> AppResult<()> {
-    supervisor.send_input(&session_id, &data)
+pub async fn send_input(cx: &Ctx<'_>, session_id: String, data: Vec<u8>) -> AppResult<()> {
+    cx.supervisor.send_input(&session_id, &data)
 }
 
-#[tauri::command]
-pub fn resize_session(
-    supervisor: State<'_, Arc<SessionSupervisor>>,
+pub async fn resize_session(
+    cx: &Ctx<'_>,
     session_id: String,
     cols: u16,
     rows: u16,
 ) -> AppResult<()> {
-    supervisor.resize(&session_id, cols, rows)
+    cx.supervisor.resize(&session_id, cols, rows)
 }
 
-#[tauri::command]
-pub fn get_theme(paths: State<'_, Paths>) -> AppResult<Option<Theme>> {
-    Theme::load_saved(&paths.theme_file())
+pub async fn get_theme(cx: &Ctx<'_>) -> AppResult<Option<Theme>> {
+    Theme::load_saved(&cx.paths.theme_file())
 }
 
-/// WKWebView hides a pasted file's path, and its own auto-insert always lands
-/// in Claude Code as `[Image #N]`, whatever the file is.
-#[tauri::command]
-pub fn read_clipboard_file_paths() -> AppResult<Vec<String>> {
+/// The shell owns the file dialog; this is what follows it.
+pub async fn load_theme(cx: &Ctx<'_>, path: PathBuf) -> AppResult<Theme> {
+    theme::load_and_emit(&cx.events, &path, &cx.paths.theme_file()).inspect_err(|e| {
+        error!(error = %e, source = %path.display(), "load theme failed");
+    })
+}
+
+pub async fn reset_theme(cx: &Ctx<'_>) -> AppResult<()> {
+    theme::clear_and_emit(&cx.events, &cx.paths.theme_file())
+}
+
+/// The renderer can't see a pasted file's path, and Claude Code turns a pasted
+/// image into `[Image #N]`, whatever the file is.
+pub async fn read_clipboard_file_paths(_cx: &Ctx<'_>) -> AppResult<Vec<String>> {
     const SCRIPT: &str = r#"ObjC.import('AppKit');
 const pb = $.NSPasteboard.generalPasteboard;
 const urls = pb.readObjectsForClassesOptions($.NSArray.arrayWithObject($.NSURL), $());
@@ -1017,11 +957,11 @@ JSON.stringify(paths);"#;
     Ok(serde_json::from_str(stdout.trim())?)
 }
 
-fn spawn_event_forwarder(channel: Channel<JobEvent>) -> JobTx {
+fn spawn_event_forwarder(channel: JsonChannel) -> JobTx {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<JobEvent>();
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
-            if channel.send(event).is_err() {
+            if !channel.send(&event) {
                 break;
             }
         }

@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
 use tracing::info;
 
 use crate::error::{AppError, AppResult};
+use crate::ui_socket::Events;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Theme {
@@ -85,23 +85,23 @@ impl Theme {
 }
 
 pub fn load_and_emit(
-    app: &AppHandle,
+    events: &Events,
     source: &Path,
     save_path: &Path,
 ) -> AppResult<Theme> {
     let theme = Theme::load_from_file(source)?;
     theme.save(save_path)?;
     info!(name = %theme.name, source = %source.display(), "loaded theme");
-    let _ = app.emit("theme:changed", &theme);
+    events.emit("theme:changed", &theme);
     Ok(theme)
 }
 
-pub fn clear_and_emit(app: &AppHandle, save_path: &Path) -> AppResult<()> {
+pub fn clear_and_emit(events: &Events, save_path: &Path) -> AppResult<()> {
     if save_path.exists() {
         std::fs::remove_file(save_path)?;
     }
     info!("cleared theme");
-    let _ = app.emit("theme:changed", serde_json::Value::Null);
+    events.emit("theme:changed", serde_json::Value::Null);
     Ok(())
 }
 

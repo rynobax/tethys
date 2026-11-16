@@ -24,7 +24,6 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System, UpdateKind};
-use tauri::{AppHandle, Emitter};
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
@@ -32,6 +31,7 @@ use crate::error::{AppError, AppResult};
 use crate::sessions::SessionSupervisor;
 use crate::state::{SessionId, WorkspaceId};
 use crate::strays::{self, Tags};
+use crate::ui_socket::Events;
 
 const DEFAULT_BUDGET_MB: u64 = 8 * 1024;
 /// A test run can allocate gigabytes in seconds; this bounds how far past
@@ -82,7 +82,7 @@ pub struct Budgets {
     default_mb: Option<u64>,
     grants: Mutex<HashMap<SessionId, Grant>>,
     pending: Mutex<HashMap<WorkspaceId, Pending>>,
-    app: AppHandle,
+    events: Events,
 }
 
 pub enum Decision {
@@ -91,7 +91,7 @@ pub enum Decision {
 }
 
 impl Budgets {
-    pub fn new(app: AppHandle) -> Self {
+    pub fn new(events: Events) -> Self {
         let default_mb = budget_from_env();
         if default_mb.is_none() {
             info!("memory budget disabled by TETHYS_MEM_BUDGET=off");
@@ -100,7 +100,7 @@ impl Budgets {
             default_mb,
             grants: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
-            app,
+            events,
         }
     }
 
@@ -199,7 +199,7 @@ impl Budgets {
     }
 
     fn publish(&self) {
-        let _ = self.app.emit("session:budget_requests_changed", ());
+        self.events.emit("session:budget_requests_changed", ());
     }
 }
 
@@ -260,8 +260,8 @@ fn processes(sys: &System, own: &Tags) -> Vec<Proc> {
                 .map(|a| a.to_string_lossy())
                 .collect::<Vec<_>>()
                 .join(" ");
-            // `pnpm tauri dev` run from inside a session puts Tethys's own
-            // tree under that session's tag.
+            // A dev Tethys run from inside a session puts its own tree under
+            // that session's tag.
             let spared = tags.shares_any(own) || command.contains("memwatch.sh");
             let session = tags.session_id.filter(|_| !spared);
             Proc {

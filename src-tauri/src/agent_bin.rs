@@ -14,7 +14,7 @@ pub fn resolve_named(bin: &str) -> AppResult<PathBuf> {
 
 /// A missing agent holds an empty path so the failure surfaces at spawn,
 /// against the workspace being started, rather than as an unread boot warning.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct AgentBins {
     claude: PathBuf,
     codex: PathBuf,

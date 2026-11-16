@@ -273,6 +273,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = Paths {
             data_dir: tmp.path().join("data"),
+            isolated: true,
         };
         let root = tmp.path().join("feat-thing");
         fs::create_dir_all(&root).await.unwrap();
@@ -419,6 +420,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = Paths {
             data_dir: tmp.path().join("data"),
+            isolated: true,
         };
         let reg = registry(tmp.path(), vec![repo("nl-ai", None)]);
 

@@ -5,15 +5,27 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::sessions::SessionSupervisor;
 
 pub use tethys_hook::HookMessage;
+
+/// Whether a Tethys is listening there now, as opposed to a dead run's file.
+pub fn is_served(socket_path: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(socket_path).is_ok()
+}
 
 pub async fn start(
     socket_path: &Path,
     supervisor: Arc<SessionSupervisor>,
 ) -> AppResult<()> {
+    // Unlinking a live socket would take the other Tethys's sessions' hooks.
+    if is_served(socket_path) {
+        return Err(AppError::Other(format!(
+            "another Tethys is listening on {}",
+            socket_path.display()
+        )));
+    }
     if socket_path.exists() {
         tokio::fs::remove_file(socket_path).await.ok();
     }
@@ -79,4 +91,21 @@ async fn handle_connection(
     }
     supervisor.handle_hook_event(msg).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_served;
+
+    #[test]
+    fn a_dead_runs_socket_file_is_not_served() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hook.sock");
+        assert!(!is_served(&path));
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert!(is_served(&path));
+        drop(listener);
+        assert!(path.exists());
+        assert!(!is_served(&path));
+    }
 }

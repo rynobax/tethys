@@ -86,7 +86,7 @@ async fn read_all() -> Vec<Probe> {
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 pub fn spawn(supervisor: Arc<SessionSupervisor>) {
-    tauri::async_runtime::spawn(async move {
+    tokio::spawn(async move {
         loop {
             let probes = read_all().await;
             supervisor.reconcile_probes(&probes).await;

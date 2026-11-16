@@ -101,6 +101,7 @@ mod tests {
     fn paths(tmp: &tempfile::TempDir) -> Paths {
         Paths {
             data_dir: tmp.path().to_path_buf(),
+            isolated: true,
         }
     }
 

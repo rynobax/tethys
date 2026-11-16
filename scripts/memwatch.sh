@@ -33,7 +33,7 @@ SWAP_ALARM_MB="${SWAP_ALARM_MB:-12000}"
 FREE_ALARM_MB="${FREE_ALARM_MB:-250}"
 COOLDOWN="${COOLDOWN:-300}"
 
-HEADER=$'ts\tfree_mb\tcompressor_mb\tswap_used_mb\tproc_total_mb\titerm_mb\tcode_mb\tchrome_mb\tclaude_mb\tclaude_kids_mb\ttethys_mb\twebview_mb\tdevstack_mb\tdockervm_mb\tnprocs\tbiggest_mb\ttop1\ttop2\ttop3'
+HEADER=$'ts\tfree_mb\tcompressor_mb\tswap_used_mb\tproc_total_mb\titerm_mb\tcode_mb\tchrome_mb\tclaude_mb\tclaude_kids_mb\ttethys_mb\tui_mb\tdevstack_mb\tdockervm_mb\tnprocs\tbiggest_mb\ttop1\ttop2\ttop3'
 
 mkdir -p "$OUT"
 
@@ -48,11 +48,11 @@ if [ -f "$PIDFILE" ]; then
   rm -f "$PIDFILE"
 fi
 
-# --- rotate a samples file written by the old RSS-based script -------------
-# The columns changed meaning as well as name, so mixing them in one file
+# --- rotate a samples file written with other columns -----------------------
+# Columns have changed meaning as well as name, so mixing them in one file
 # would silently corrupt any later awk over it.
 if [ -s "$SAMPLES" ] && [ "$(head -1 "$SAMPLES")" != "$HEADER" ]; then
-  mv "$SAMPLES" "$SAMPLES.$(date +%Y%m%d-%H%M%S).rss.old"
+  mv "$SAMPLES" "$SAMPLES.$(date +%Y%m%d-%H%M%S).old"
 fi
 [ -s "$SAMPLES" ] || printf '%s\n' "$HEADER" >"$SAMPLES"
 
@@ -98,8 +98,18 @@ sample_row() {
       for (p in cmd) {
         argv0 = cmd[p]; sub(/ .*/, "", argv0); sub(/.*\//, "", argv0)
         if (argv0 == "claude")               claude_pid[p] = 1
-        if (argv0 == "tethys")               tethys_pid[p] = 1
-        if (cmd[p] ~ /pnpm tauri dev/)       dev_pid[p] = 1
+        # `tethys` is the Tauri build, until it is gone.
+        if (argv0 == "tethysd" || argv0 == "tethys") tethys_pid[p] = 1
+        # Tethys run from a checkout: the dev server and anything else that
+        # runs out of its node_modules.
+        if (cmd[p] ~ /\/tethys[^\/ ]*\/node_modules\//) dev_pid[p] = 1
+      }
+      # The Electron shell is the parent of the daemon, not its child, and
+      # the renderer and GPU helpers are children of the shell. The name is
+      # checked so a daemon started by hand does not count its terminal.
+      for (p in tethys_pid) {
+        q = ppid[p]; parent = cmd[q]; sub(/ .*/, "", parent); sub(/.*\//, "", parent)
+        if (parent == "Electron" || parent == "Tethys") ui_pid[q] = 1
       }
 
       for (p in cmd) {
@@ -113,7 +123,7 @@ sample_row() {
         if (p in claude_pid)                          claude += m
         else if (ancestor(p, claude_pid))             kids   += m
         else if (is_tethys)                           tethys += m
-        else if (cmd[p] ~ /com\.apple\.WebKit\.WebContent/) webview += m
+        else if ((p in ui_pid) || ancestor(p, ui_pid))      ui += m
         # docker compose test runs live in a VM that descends from no session.
         else if (cmd[p] ~ /Virtualization\.framework|Docker\.app|com\.docker/) docker += m
         else if ((p in dev_pid) || ancestor(p, dev_pid))    devstack += m
@@ -130,7 +140,7 @@ sample_row() {
 
       printf "%s\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%d\t%.0f\t%s\t%s\t%s\n",
         ts, FREE, COMPRESSOR, SWAP, total,
-        iterm, code, chrome, claude, kids, tethys, webview, devstack, docker,
+        iterm, code, chrome, claude, kids, tethys, ui, devstack, docker,
         n, biggest,
         sprintf("%.0fMB %s", t1v, trim(cmd[t1])),
         sprintf("%.0fMB %s", t2v, trim(cmd[t2])),
@@ -217,7 +227,7 @@ if [ "$FOREGROUND" = 1 ]; then
   echo $$ >"$PIDFILE"
   main_loop
 else
-  # Survives Ctrl-C on `pnpm tauri dev` and Tethys dying; SIGTERM still works.
+  # Survives Ctrl-C on a dev run and Tethys dying; SIGTERM still works.
   ( trap '' HUP INT; main_loop >/dev/null 2>>"$OUT/memwatch.err" ) &
   echo $! >"$PIDFILE"
   echo "[memwatch] sampling every ${INTERVAL}s -> $SAMPLES (pid $!)" >&2

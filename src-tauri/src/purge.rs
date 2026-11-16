@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use tauri::{AppHandle, Emitter};
 use tokio::sync::Notify;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -19,6 +18,7 @@ use crate::repo_env;
 use crate::setup::{self, ScriptKind};
 use crate::state::{SystemErrorEntry, Workspace};
 use crate::store::Store;
+use crate::ui_socket::Events;
 
 /// Keeps the purger from racing a user who just hit Delete and might undo it.
 const PURGE_GRACE: chrono::Duration = chrono::Duration::hours(1);
@@ -126,7 +126,7 @@ pub struct Purger {
     store: Arc<Store>,
     paths: Paths,
     registry: Arc<RegistryLoad>,
-    app: AppHandle,
+    events: Events,
     force: Arc<Notify>,
 }
 
@@ -135,13 +135,13 @@ impl Purger {
         store: Arc<Store>,
         paths: Paths,
         registry: Arc<RegistryLoad>,
-        app: AppHandle,
+        events: Events,
     ) -> Self {
         Self {
             store,
             paths,
             registry,
-            app,
+            events,
             force: Arc::new(Notify::new()),
         }
     }
@@ -204,7 +204,7 @@ impl Purger {
             }
         }
 
-        let _ = self.app.emit("system_status:changed", &());
+        self.events.emit("system_status:changed", ());
     }
 }
 

@@ -13,8 +13,9 @@ A stray is a process whose `TETHYS_SESSION_ID` or `TETHYS_SPAWN_TOKEN` names no 
 The safeguards in `strays.rs` are the point; don't loosen them:
 
 - If tmux can't list every session, a missing one would read as dead, so the sweep is skipped.
-- Anything sharing Tethys's own tags is spared, because `pnpm tauri dev` run inside a session carries that session's tag.
+- Anything sharing Tethys's own tags is spared, because a dev Tethys run inside a session carries that session's tag.
 - tmux and `memwatch.sh` outlive Tethys and may carry a dead session's tag. Killing the tmux server kills every session.
+- An isolated Tethys (`TETHYS_DATA_DIR`) runs neither this sweep nor the memory budget's. It asks only its own tmux server, so every real session's processes would read as strays.
 
 ## Memory budget
 

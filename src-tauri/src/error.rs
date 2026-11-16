@@ -17,9 +17,6 @@ pub enum AppError {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("tauri error: {0}")]
-    Tauri(#[from] tauri::Error),
-
     #[error("{0}")]
     Other(String),
 }

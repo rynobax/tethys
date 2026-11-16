@@ -5,12 +5,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
-use tauri::ipc::{Channel, InvokeResponseBody};
 use tracing::{debug, info, warn};
 
 use crate::error::{AppError, AppResult};
 use crate::scrollback::TermModes;
 use crate::tmux;
+use crate::ui_socket::ByteChannel;
 
 const READ_BUF: usize = 4096;
 
@@ -40,7 +40,7 @@ pub struct PtyProcess {
     ring: Ring,
     /// Outlives what the ring holds; see `scrollback`.
     modes: Arc<Mutex<TermModes>>,
-    subscribers: Arc<Mutex<Vec<Channel<InvokeResponseBody>>>>,
+    subscribers: Arc<Mutex<Vec<ByteChannel>>>,
     running: Arc<Mutex<bool>>,
     tui_ready: Arc<AtomicBool>,
 }
@@ -92,8 +92,7 @@ impl PtyProcess {
         append_to_ring(&ring, seed_bytes, RING_CAPACITY);
         let modes = Arc::new(Mutex::new(TermModes::default()));
         modes.lock().unwrap().observe(seed_bytes);
-        let subscribers: Arc<Mutex<Vec<Channel<InvokeResponseBody>>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let subscribers: Arc<Mutex<Vec<ByteChannel>>> = Arc::new(Mutex::new(Vec::new()));
         let running = Arc::new(Mutex::new(true));
         let tui_ready = Arc::new(AtomicBool::new(false));
 
@@ -125,24 +124,31 @@ impl PtyProcess {
         })
     }
 
-    pub fn attach(&self, channel: Channel<InvokeResponseBody>) -> Vec<u8> {
+    /// The scrollback goes out as the channel's first frame.
+    pub fn attach(&self, channel: ByteChannel) {
         let raw: Vec<u8> = self.ring.lock().unwrap().iter().copied().collect();
         let mut scrollback = crate::scrollback::strip_queries(&raw);
         // Under the subscriber lock, so no chunk lands between the restore and
-        // the first live byte.
+        // the first live byte, nor ahead of the scrollback.
         let mut subscribers = self.subscribers.lock().unwrap();
         scrollback.extend(self.modes.lock().unwrap().restore());
-        subscribers.push(channel);
-        scrollback
+        if channel.send(&scrollback) {
+            subscribers.push(channel);
+        }
     }
 
-    /// A send to an unmounted pane's channel never errors, so it is never
-    /// reclaimed otherwise, and it pins the whole xterm instance in the webview.
-    pub fn detach(&self, channel_id: u32) {
+    /// An unmounted pane's page stays connected, so sends to its channel
+    /// never fail and it would never be reclaimed otherwise.
+    pub fn detach(&self, conn: u64, channel_id: u32) {
         self.subscribers
             .lock()
             .unwrap()
-            .retain(|sub| sub.id() != channel_id);
+            .retain(|sub| !sub.is(conn, channel_id));
+    }
+
+    #[cfg(test)]
+    pub fn subscriber_count(&self) -> usize {
+        self.subscribers.lock().unwrap().len()
     }
 
     pub fn send_input(&self, data: &[u8]) -> AppResult<()> {
@@ -231,7 +237,7 @@ struct ReaderThread {
     reader: Box<dyn Read + Send>,
     ring: Ring,
     modes: Arc<Mutex<TermModes>>,
-    subscribers: Arc<Mutex<Vec<Channel<InvokeResponseBody>>>>,
+    subscribers: Arc<Mutex<Vec<ByteChannel>>>,
     tui_ready: Arc<AtomicBool>,
     on_ready: OnReady,
 }
@@ -267,9 +273,7 @@ fn spawn_reader_thread(thread: ReaderThread) {
                         }
                     }
                     let mut subs = subscribers.lock().unwrap();
-                    subs.retain(|sub| {
-                        sub.send(InvokeResponseBody::Raw(chunk.to_vec())).is_ok()
-                    });
+                    subs.retain(|sub| sub.send(chunk));
                 }
                 Err(e) => {
                     warn!(error = %e, "pty reader error");
