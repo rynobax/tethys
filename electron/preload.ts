@@ -33,6 +33,11 @@ const client = new DaemonClient(socket ?? "", {
 });
 window.addEventListener("pagehide", () => client.close());
 
+// A class rather than bridge API, so the page needs no code for it.
+ipcRenderer.on("full-screen", (_event, on: boolean) => {
+  document.documentElement.classList.toggle("full-screen", on);
+});
+
 const bridge: TethysBridge = {
   invoke: (cmd, args) => client.invoke(cmd, args),
   listen(event, handler) {

@@ -11,7 +11,7 @@ import { openUrl } from "./ipc/commands";
 import { useAppEvent } from "./ipc/events";
 import { GithubChip, PrDetachButton } from "./GithubChip";
 import { usePrViewSlot } from "./PrViews";
-import { useTheme } from "./theme";
+import { isDark, useTheme } from "./theme";
 import type { Artifact, GithubPrStatus, Workspace } from "./types";
 import { useHorizontalScroll } from "./useHorizontalScroll";
 import { linkPrEntries, prGroups } from "./workspaceDerived";
@@ -500,11 +500,4 @@ function errorText(e: unknown): string {
 
 function prefersDark(): boolean {
   return window.matchMedia("(prefers-color-scheme: dark)").matches;
-}
-
-function isDark(hex: string): boolean {
-  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(hex);
-  if (!m) return prefersDark();
-  const [r, g, b] = [m[1], m[2], m[3]].map((h) => parseInt(h, 16) / 255);
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.5;
 }

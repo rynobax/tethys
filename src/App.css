@@ -17,6 +17,48 @@ html,
   color: var(--fg);
 }
 
+/* The native title bar is hidden (`electron/main.ts`), so this strip takes
+   its place under the traffic lights, in the theme's colours. The fun preview
+   has none, and fullscreen drops it with the traffic lights. */
+:root {
+  --titlebar-h: 0px;
+}
+
+:root:has(.titlebar) {
+  /* The native title bar's height on macOS 26, measured, which the hidden
+     style still centres the traffic lights in. */
+  --titlebar-h: 32px;
+}
+
+:root.full-screen {
+  --titlebar-h: 0px;
+}
+
+.titlebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--titlebar-h);
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  /* Clear of the traffic lights, where macOS 26 starts a window's title. */
+  padding-left: 76px;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  user-select: none;
+  app-region: drag;
+}
+
+#root {
+  box-sizing: border-box;
+  padding-top: var(--titlebar-h);
+}
+
 :root {
   /* The session's column cap, which fun mode's floating pane wraps. */
   --terminal-width: 800px;
@@ -48,7 +90,7 @@ html,
 .app {
   display: grid;
   grid-template-columns: 204px 1fr;
-  height: 100vh;
+  height: calc(100vh - var(--titlebar-h));
 }
 
 .sidebar {
@@ -709,6 +751,9 @@ html,
   flex: 1;
   border: none;
   background: #fff;
+  /* A frame's `prefers-color-scheme` is its element's `color-scheme`, which
+     a theme sets; pages keep seeing the system's. */
+  color-scheme: light dark;
 }
 
 .artifact-broken {
@@ -867,6 +912,8 @@ button.danger {
 .modal-backdrop {
   position: fixed;
   inset: 0;
+  /* Over the title strip a click should close the dialog, not drag. */
+  app-region: no-drag;
   background: rgba(0, 0, 0, 0.35);
   display: flex;
   align-items: center;
@@ -2079,6 +2126,7 @@ li.is-dragging {
 
 .context-menu {
   position: fixed;
+  app-region: no-drag;
   z-index: 200;
   min-width: 160px;
   max-height: calc(100vh - 16px);

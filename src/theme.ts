@@ -69,6 +69,18 @@ function themeToCssVars(theme: Theme): Record<string, string> {
   };
 }
 
+function prefersDark(): boolean {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+/** By the colour's luminance; the system's preference if it isn't `#rrggbb`. */
+export function isDark(hex: string): boolean {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(hex);
+  if (!m) return prefersDark();
+  const [r, g, b] = [m[1], m[2], m[3]].map((h) => parseInt(h, 16) / 255);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.5;
+}
+
 export function applyTheme(theme: Theme | null) {
   const root = document.documentElement;
   const keys = [
@@ -85,8 +97,12 @@ export function applyTheme(theme: Theme | null) {
   ];
   if (!theme) {
     for (const k of keys) root.style.removeProperty(k);
+    root.style.removeProperty("color-scheme");
     return;
   }
+  // Scrollbars and form controls follow `color-scheme`, which otherwise
+  // follows the system, not the theme.
+  root.style.colorScheme = isDark(theme.colors.background) ? "dark" : "light";
   const vars = themeToCssVars(theme);
   for (const [k, v] of Object.entries(vars)) {
     root.style.setProperty(k, v);

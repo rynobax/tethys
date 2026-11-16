@@ -99,6 +99,9 @@ function createWindow(): BrowserWindow {
     minWidth: 700,
     minHeight: 480,
     show: false,
+    // The page draws its own strip under the traffic lights (`.titlebar`), so
+    // the title bar takes the theme's colour.
+    titleBarStyle: "hidden",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -124,6 +127,11 @@ function createWindow(): BrowserWindow {
     }
   });
   policePrViews(contents);
+  // Fullscreen hides the traffic lights, so the strip goes too.
+  const sendFullScreen = () => contents.send("full-screen", win.isFullScreen());
+  win.on("enter-full-screen", sendFullScreen);
+  win.on("leave-full-screen", sendFullScreen);
+  contents.on("dom-ready", sendFullScreen);
   ipcMain.handle("open-url", (event, url: unknown) => {
     if (event.sender === contents && typeof url === "string") openExternal(url);
   });

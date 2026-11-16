@@ -8,3 +8,4 @@ Electron (`electron/`) is the shell. The Rust core is `tethysd`, which main spaw
 - `attach_session` sends scrollback as the channel's first frame, not in its reply. On one ordered socket a live chunk could otherwise land ahead of it.
 - A channel argument crosses as a number the page allocates. Top-level argument keys are camelCase and keys inside an `args` struct snake_case, which is Tauri's convention, kept so the wrappers in `src/ipc/commands.ts` didn't change.
 - `tethysd` finds `tethys-hook` and `tethys-mcp` beside its own executable, so packaging copies all three into `Contents/MacOS/`.
+- The native title bar is hidden and the page draws `.titlebar` in its place, at the native bar's height so the traffic lights stay centred in it. That height is measured, 32px on macOS 26; a release that changes it misaligns them.

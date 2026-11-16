@@ -157,6 +157,14 @@ function useAnimals(
   return animals;
 }
 
+/** The world starts below the title strip, which fullscreen drops. */
+function titlebarHeight(): number {
+  const h = getComputedStyle(document.documentElement).getPropertyValue(
+    "--titlebar-h",
+  );
+  return parseFloat(h) || 0;
+}
+
 function useStage(
   panelRef: RefObject<HTMLElement | null>,
   folders: number,
@@ -172,7 +180,7 @@ function useStage(
       setStage(
         computeStage(
           window.innerWidth,
-          window.innerHeight,
+          window.innerHeight - titlebarHeight(),
           { left: panel.left, right: panel.right },
           folders,
         ),

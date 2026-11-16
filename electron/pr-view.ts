@@ -1,4 +1,12 @@
-import { shell, type WebContents } from "electron";
+import {
+  BrowserWindow,
+  clipboard,
+  Menu,
+  shell,
+  type ContextMenuParams,
+  type MenuItemConstructorOptions,
+  type WebContents,
+} from "electron";
 
 /**
  * The PR tab's `<webview>`s (`src/PrViews.tsx`). They only ever load GitHub,
@@ -138,6 +146,12 @@ export function policePrViews(embedder: WebContents) {
         openExternal(to.href);
       }
     });
+    // Electron shows none unless the app builds one.
+    guest.on("context-menu", (_event, params) => {
+      Menu.buildFromTemplate(contextMenu(guest, params)).popup({
+        window: BrowserWindow.fromWebContents(embedder) ?? undefined,
+      });
+    });
     const script = linkPolicyScript(pr);
     guest.on("dom-ready", () => {
       guest.executeJavaScript(script).catch((e) => {
@@ -145,4 +159,88 @@ export function policePrViews(embedder: WebContents) {
       });
     });
   });
+}
+
+/** Chrome's sections, in Chrome's order; the page's own only when nothing
+ *  more specific was clicked. */
+function contextMenu(
+  guest: WebContents,
+  params: ContextMenuParams,
+): MenuItemConstructorOptions[] {
+  const { editFlags: can, x, y } = params;
+  const sections: MenuItemConstructorOptions[][] = [];
+
+  if (params.linkURL) {
+    sections.push([
+      {
+        label: "Open Link in Browser",
+        click: () => openExternal(params.linkURL),
+      },
+      {
+        label: "Copy Link Address",
+        click: () => clipboard.writeText(params.linkURL),
+      },
+    ]);
+  }
+  if (params.mediaType === "image" && params.srcURL) {
+    sections.push([
+      { label: "Copy Image", click: () => guest.copyImageAt(x, y) },
+      {
+        label: "Copy Image Address",
+        click: () => clipboard.writeText(params.srcURL),
+      },
+    ]);
+  }
+  if (params.isEditable) {
+    if (params.misspelledWord) {
+      const word = params.misspelledWord;
+      sections.push([
+        ...(params.dictionarySuggestions.length > 0
+          ? params.dictionarySuggestions.map((s) => ({
+              label: s,
+              click: () => guest.replaceMisspelling(s),
+            }))
+          : [{ label: "No Guesses Found", enabled: false }]),
+        {
+          label: "Add to Dictionary",
+          click: () => guest.session.addWordToSpellCheckerDictionary(word),
+        },
+      ]);
+    }
+    sections.push([
+      { label: "Cut", enabled: can.canCut, click: () => guest.cut() },
+      { label: "Copy", enabled: can.canCopy, click: () => guest.copy() },
+      { label: "Paste", enabled: can.canPaste, click: () => guest.paste() },
+      {
+        label: "Select All",
+        enabled: can.canSelectAll,
+        click: () => guest.selectAll(),
+      },
+    ]);
+  } else if (params.selectionText.trim()) {
+    sections.push([{ label: "Copy", click: () => guest.copy() }]);
+  }
+  if (sections.length === 0) {
+    const history = guest.navigationHistory;
+    sections.push([
+      {
+        label: "Back",
+        enabled: history.canGoBack(),
+        click: () => history.goBack(),
+      },
+      {
+        label: "Forward",
+        enabled: history.canGoForward(),
+        click: () => history.goForward(),
+      },
+      { label: "Reload", click: () => guest.reload() },
+    ]);
+  }
+  sections.push([
+    { label: "Inspect Element", click: () => guest.inspectElement(x, y) },
+  ]);
+
+  return sections.flatMap((section, i) =>
+    i === 0 ? section : [{ type: "separator" as const }, ...section],
+  );
 }

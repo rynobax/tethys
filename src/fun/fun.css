@@ -1,6 +1,7 @@
 .fun-world {
   position: fixed;
-  inset: 0;
+  /* Below the title strip (`App.css`); the preview has none. */
+  inset: var(--titlebar-h, 0px) 0 0;
   z-index: 0;
 }
 
