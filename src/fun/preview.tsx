@@ -1,9 +1,9 @@
 /**
- * Fun mode without Tauri: `pnpm vite --port 5199`, then open /fun-preview.html.
+ * Fun mode without Electron: `pnpm vite --port 5199`, then open
+ * /fun-preview.html.
  * Every mood on screen at once, for iterating on the look; `?gallery` for
  * every animal side by side instead.
  */
-import { mockIPC } from "@tauri-apps/api/mocks";
 import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
@@ -174,7 +174,15 @@ const workspace = (s: Sample): Workspace => ({
   progress: s.progress ?? null,
 });
 
-mockIPC(() => null);
+// No daemon here: every command answers null and nothing is ever emitted.
+window.tethys = {
+  invoke: async () => null,
+  listen: () => () => {},
+  openChannel: () => 0,
+  closeChannel: () => {},
+  openUrl: async (url) => void window.open(url),
+  pathForFile: () => "",
+};
 
 function Preview() {
   const panelRef = useRef<HTMLElement>(null);

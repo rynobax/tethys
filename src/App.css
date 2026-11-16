@@ -653,6 +653,18 @@ html,
   background: var(--bg);
 }
 
+.pr-views {
+  display: contents;
+}
+
+/* Placed over its tab's `.pr-view-host` by `PrViews`; above the tab body,
+   below the pane's dialogs and menus. */
+.pr-view {
+  position: fixed;
+  z-index: 1;
+  visibility: hidden;
+}
+
 .artifact-view {
   flex: 1;
   min-height: 0;

@@ -2,22 +2,26 @@
 
 Desktop app for running many Claude Code (or codex) sessions in parallel across git worktrees. A **workspace** is N worktrees, one per repo, plus the one agent session running at their root. Hooks drive its "your turn" state.
 
-A personal tool for Ryan: macOS only, single user, never distributed. Take macOS-specific paths and Tauri features without guarding them. Work and commit directly on `main`; no branches or PRs.
+A personal tool for Ryan: macOS only, single user, never distributed. Take macOS-specific paths and Electron features without guarding them. Work and commit directly on `main`; no branches or PRs.
 
 ## Stack
 
-Tauri 2 · Rust core (`src-tauri/`) · React + TypeScript (`src/`) · xterm.js over tmux-backed PTYs · JSON persistence · `crates/tethys-hook` forwards agent hooks over a Unix socket · `crates/tethys-mcp` serves each session's `mcp__tethys__*` tools.
+Electron shell (`electron/`) · Rust core (`src-tauri/`) running as the headless `tethysd` · React + TypeScript (`src/`) · xterm.js over tmux-backed PTYs · JSON persistence · `crates/tethys-hook` forwards agent hooks over a Unix socket · `crates/tethys-mcp` serves each session's `mcp__tethys__*` tools.
 
 ## Running
 
-`pnpm tauri dev`. State is in `~/Library/Application Support/app.tethys.dev/` (`state.json`, `repos.toml`, `logs/`, sockets).
+`pnpm dev` builds the Rust binaries, serves the UI on port 1430 and launches Electron, which spawns `tethysd`. `pnpm install:app` packages it and replaces `/Applications/Tethys.app`.
+
+State is in `~/Library/Application Support/app.tethys.dev/` (`state.json`, `repos.toml`, `logs/`, sockets). Electron's profile, which holds the GitHub login, is in `~/Library/Application Support/Tethys/`.
+
+The daemon won't start while another Tethys is running. To run one beside it, set `TETHYS_DATA_DIR=$(mktemp -d)` (`docs/diagnostics.md`); add `TETHYS_TEST=1` to keep the window hidden.
 
 Boot rewrites Tethys's hook entries in `~/.claude/settings.json` (idempotent) and each workspace root's generated `CLAUDE.md` (`workspace_doc.rs`, prose in `repos.toml`'s `[workspace_doc]`).
 
 ## After a change
 
 - Rust: run clippy and fix what it reports.
-- Frontend: `pnpm format` (prettier defaults; `.prettierrc.json` is empty on purpose). `pnpm build` runs the IPC parity check and tsc.
+- Frontend: `pnpm format` (prettier defaults; `.prettierrc.json` is empty on purpose). `pnpm build` runs the IPC parity check, tsc for `src/` and `electron/`, and both bundles.
 
 ## Conventions
 
@@ -33,6 +37,7 @@ Read the one for the area you're changing. They hold the reasons and traps the c
 
 | Area | Doc |
 |---|---|
+| The Electron shell, the daemon and the socket between them | `docs/shell.md` |
 | Session lifecycle, strays, memory budget | `docs/sessions.md` |
 | Claude vs codex, the codex command line, terminal replay | `docs/agents.md` |
 | `mcp__tethys__*` tools | `docs/mcp-tools.md` |

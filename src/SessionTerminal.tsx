@@ -1,4 +1,3 @@
-import { listen, TauriEvent } from "@tauri-apps/api/event";
 import type { Terminal } from "@xterm/xterm";
 
 import * as api from "./ipc/commands";
@@ -21,19 +20,30 @@ const EDIT_BINDS: EditBind[] = [
   { key: "Delete", mod: "alt", bytes: [0x1b, 0x64] }, // Esc-d: kill-word forward
 ];
 
-/** Subscribed once for the app's lifetime: unlistening soon after `listen()`
- *  resolves races Tauri's registration and leaks the listener. */
+/** Drops anywhere in the window go to the shown terminal, as in a terminal
+ *  app. Listened for once, at the document, so a file dropped elsewhere can't
+ *  navigate the window to it either. */
 type DropTarget = { sessionId: string; term: Terminal };
 let dropTarget: DropTarget | null = null;
 let dropSubscribed = false;
 
+const carriesFiles = (ev: DragEvent) =>
+  ev.dataTransfer?.types.includes("Files") ?? false;
+
 function subscribeDrops() {
   if (dropSubscribed) return;
   dropSubscribed = true;
-  listen<{ paths: string[] }>(TauriEvent.DRAG_DROP, (event) => {
+  document.addEventListener("dragover", (ev) => {
+    if (carriesFiles(ev)) ev.preventDefault();
+  });
+  document.addEventListener("drop", (ev) => {
+    if (!carriesFiles(ev)) return;
+    ev.preventDefault();
     const target = dropTarget;
     if (!target) return;
-    const { paths } = event.payload;
+    const paths = Array.from(ev.dataTransfer!.files)
+      .map(api.pathForFile)
+      .filter((p) => p !== "");
     if (paths.length === 0) return;
     const inner = paths.map(escapeDroppedPath).join(" ") + " ";
     api
@@ -43,9 +53,6 @@ function subscribeDrops() {
       )
       .catch((e) => console.error("send_input (drag-drop) failed:", e));
     target.term.focus();
-  }).catch((e) => {
-    dropSubscribed = false;
-    console.error("drag-drop subscribe failed:", e);
   });
 }
 
@@ -72,21 +79,32 @@ function wireClaudeExtras(
     });
   };
 
-  // WKWebView pastes a file as an opaque `File` and then auto-inserts its temp
-  // path, which xterm bracket-pastes and Claude turns into `[Image #N]`. Keep
-  // that for images; for anything else, type the real paths as plain text.
+  // Claude turns a bracket-pasted image path into `[Image #N]`, so image files
+  // are pasted that way; other files are typed as plain paths. Image data with
+  // no file behind it (a screenshot) has no path at all, and Chromium pastes
+  // nothing for it, so the agent is sent Ctrl-V to read the clipboard itself.
   const helperTextarea = container.querySelector<HTMLTextAreaElement>(
     ".xterm-helper-textarea",
   );
   const onPaste = (ev: ClipboardEvent) => {
     const cd = ev.clipboardData;
     if (!cd || cd.files.length === 0) return;
-    const allImages = Array.from(cd.files).every((f) =>
-      f.type.startsWith("image/"),
-    );
-    if (allImages) return;
     ev.preventDefault();
     ev.stopImmediatePropagation();
+    const files = Array.from(cd.files);
+    if (files.every((f) => f.type.startsWith("image/"))) {
+      const paths = files.map(api.pathForFile).filter((p) => p !== "");
+      if (paths.length === 0) {
+        sendRaw([0x16], "image paste");
+        return;
+      }
+      const inner = paths.map(escapeDroppedPath).join(" ");
+      sendRaw(
+        Array.from(new TextEncoder().encode(`\x1b[200~${inner}\x1b[201~`)),
+        "image paste",
+      );
+      return;
+    }
     api
       .readClipboardFilePaths()
       .then((paths) => {

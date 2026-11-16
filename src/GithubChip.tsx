@@ -1,4 +1,4 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl } from "./ipc/commands";
 import type { ChecksRollup, GithubPrStatus, MergeQueueState } from "./types";
 import { isStale } from "./workspaceDerived";
 

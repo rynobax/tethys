@@ -6,11 +6,11 @@ import {
   useRef,
   useState,
 } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
-
 import * as api from "./ipc/commands";
+import { openUrl } from "./ipc/commands";
 import { useAppEvent } from "./ipc/events";
 import { GithubChip, PrDetachButton } from "./GithubChip";
+import { usePrViewSlot } from "./PrViews";
 import { useTheme } from "./theme";
 import type { Artifact, GithubPrStatus, Workspace } from "./types";
 import { useHorizontalScroll } from "./useHorizontalScroll";
@@ -456,8 +456,8 @@ function PageView({
   );
 }
 
-// GitHub refuses to be framed, so this positions a native webview
-// (`pr_view.rs`) over the host `<div>`.
+// GitHub refuses to be framed, so the page is a `<webview>` from `PrViews`,
+// laid over the host `<div>`.
 function PrView({
   url,
   number,
@@ -468,51 +468,7 @@ function PrView({
   repoKey: string;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const covered = useCovered(hostRef);
-
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    // A native view sits above every DOM layer, dialogs and menus included.
-    if (covered) {
-      api.hidePrView().catch(() => {});
-      return;
-    }
-    const sync = () => {
-      const r = host.getBoundingClientRect();
-      if (r.width < 2 || r.height < 2) {
-        api.hidePrView().catch(() => {});
-        return;
-      }
-      api
-        .showPrView(
-          url,
-          {
-            x: r.left,
-            y: r.top,
-            width: r.width,
-            height: r.height,
-          },
-          window.innerHeight,
-        )
-        .catch((e) => console.error("show_pr_view failed:", e));
-    };
-    sync();
-    const observer = new ResizeObserver(sync);
-    observer.observe(host);
-    window.addEventListener("resize", sync);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", sync);
-    };
-  }, [url, covered]);
-
-  // Separate from the sync effect so switching PR tabs never flashes hidden.
-  useEffect(() => {
-    return () => {
-      api.hidePrView().catch(() => {});
-    };
-  }, []);
+  usePrViewSlot(url, hostRef);
 
   return (
     <div className="artifact-view">
@@ -535,34 +491,6 @@ function PrView({
       <div ref={hostRef} className="pr-view-host" />
     </div>
   );
-}
-
-/** A dialog anywhere, or a context menu reaching over the host: either would
- *  be drawn underneath the native view. */
-function useCovered(hostRef: React.RefObject<HTMLElement | null>): boolean {
-  const query = useCallback(() => {
-    if (document.querySelector(".modal-backdrop")) return true;
-    const host = hostRef.current;
-    if (!host) return false;
-    const h = host.getBoundingClientRect();
-    return Array.from(document.querySelectorAll(".context-menu")).some((m) => {
-      const r = m.getBoundingClientRect();
-      return (
-        r.right > h.left &&
-        r.left < h.right &&
-        r.bottom > h.top &&
-        r.top < h.bottom
-      );
-    });
-  }, [hostRef]);
-  const [covered, setCovered] = useState(false);
-  useEffect(() => {
-    setCovered(query());
-    const observer = new MutationObserver(() => setCovered(query()));
-    observer.observe(document.body, { childList: true, subtree: true });
-    return () => observer.disconnect();
-  }, [query]);
-  return covered;
 }
 
 function errorText(e: unknown): string {

@@ -1,9 +1,6 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 
-// @ts-expect-error process is a nodejs global
-const host = process.env.TAURI_DEV_HOST;
-// @ts-expect-error process is a nodejs global
 const frozen = !!process.env.TETHYS_NO_HMR;
 
 /**
@@ -32,19 +29,14 @@ export default defineConfig(async () => ({
   // re-optimize and reload the page, which frozen exists to prevent.
   optimizeDeps: { include: ["three", "@react-three/fiber"] },
   clearScreen: false,
+  // Relative, because the packaged app loads it from a file URL.
+  base: "./",
+  build: { outDir: "dist/renderer" },
   server: {
-    port: 1420,
+    port: 1430,
     strictPort: true,
-    host: host || false,
-    hmr: host
-      ? {
-          protocol: "ws",
-          host,
-          port: 1421,
-        }
-      : undefined,
     watch: {
-      ignored: ["**/src-tauri/**"],
+      ignored: ["**/src-tauri/**", "**/crates/**", "**/electron/**"],
     },
   },
 }));

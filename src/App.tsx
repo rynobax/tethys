@@ -28,6 +28,7 @@ import { GithubAuthFooter } from "./GithubAuthFooter";
 import { JobLogPane } from "./JobLogPane";
 import { SessionTerminal } from "./SessionTerminal";
 import { SidePanel } from "./SidePanel";
+import { PrViews, PrViewsProvider } from "./PrViews";
 import { TabContent, TabStrip, useWorkspaceTabs } from "./WorkspaceTabs";
 import { Sidebar } from "./Sidebar";
 import { SystemStatus } from "./SystemStatus";
@@ -571,162 +572,171 @@ function App() {
 
   return (
     <ThemeContext.Provider value={theme}>
-      <div className={funMode ? "app fun" : "app"}>
-        {funMode && (
-          <Suspense fallback={null}>
-            <FunWorld
-              workspaces={visibleWorkspaces}
-              needsTurn={workspaceNeedsTurn}
-              working={workspaceWorking}
-              selectedId={selectedId}
-              onSelect={setSelectedId}
-              folders={folders}
-              onSetFolderCollapsed={handleSetFolderCollapsed}
-              menuActions={{
-                onDelete: handleDelete,
-                onClearTurn: handleClearTurn,
-                onStartShipping: handleStartShipping,
-                onStopShipping: handleStopShipping,
-              }}
-              panelRef={detailRef}
-            />
-          </Suspense>
-        )}
-        {!funMode && (
-          <aside className="sidebar">
-            <div className="sidebar-header">
-              <button
-                className="new-workspace"
-                onClick={() => setCreating(true)}
-                type="button"
-                disabled={!registryOk}
-                title={!registryOk ? "Configure repos.toml first" : undefined}
-              >
-                <span className="new-workspace-plus" aria-hidden="true">
-                  +
-                </span>
-                New workspace
-              </button>
-            </div>
-            <Sidebar
-              workspaces={visibleWorkspaces}
-              folders={folders}
-              selectedId={selectedId}
-              onSelect={setSelectedId}
-              onReorder={handleReorder}
-              onMoveToFolder={handleMoveToFolder}
-              onReorderFolders={handleReorderFolders}
-              onCreateFolder={handleCreateFolder}
-              onRenameFolder={handleRenameFolder}
-              onDeleteFolder={handleDeleteFolder}
-              onSetFolderCollapsed={handleSetFolderCollapsed}
-              onDelete={handleDelete}
-              onClearTurn={handleClearTurn}
-              onStartShipping={handleStartShipping}
-              onStopShipping={handleStopShipping}
-              workspaceNeedsTurn={workspaceNeedsTurn}
-              workspaceWorking={workspaceWorking}
-            />
-            <div className="sidebar-footer">
-              <SystemStatus
-                allWorkspaces={workspaces}
-                registry={registry}
-                discrepancies={discrepancies}
-                onDiscrepancyChange={refresh}
+      <PrViewsProvider>
+        <div className={funMode ? "app fun" : "app"}>
+          {funMode && (
+            <Suspense fallback={null}>
+              <FunWorld
+                workspaces={visibleWorkspaces}
+                needsTurn={workspaceNeedsTurn}
+                working={workspaceWorking}
+                selectedId={selectedId}
+                onSelect={setSelectedId}
+                folders={folders}
+                onSetFolderCollapsed={handleSetFolderCollapsed}
+                menuActions={{
+                  onDelete: handleDelete,
+                  onClearTurn: handleClearTurn,
+                  onStartShipping: handleStartShipping,
+                  onStopShipping: handleStopShipping,
+                }}
+                panelRef={detailRef}
               />
-              <GithubAuthFooter />
-            </div>
-          </aside>
-        )}
-
-        <FunControls
-          on={funMode}
-          onToggle={toggleFunMode}
-          onNewWorkspace={() => setCreating(true)}
-          canCreate={registryOk}
-        />
-
-        <main className="detail" ref={detailRef}>
-          {error && <div className="error-banner">{error}</div>}
-          {registry && !registryOk && (
-            <RegistryNotice registry={registry} onChanged={refresh} />
+            </Suspense>
           )}
-          {/* Mounted whether shown or not, so each invoke outlives navigation. */}
-          {Array.from(creationRuns.entries()).map(([id, args]) => (
-            <CreationRunner
-              key={id}
-              workspaceId={id}
-              args={args}
-              isShown={id === selectedId}
-              draftPrompt={draftPrompts.get(id) ?? ""}
-              onPromptChange={(value) =>
-                setDraftPrompts((prev) => {
-                  const next = new Map(prev);
-                  next.set(id, value);
-                  return next;
-                })
-              }
-              onSuccess={handleCreateSuccess}
-              onDismiss={() => handleCreationDismiss(id)}
-            />
-          ))}
-          {!selectedRun && selected && selected.status.kind === "ready" && (
-            <WorkspaceDetail
-              workspace={selected}
-              session={sessionByWorkspace.get(selected.id) ?? null}
-              availableRepos={
-                registry?.kind === "ok"
-                  ? registry.registry.repos.filter(
-                      (r) =>
-                        !selected.repo_links.some((l) => l.repo_key === r.key),
-                    )
-                  : []
-              }
-              notes={noteDrafts.get(selected.id) ?? selected.notes}
-              onNotesChange={(value) =>
-                setNoteDrafts((prev) => {
-                  const next = new Map(prev);
-                  next.set(selected.id, value);
-                  return next;
-                })
-              }
-              onRequestDelete={() => handleDelete(selected)}
-              addRepoRun={addRepoRuns.get(selected.id) ?? null}
-              budgetRequest={budgetRequests.get(selected.id) ?? null}
-              onStartAddRepo={(repoKeys) => startAddRepo(selected.id, repoKeys)}
-              onDismissAddRepo={() => dismissAddRepo(selected.id)}
-            />
+          {!funMode && (
+            <aside className="sidebar">
+              <div className="sidebar-header">
+                <button
+                  className="new-workspace"
+                  onClick={() => setCreating(true)}
+                  type="button"
+                  disabled={!registryOk}
+                  title={!registryOk ? "Configure repos.toml first" : undefined}
+                >
+                  <span className="new-workspace-plus" aria-hidden="true">
+                    +
+                  </span>
+                  New workspace
+                </button>
+              </div>
+              <Sidebar
+                workspaces={visibleWorkspaces}
+                folders={folders}
+                selectedId={selectedId}
+                onSelect={setSelectedId}
+                onReorder={handleReorder}
+                onMoveToFolder={handleMoveToFolder}
+                onReorderFolders={handleReorderFolders}
+                onCreateFolder={handleCreateFolder}
+                onRenameFolder={handleRenameFolder}
+                onDeleteFolder={handleDeleteFolder}
+                onSetFolderCollapsed={handleSetFolderCollapsed}
+                onDelete={handleDelete}
+                onClearTurn={handleClearTurn}
+                onStartShipping={handleStartShipping}
+                onStopShipping={handleStopShipping}
+                workspaceNeedsTurn={workspaceNeedsTurn}
+                workspaceWorking={workspaceWorking}
+              />
+              <div className="sidebar-footer">
+                <SystemStatus
+                  allWorkspaces={workspaces}
+                  registry={registry}
+                  discrepancies={discrepancies}
+                  onDiscrepancyChange={refresh}
+                />
+                <GithubAuthFooter />
+              </div>
+            </aside>
           )}
-          {!selectedRun && !selected && registryOk && (
-            <div className="placeholder">
-              Select a workspace, or create one to get started.
-            </div>
-          )}
-        </main>
 
-        {creating && registry?.kind === "ok" && (
-          <CreateWorkspaceDialog
-            repos={registry.registry.repos}
-            folders={folders}
-            onClose={() => setCreating(false)}
-            onSubmit={(partial) => {
-              setCreating(false);
-              // Minted here so the row can be selected before provisioning starts.
-              const id = crypto.randomUUID();
-              const args: CreateWorkspaceArgs = {
-                ...partial,
-                workspace_id: id,
-              };
-              setCreationRuns((prev) => {
-                const next = new Map(prev);
-                next.set(id, args);
-                return next;
-              });
-              setSelectedId(id);
-            }}
+          <FunControls
+            on={funMode}
+            onToggle={toggleFunMode}
+            onNewWorkspace={() => setCreating(true)}
+            canCreate={registryOk}
           />
-        )}
-      </div>
+
+          <main className="detail" ref={detailRef}>
+            {/* Inside the pane's stacking context, so its dialogs and menus
+              draw over a PR page. */}
+            <PrViews />
+            {error && <div className="error-banner">{error}</div>}
+            {registry && !registryOk && (
+              <RegistryNotice registry={registry} onChanged={refresh} />
+            )}
+            {/* Mounted whether shown or not, so each invoke outlives navigation. */}
+            {Array.from(creationRuns.entries()).map(([id, args]) => (
+              <CreationRunner
+                key={id}
+                workspaceId={id}
+                args={args}
+                isShown={id === selectedId}
+                draftPrompt={draftPrompts.get(id) ?? ""}
+                onPromptChange={(value) =>
+                  setDraftPrompts((prev) => {
+                    const next = new Map(prev);
+                    next.set(id, value);
+                    return next;
+                  })
+                }
+                onSuccess={handleCreateSuccess}
+                onDismiss={() => handleCreationDismiss(id)}
+              />
+            ))}
+            {!selectedRun && selected && selected.status.kind === "ready" && (
+              <WorkspaceDetail
+                workspace={selected}
+                session={sessionByWorkspace.get(selected.id) ?? null}
+                availableRepos={
+                  registry?.kind === "ok"
+                    ? registry.registry.repos.filter(
+                        (r) =>
+                          !selected.repo_links.some(
+                            (l) => l.repo_key === r.key,
+                          ),
+                      )
+                    : []
+                }
+                notes={noteDrafts.get(selected.id) ?? selected.notes}
+                onNotesChange={(value) =>
+                  setNoteDrafts((prev) => {
+                    const next = new Map(prev);
+                    next.set(selected.id, value);
+                    return next;
+                  })
+                }
+                onRequestDelete={() => handleDelete(selected)}
+                addRepoRun={addRepoRuns.get(selected.id) ?? null}
+                budgetRequest={budgetRequests.get(selected.id) ?? null}
+                onStartAddRepo={(repoKeys) =>
+                  startAddRepo(selected.id, repoKeys)
+                }
+                onDismissAddRepo={() => dismissAddRepo(selected.id)}
+              />
+            )}
+            {!selectedRun && !selected && registryOk && (
+              <div className="placeholder">
+                Select a workspace, or create one to get started.
+              </div>
+            )}
+          </main>
+
+          {creating && registry?.kind === "ok" && (
+            <CreateWorkspaceDialog
+              repos={registry.registry.repos}
+              folders={folders}
+              onClose={() => setCreating(false)}
+              onSubmit={(partial) => {
+                setCreating(false);
+                // Minted here so the row can be selected before provisioning starts.
+                const id = crypto.randomUUID();
+                const args: CreateWorkspaceArgs = {
+                  ...partial,
+                  workspace_id: id,
+                };
+                setCreationRuns((prev) => {
+                  const next = new Map(prev);
+                  next.set(id, args);
+                  return next;
+                });
+                setSelectedId(id);
+              }}
+            />
+          )}
+        </div>
+      </PrViewsProvider>
     </ThemeContext.Provider>
   );
 }

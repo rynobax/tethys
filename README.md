@@ -6,13 +6,13 @@ Each "workspace" bundles N git worktrees (one per repo) with the Claude sessions
 
 ## Stack
 
-Tauri 2 · Rust (`src-tauri/`) · React + TypeScript (`src/`) · xterm.js for terminal rendering · `portable-pty` for PTY spawning · JSON file persistence · `tethys-hook` companion binary (`crates/tethys-hook/`) that forwards Claude Code hooks over a Unix socket.
+Electron (`electron/`) · Rust core (`src-tauri/`) run as a headless daemon, `tethysd` · React + TypeScript (`src/`) · xterm.js for terminal rendering · `portable-pty` for PTY spawning · JSON file persistence · `tethys-hook` companion binary (`crates/tethys-hook/`) that forwards Claude Code hooks over a Unix socket.
 
 ## Running
 
 ```
 pnpm install
-pnpm tauri dev
+pnpm dev
 ```
 
 State lives at `~/Library/Application Support/app.tethys.dev/`. On boot, Tethys writes idempotent hook entries into `~/.claude/settings.json` (keyed by `description: "Tethys session monitor"`).

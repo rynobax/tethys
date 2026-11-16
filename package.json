@@ -1,15 +1,16 @@
 {
   "name": "tethys",
+  "productName": "Tethys",
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "main": "dist/electron/main.cjs",
   "scripts": {
-    "dev": "vite",
-    "dev:frozen": "TETHYS_NO_HMR=1 pnpm tauri dev --no-watch",
-    "build": "node scripts/check-ipc-parity.mjs && tsc && vite build",
-    "preview": "vite preview",
-    "tauri": "tauri",
-    "install:app": "pnpm tauri build --bundles app && rm -rf /Applications/Tethys.app && cp -R src-tauri/target/release/bundle/macos/Tethys.app /Applications/Tethys.app && echo 'Installed /Applications/Tethys.app \u2014 quit + relaunch to pick it up.'",
+    "dev": "node electron/dev.mjs",
+    "dev:frozen": "TETHYS_NO_HMR=1 node electron/dev.mjs",
+    "build": "node scripts/check-ipc-parity.mjs && tsc && tsc -p electron && vite build && node electron/build.mjs",
+    "package:app": "node electron/package.mjs",
+    "install:app": "pnpm package:app && rm -rf /Applications/Tethys.app && cp -R target/app/Tethys.app /Applications/Tethys.app && echo 'Installed /Applications/Tethys.app — quit + relaunch to pick it up.'",
     "check:ipc": "node scripts/check-ipc-parity.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
@@ -19,8 +20,6 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@react-three/fiber": "^9.8.2",
-    "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2",
     "@xterm/addon-clipboard": "^0.2.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",
@@ -31,11 +30,14 @@
     "three": "^0.187.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
+    "@electron/packager": "^20.3.0",
+    "@types/node": "^26.6.6",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@types/three": "^0.187.0",
     "@vitejs/plugin-react": "^4.6.0",
+    "electron": "^45.3.2",
+    "esbuild": "^0.28.2",
     "prettier": "^3.10.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"

@@ -1,4 +1,6 @@
-import { useTauriEvent } from "../useTauriEvent";
+import { useEffect, useRef } from "react";
+
+import { listen } from "./commands";
 import type {
   ArtifactChangedEvent,
   GithubAuthSnapshot,
@@ -31,5 +33,11 @@ export function useAppEvent<K extends AppEventName>(
   name: K,
   handler: (payload: AppEvents[K]) => void,
 ): void {
-  useTauriEvent<AppEvents[K]>(name, (event) => handler(event.payload));
+  const handlerRef = useRef(handler);
+  handlerRef.current = handler;
+  useEffect(
+    () =>
+      listen(name, (payload) => handlerRef.current(payload as AppEvents[K])),
+    [name],
+  );
 }

@@ -3,11 +3,10 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import "@xterm/xterm/css/xterm.css";
 
 import * as api from "./ipc/commands";
-import { Channel } from "./ipc/commands";
+import { Channel, openUrl } from "./ipc/commands";
 import { themeToXterm, useTheme } from "./theme";
 
 const DEFAULT_XTERM_THEME = {
@@ -51,7 +50,8 @@ export function usePtyTerminal(
       // An escape hatch to select text while the app owns the mouse.
       macOptionClickForcesSelection: true,
       allowProposedApi: true,
-      // The default, `window.open`, is blocked by WKWebView.
+      // The default opens a blank window and navigates it afterwards, so main's
+      // window-open handler never sees the URL.
       linkHandler: {
         activate: (_ev, uri) => {
           openUrl(uri).catch((e) => console.error("openUrl failed:", e));
@@ -86,19 +86,15 @@ export function usePtyTerminal(
       });
     });
 
-    const channel = new Channel<ArrayBuffer>();
-    channel.onmessage = (chunk) => {
-      term.write(new Uint8Array(chunk));
-    };
+    // Scrollback comes first on the channel, so chunks are written in order.
+    const channel = new Channel<Uint8Array>();
+    channel.onmessage = (chunk) => term.write(chunk);
 
     let cancelled = false;
     api
       .attachSession(sessionId, channel)
-      .then((scrollback) => {
+      .then(() => {
         if (cancelled) return;
-        if (scrollback.length > 0) {
-          term.write(new Uint8Array(scrollback));
-        }
         api.resizeSession(sessionId, term.cols, term.rows).catch(() => {});
       })
       .catch((e) => {
@@ -122,11 +118,9 @@ export function usePtyTerminal(
       teardownExtras();
       term.dispose();
       termRef.current = null;
-      // The backend never drops a live channel on its own.
+      // The daemon never drops a live channel on its own.
       api.detachSession(sessionId, channel.id).catch(() => {});
-      // Tauri never unregisters a command-arg channel's callback; this unpins
-      // the disposed terminal.
-      channel.onmessage = () => {};
+      channel.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);

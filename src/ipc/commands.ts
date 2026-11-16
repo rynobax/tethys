@@ -1,8 +1,4 @@
-import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
-
-/** Re-exported so this stays the only importer of `@tauri-apps/api/core`. */
-export { Channel, convertFileSrc };
-
+import type { TethysBridge } from "./bridge";
 import type {
   Agent,
   Artifact,
@@ -22,6 +18,50 @@ import type {
   Workspace,
   WorkspaceId,
 } from "../types";
+
+// Read per call, so fun mode's preview can install its stand-in after import.
+const bridge = (): TethysBridge => window.tethys;
+
+/** A stream the daemon writes to, passed to a command as its id. */
+export class Channel<T> {
+  readonly id: number;
+  onmessage: (message: T) => void = () => {};
+
+  constructor() {
+    this.id = bridge().openChannel((m) => this.onmessage(m as T));
+  }
+
+  /** The daemon never drops a channel on its own; detach first. */
+  close() {
+    bridge().closeChannel(this.id);
+  }
+}
+
+function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const wire =
+    args &&
+    Object.fromEntries(
+      Object.entries(args).map(([k, v]) => [
+        k,
+        v instanceof Channel ? v.id : v,
+      ]),
+    );
+  return bridge().invoke(cmd, wire) as Promise<T>;
+}
+
+/** http(s) URLs only. */
+export const openUrl = (url: string) => bridge().openUrl(url);
+
+/** Daemon broadcasts; returns the unlisten function. */
+export const listen = (event: string, handler: (payload: unknown) => void) =>
+  bridge().listen(event, handler);
+
+export const pathForFile = (file: File) => bridge().pathForFile(file);
+
+/** Served by `electron/pages.ts`, which only reads under `worktree_root`. Each
+ *  segment is escaped on its own so a page's relative links still resolve. */
+export const convertFileSrc = (path: string) =>
+  "tethys-file://local" + path.split("/").map(encodeURIComponent).join("/");
 
 /** Each wrapper fixes its command's calling convention (flat camelCase or a
  *  snake_case `args` struct), which TypeScript can't check at call sites. */
@@ -62,15 +102,6 @@ export const dismissArtifact = (workspaceId: WorkspaceId, artifactId: string) =>
 
 export const openArtifact = (workspaceId: WorkspaceId, artifactId: string) =>
   invoke<void>("open_artifact", { workspaceId, artifactId });
-
-/** `rect` is in viewport coordinates; Rust maps it via `viewportHeight`. */
-export const showPrView = (
-  url: string,
-  rect: { x: number; y: number; width: number; height: number },
-  viewportHeight: number,
-) => invoke<void>("show_pr_view", { url, ...rect, viewportHeight });
-
-export const hidePrView = () => invoke<void>("hide_pr_view");
 
 export const openInVscode = (id: WorkspaceId) =>
   invoke<void>("open_in_vscode", { id });
@@ -132,10 +163,11 @@ export const decideBudgetRequest = (
   approve: boolean,
 ) => invoke<void>("decide_budget_request", { workspaceId, approve });
 
+/** Scrollback arrives as `onBytes`' first chunk, ahead of live bytes. */
 export const attachSession = (
   sessionId: string,
-  onBytes: Channel<ArrayBuffer>,
-) => invoke<number[]>("attach_session", { sessionId, onBytes });
+  onBytes: Channel<Uint8Array>,
+) => invoke<null>("attach_session", { sessionId, onBytes });
 
 export const detachSession = (sessionId: string, channelId: number) =>
   invoke<void>("detach_session", { sessionId, channelId });
