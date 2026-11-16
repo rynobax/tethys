@@ -17,6 +17,12 @@ html,
   color: var(--fg);
 }
 
+/* Chromium paints a classic scrollbar's track in a grey of its own; this lets
+   the surface behind show through. Inherited, so every scroller gets it. */
+:root {
+  scrollbar-color: color-mix(in oklab, var(--fg) 30%, transparent) transparent;
+}
+
 /* The native title bar is hidden (`electron/main.ts`), so this strip takes
    its place under the traffic lights, in the theme's colours. The fun preview
    has none, and fullscreen drops it with the traffic lights. */
@@ -587,6 +593,12 @@ html,
 .main-tabs {
   overflow-x: auto;
   overflow-y: hidden;
+}
+
+/* `scrollbar-color` would switch the `::-webkit-scrollbar` rules off. */
+.side-tabs,
+.main-tabs {
+  scrollbar-color: auto;
 }
 
 .side-tabs::-webkit-scrollbar,
