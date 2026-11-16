@@ -197,9 +197,6 @@ pub struct AgentSessionMeta {
     /// Reset on the next `runtime_state` transition, so the dot re-lights.
     #[serde(default)]
     pub turn_acknowledged: bool,
-    /// The user's last keystroke or the agent's last hook, whichever is later.
-    #[serde(default)]
-    pub last_active_at: Option<DateTime<Utc>>,
     /// Claude's cross-session inbox, reported by every hook. Persisted
     /// because a reattached session fires no SessionStart.
     #[serde(default)]
@@ -452,7 +449,6 @@ mod tests {
             runtime_state: None,
             notification_type: None,
             turn_acknowledged: false,
-            last_active_at: None,
             inbox: None,
         }
     }

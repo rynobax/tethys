@@ -33,7 +33,7 @@ Read the one for the area you're changing. They hold the reasons and traps the c
 
 | Area | Doc |
 |---|---|
-| Session lifecycle, idle close, strays, memory budget | `docs/sessions.md` |
+| Session lifecycle, strays, memory budget | `docs/sessions.md` |
 | Claude vs codex, the codex command line, terminal replay | `docs/agents.md` |
 | `mcp__tethys__*` tools | `docs/mcp-tools.md` |
 | Setup queue, per-worktree env | `docs/provisioning.md` |

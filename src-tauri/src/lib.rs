@@ -15,7 +15,6 @@ mod github;
 mod handoff;
 mod hook_install;
 mod hook_listener;
-mod idle;
 mod inprogress;
 mod job;
 mod logging;
@@ -177,7 +176,6 @@ pub fn run() {
 
             if let Some(path) = tmux_bin_path.as_ref() {
                 prewarm_live_sessions(&supervisor, path, &store);
-                idle::spawn(supervisor.clone(), store.clone(), path.clone());
                 strays::spawn(path.clone());
             }
             let budgets = Arc::new(budget::Budgets::new(handle.clone()));

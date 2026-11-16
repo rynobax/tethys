@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
@@ -81,9 +80,6 @@ pub struct SessionSupervisor {
     /// Keyed by `TETHYS_SPAWN_TOKEN`, until SessionStart reports the
     /// agent's session id.
     pending: Mutex<HashMap<String, PendingSpawn>>,
-    /// Every keystroke lands here, so it's kept off the store until the idle
-    /// sweep folds it in.
-    activity: Mutex<HashMap<SessionId, DateTime<Utc>>>,
     /// Why the memory budget killed something, held until a hook can tell
     /// the agent.
     budget_notices: Mutex<HashMap<SessionId, Vec<String>>>,
@@ -105,7 +101,6 @@ impl SessionSupervisor {
         Self {
             sessions: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
-            activity: Mutex::new(HashMap::new()),
             budget_notices: Mutex::new(HashMap::new()),
             serving_agents: Mutex::new(HashSet::new()),
             turn: Arc::new(TurnTracker::new()),
@@ -554,7 +549,6 @@ impl SessionSupervisor {
         notification_type: Option<String>,
     ) {
         let Some((ws_id, sess_id)) = self.resolve_session(msg).await else { return };
-        self.touch(&sess_id);
         self.apply_signal(
             &sess_id,
             &ws_id,
@@ -699,7 +693,6 @@ impl SessionSupervisor {
     }
 
     pub fn send_input(&self, session_id: &str, data: &[u8]) -> AppResult<()> {
-        self.touch(session_id);
         // Ryan typing makes whatever comes next his turn again.
         self.turn.unhush(session_id);
         let sessions = self.sessions.lock().unwrap();
@@ -733,17 +726,6 @@ impl SessionSupervisor {
         info.turn_acknowledged = turn.acknowledged;
         info.tui_ready = h.pty.tui_ready();
         Some(info)
-    }
-
-    fn touch(&self, session_id: &str) {
-        self.activity
-            .lock()
-            .unwrap()
-            .insert(session_id.to_string(), Utc::now());
-    }
-
-    pub fn take_activity(&self) -> HashMap<SessionId, DateTime<Utc>> {
-        std::mem::take(&mut self.activity.lock().unwrap())
     }
 
     pub fn forget(&self, session_id: &str) {
@@ -1114,7 +1096,6 @@ pub async fn open_session(req: OpenSession<'_>) -> AppResult<SessionInfo> {
         runtime_state: None,
         notification_type: None,
         turn_acknowledged: false,
-        last_active_at: Some(Utc::now()),
         inbox: None,
     };
     req.store
