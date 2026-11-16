@@ -29,6 +29,15 @@ const KIND_BYTES: u8 = 1;
 /// A big paste arrives as a JSON array of numbers, several bytes per byte.
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
+/// Quick, and wrong if two for one session swap places: a detach overtaking
+/// its attach would leave the subscriber behind.
+const ORDERED: &[&str] = &[
+    "send_input",
+    "resize_session",
+    "attach_session",
+    "detach_session",
+];
+
 /// Unbounded so the PTY reader thread never blocks on a slow renderer.
 type Outbox = UnboundedSender<Bytes>;
 
@@ -212,8 +221,9 @@ async fn connection(stream: UnixStream, daemon: Arc<Daemon>) {
     daemon.events.connect(&conn);
     debug!(conn = conn.id, "ui connected");
 
-    // Keystrokes must reach the PTY in the order typed, so they skip the
-    // task-per-request path and go through this one queue.
+    // Keystrokes must reach the PTY in the order typed, and a drag's last
+    // resize must land last, so PTY commands skip the task-per-request path
+    // and go through this one queue.
     let (input_tx, input_rx) = mpsc::unbounded_channel();
     let input = tokio::spawn(apply_in_order(daemon.clone(), conn.clone(), input_rx));
 
@@ -257,7 +267,7 @@ async fn read_requests(
         let Some(request) = parse_request(&buf[1..], conn) else {
             continue;
         };
-        if request.cmd == "send_input" {
+        if ORDERED.contains(&request.cmd.as_str()) {
             let _ = ordered.send(request);
             continue;
         }
