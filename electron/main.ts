@@ -7,7 +7,7 @@ import { popupContextMenu } from "./context-menu";
 import { startDaemon } from "./daemon";
 import { openExternal } from "./open-external";
 import { registerPageScheme, servePages } from "./pages";
-import { policePrViews } from "./pr-view";
+import { policePrViews, watchPrWrites } from "./pr-view";
 
 // A test run's data dir holds Electron's profile too, so it never shares the
 // single-instance lock or the GitHub login with real use.
@@ -89,6 +89,7 @@ async function boot() {
   const win = createWindow();
   installMenu(win, call);
   win.on("focus", () => call("request_github_poll"));
+  watchPrWrites((url, cause) => call("poll_pr", { url, cause }));
 }
 
 function createWindow(): BrowserWindow {

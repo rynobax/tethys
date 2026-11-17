@@ -1,4 +1,4 @@
-import { BrowserWindow, type WebContents } from "electron";
+import { BrowserWindow, session, type WebContents } from "electron";
 
 import { popupContextMenu } from "./context-menu";
 import { openExternal } from "./open-external";
@@ -10,6 +10,9 @@ import { openExternal } from "./open-external";
 
 const GITHUB = "github.com";
 const PARTITION = "persist:github";
+
+/** Each PR view's guest, by `webContents` id, to the PR it shows. */
+const prOf = new Map<number, string>();
 
 /** GitHub's sign-in paths, kept in the view along with the PR itself. */
 const SIGN_IN = [
@@ -103,6 +106,9 @@ export function policePrViews(embedder: WebContents) {
       guest.close();
       return;
     }
+    prOf.set(guest.id, pr.href);
+    const id = guest.id;
+    guest.once("destroyed", () => prOf.delete(id));
     guest.setWindowOpenHandler(({ url }) => {
       openExternal(url);
       return { action: "deny" };
@@ -137,4 +143,44 @@ export function policePrViews(embedder: WebContents) {
       });
     });
   });
+}
+
+/** Posted by a PR page that's only reading: telemetry, then checks and badges. */
+const NOT_WRITES = [
+  /^\/_private\//,
+  /^\/_stats/,
+  /\/checks-statuses-rollups$/,
+  /\/commits\/badges$/,
+];
+/** A click can send several writes; they share one poll. */
+const WRITE_SETTLE_MS = 1000;
+
+/**
+ * Calls `onWrite` with a PR's URL shortly after its view sends GitHub a write
+ * that succeeded, such as a review request or joining the merge queue, so
+ * its status needn't wait for the next poll.
+ */
+export function watchPrWrites(onWrite: (prUrl: string, cause: string) => void) {
+  const pending = new Map<string, NodeJS.Timeout>();
+  session
+    .fromPartition(PARTITION)
+    .webRequest.onCompleted({ urls: [`https://${GITHUB}/*`] }, (details) => {
+      if (["GET", "HEAD", "OPTIONS"].includes(details.method)) return;
+      if (details.statusCode >= 400) return;
+      const path = new URL(details.url).pathname;
+      if (NOT_WRITES.some((p) => p.test(path))) return;
+      const pr =
+        details.webContentsId === undefined
+          ? undefined
+          : prOf.get(details.webContentsId);
+      if (!pr) return;
+      clearTimeout(pending.get(pr));
+      pending.set(
+        pr,
+        setTimeout(() => {
+          pending.delete(pr);
+          onWrite(pr, `${details.method} ${path}`);
+        }, WRITE_SETTLE_MS),
+      );
+    });
 }

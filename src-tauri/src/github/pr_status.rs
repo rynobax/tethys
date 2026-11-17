@@ -557,6 +557,12 @@ pub fn apply_results(state: &mut AppState, results: &[PollResult]) -> Applied {
                 let Some(tracked) = link.tracked_mut(*number) else {
                     continue;
                 };
+                // A slow tick asked before a PR poll that already answered.
+                if let (Some(stored), Some(new)) = (&tracked.status, status) {
+                    if new.fetched_at < stored.fetched_at {
+                        continue;
+                    }
+                }
                 let meaningful = is_meaningful_change(tracked.status.as_ref(), status.as_ref());
                 // Stored even when unchanged: staleness should flag a wedged
                 // poller, not an idle PR.
@@ -1176,6 +1182,24 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(stored.fetched_at, polled.fetched_at);
+    }
+
+    #[test]
+    fn an_answer_asked_for_before_the_stored_one_is_dropped() {
+        let mut state = mk_state_tracking(&[512]);
+        let mut newer = test_support::status(512);
+        newer.review_requested = true;
+        state.workspaces[0].repo_links[0].prs[0].status = Some(newer.clone());
+
+        let mut older = test_support::status(512);
+        older.fetched_at = newer.fetched_at - chrono::Duration::seconds(5);
+
+        let applied = apply_results(&mut state, &[status_result(512, Some(older))]);
+        assert!(applied.changed.is_empty());
+        assert_eq!(
+            state.workspaces[0].repo_links[0].prs[0].status.as_ref(),
+            Some(&newer)
+        );
     }
 
     #[test]

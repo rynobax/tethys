@@ -13,7 +13,7 @@ use crate::budget::OverrideRequest;
 use crate::agent_bin;
 use crate::error::{AppError, AppResult};
 use crate::github::poller::AuthSnapshot;
-use crate::github::{self, GithubPrStatus};
+use crate::github::{self, parse_pr_reference, GithubPrStatus};
 use crate::job::{JobEvent, JobTx};
 use crate::provision::{add_repos, provision_workspace, RepoAddition, WorkspaceProvision};
 use crate::reconcile::{self, Discrepancies};
@@ -90,6 +90,7 @@ ui_commands! {
     github_auth_status(),
     github_reprobe_auth(),
     request_github_poll(),
+    poll_pr(url: String, cause: String),
     attach_pr(args: AttachPrArgs),
     detach_pr(args: DetachPrArgs),
     open_config_location(location: ConfigLocation),
@@ -138,6 +139,18 @@ pub async fn github_reprobe_auth(cx: &Ctx<'_>) -> AppResult<AuthSnapshot> {
 /// The window took focus.
 pub async fn request_github_poll(cx: &Ctx<'_>) -> AppResult<()> {
     cx.poller.request_tick().await;
+    Ok(())
+}
+
+/// Something was written to GitHub from this PR's tab. `cause`, the request
+/// that did it, is only logged, to catch a read that looks like a write.
+pub async fn poll_pr(cx: &Ctx<'_>, url: String, cause: String) -> AppResult<()> {
+    let Some((Some(slug), number)) = parse_pr_reference(&url).map(|r| (r.slug, r.number)) else {
+        return Ok(());
+    };
+    info!(%url, %cause, "polling a PR after a write in its tab");
+    let poller = cx.poller.clone();
+    tokio::spawn(async move { poller.poll_pr(&slug, number).await });
     Ok(())
 }
 

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify};
 use tracing::{info, info_span, trace, warn, Instrument};
@@ -21,6 +22,7 @@ const BASE_INTERVAL: Duration = Duration::from_secs(45);
 const MAX_BACKOFF: Duration = Duration::from_secs(600);
 const AUTH_RETRY_INTERVAL: Duration = Duration::from_secs(600);
 const FORCE_TICK_MIN_SPACING: Duration = Duration::from_secs(10);
+const PR_POLL_RETRY: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Default)]
 struct PollerInner {
@@ -132,6 +134,43 @@ impl GithubPoller {
         inner.last_forced_tick = Some(now);
         drop(inner);
         self.force.notify_one();
+    }
+
+    /// Fetches one PR now, wherever it's tracked, after a write in its PR tab
+    /// such as a review request or joining the merge queue.
+    pub async fn poll_pr(&self, slug: &GithubSlug, number: u32) {
+        let targets: Vec<Target> = self
+            .collect_targets()
+            .await
+            .into_iter()
+            .filter(|t| {
+                t.kind == TargetKind::Pr(number)
+                    && t.slug.owner.eq_ignore_ascii_case(&slug.owner)
+                    && t.slug.name.eq_ignore_ascii_case(&slug.name)
+            })
+            .collect();
+        self.poll_until_changed(&targets, PR_POLL_RETRY).await;
+    }
+
+    /// A write may not be readable yet when its request returns, so a fetch
+    /// that finds nothing new is tried once more.
+    async fn poll_until_changed(&self, targets: &[Target], retry_after: Duration) {
+        if targets.is_empty() {
+            return;
+        }
+        for attempt in 0..2 {
+            if attempt > 0 {
+                tokio::time::sleep(retry_after).await;
+            }
+            match self.fetch_and_apply(targets).await {
+                Ok(applied) if !applied.changed.is_empty() => return,
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(error = %e, "PR poll failed");
+                    return;
+                }
+            }
+        }
     }
 
     async fn next_delay(&self) -> Duration {
@@ -272,9 +311,21 @@ impl GithubPoller {
     async fn fetch_and_apply(&self, targets: &[Target]) -> Result<Applied, GhError> {
         let (query, variables) = build_query(targets);
         trace!(query = %query, variables = ?variables, "github graphql request");
+        let asked_at = Utc::now();
         let data = self.source.fetch(&query, &variables).await?;
         trace!(data = %data, "github graphql response");
-        let parsed = parse_response(targets, &data);
+        let mut parsed = parse_response(targets, &data);
+        // Stamped with when it was asked for, so that `apply_results` can drop
+        // a slow tick's answer that a later PR poll has already superseded.
+        for result in &mut parsed {
+            if let PollOutcome::Status {
+                status: Some(status),
+                ..
+            } = &mut result.outcome
+            {
+                status.fetched_at = asked_at;
+            }
+        }
 
         let (applied, shipped) = self
             .store
@@ -611,5 +662,61 @@ mod tests {
         let status = status.expect("the discovered PR has its status already");
         assert_eq!(status.pr_number, 7);
         assert_eq!(status.checks, crate::github::status::ChecksRollup::Success);
+    }
+    fn pr_response() -> Value {
+        serde_json::json!({
+            "q0": { "pullRequest": {
+                "number": 7,
+                "url": "https://github.com/me/api/pull/7",
+                "state": "OPEN",
+                "isDraft": false,
+                "headRefName": "feat/thing",
+                "commits": { "nodes": [{ "commit": {
+                    "oid": "sha7",
+                    "statusCheckRollup": { "state": "SUCCESS" }
+                }}]}
+            }}
+        })
+    }
+
+    /// Polls PR 7, tracked with no status yet, against `responses`, and
+    /// returns how many fetches it took.
+    async fn pr_poll_fetches(responses: Vec<Value>) -> usize {
+        let store = store(Box::new(crate::store::NullNotifier)).await;
+        store
+            .mutate(|s| {
+                let mut ws = crate::github::test_support::workspace("ws-0", "feat/thing", "api");
+                ws.repo_links[0].track(7, None);
+                s.workspaces.push(ws);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let queries = Arc::new(StdMutex::new(Vec::new()));
+        let source = ScriptedSource {
+            responses: StdMutex::new(responses.into()),
+            queries: queries.clone(),
+        };
+        let poller = poller_over(store, source);
+        let targets = [Target {
+            workspace_id: "ws-0".into(),
+            repo_key: "api".into(),
+            slug: GithubSlug::new("me", "api"),
+            kind: TargetKind::Pr(7),
+        }];
+        poller.poll_until_changed(&targets, Duration::ZERO).await;
+        let n = queries.lock().unwrap().len();
+        n
+    }
+
+    #[tokio::test]
+    async fn a_pr_poll_that_finds_a_change_stops() {
+        assert_eq!(pr_poll_fetches(vec![pr_response()]).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_pr_poll_that_finds_nothing_new_tries_once_more() {
+        let unchanged = serde_json::json!({});
+        assert_eq!(pr_poll_fetches(vec![unchanged.clone(), unchanged]).await, 2);
     }
 }
