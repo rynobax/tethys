@@ -304,6 +304,32 @@ const ARTIFACT_GLYPHS: Record<Artifact["kind"], string> = {
   review: "≣",
 };
 
+function CopyLinkButton({ url }: { url: string }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(t);
+  }, [copied]);
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        navigator.clipboard
+          .writeText(url)
+          .then(() => setCopied(true))
+          .catch((e) => console.error("copy link failed:", e))
+      }
+    >
+      {copied ? "Copied" : "Copy link"}
+    </button>
+  );
+}
+
+function fileUrl(path: string) {
+  return "file://" + path.split("/").map(encodeURIComponent).join("/");
+}
+
 // ummon's own page, served from localhost. Not sandboxed: it posts to its own
 // server, which checks the request's origin.
 function ReviewView({ artifact }: { artifact: Artifact & { kind: "review" } }) {
@@ -313,16 +339,19 @@ function ReviewView({ artifact }: { artifact: Artifact & { kind: "review" } }) {
         <span className="artifact-toolbar-title" title={artifact.url}>
           {artifact.label}
         </span>
-        <button
-          type="button"
-          onClick={() =>
-            openUrl(artifact.url).catch((e) =>
-              console.error("openUrl failed:", e),
-            )
-          }
-        >
-          Open in browser
-        </button>
+        <div className="artifact-toolbar-actions">
+          <CopyLinkButton url={artifact.url} />
+          <button
+            type="button"
+            onClick={() =>
+              openUrl(artifact.url).catch((e) =>
+                console.error("openUrl failed:", e),
+              )
+            }
+          >
+            Open in browser
+          </button>
+        </div>
       </div>
       <iframe
         key={artifact.revision}
@@ -348,16 +377,19 @@ function PageView({
         <span className="artifact-toolbar-title" title={artifact.path}>
           {artifact.label}
         </span>
-        <button
-          type="button"
-          onClick={() =>
-            api
-              .openArtifact(workspaceId, artifact.id)
-              .catch((e) => setError(String(e)))
-          }
-        >
-          Open in browser
-        </button>
+        <div className="artifact-toolbar-actions">
+          <CopyLinkButton url={fileUrl(artifact.path)} />
+          <button
+            type="button"
+            onClick={() =>
+              api
+                .openArtifact(workspaceId, artifact.id)
+                .catch((e) => setError(String(e)))
+            }
+          >
+            Open in browser
+          </button>
+        </div>
       </div>
       {error && <div className="artifact-error">{error}</div>}
       <iframe
@@ -394,14 +426,17 @@ function PrView({
         >
           {repoKey} #{number}
         </span>
-        <button
-          type="button"
-          onClick={() =>
-            openUrl(url).catch((e) => console.error("openUrl failed:", e))
-          }
-        >
-          Open in browser
-        </button>
+        <div className="artifact-toolbar-actions">
+          <CopyLinkButton url={url} />
+          <button
+            type="button"
+            onClick={() =>
+              openUrl(url).catch((e) => console.error("openUrl failed:", e))
+            }
+          >
+            Open in browser
+          </button>
+        </div>
       </div>
       <div ref={hostRef} className="pr-view-host" />
     </div>

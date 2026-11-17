@@ -743,6 +743,12 @@ html,
   white-space: nowrap;
 }
 
+.artifact-toolbar-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
 .artifact-toolbar button {
   font-size: 11px;
   padding: 1px 8px;
