@@ -136,7 +136,7 @@ const workspace = (s: Sample): Workspace => ({
                   checks: "success",
                   has_merge_conflicts: false,
                   review_decision: s.approved ? "approved" : "review_required",
-                  review_requested: true,
+                  has_reviewer: true,
                   merge_queue: null,
                 } as GithubPrStatus,
               },

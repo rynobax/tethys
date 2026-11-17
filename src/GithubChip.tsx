@@ -194,7 +194,7 @@ function ciTone(checks: ChecksRollup, hasMergeConflicts: boolean): SquareTone {
 
 function reviewTone(
   decision: GithubPrStatus["review_decision"],
-  requested: boolean,
+  hasReviewer: boolean,
   unresolved: number,
 ): SquareTone {
   switch (decision) {
@@ -205,7 +205,7 @@ function reviewTone(
     case "review_required":
     case "none":
       // Gray means "go request a review".
-      return unresolved > 0 || requested ? "yellow" : "gray";
+      return unresolved > 0 || hasReviewer ? "yellow" : "gray";
   }
 }
 
@@ -227,7 +227,7 @@ function ciTitle(checks: ChecksRollup, hasMergeConflicts: boolean): string {
 
 function reviewTitle(
   decision: GithubPrStatus["review_decision"],
-  requested: boolean,
+  hasReviewer: boolean,
   unresolved: number,
 ): string {
   const base = (() => {
@@ -238,9 +238,7 @@ function reviewTitle(
         return "Review: changes requested";
       case "review_required":
       case "none":
-        return requested
-          ? "Review: requested, waiting on reviewer"
-          : "Review: not requested";
+        return hasReviewer ? "Review: has a reviewer" : "Review: not requested";
     }
   })();
   return unresolved > 0 ? `${base} · ${unresolved} unresolved` : base;
@@ -327,12 +325,12 @@ export function GithubChip({
               kind="review"
               tone={reviewTone(
                 status.review_decision,
-                status.review_requested,
+                status.has_reviewer,
                 status.unresolved_threads,
               )}
               title={reviewTitle(
                 status.review_decision,
-                status.review_requested,
+                status.has_reviewer,
                 status.unresolved_threads,
               )}
             />

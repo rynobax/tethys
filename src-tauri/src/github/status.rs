@@ -55,11 +55,11 @@ pub struct GithubPrStatus {
     pub has_merge_conflicts: bool,
     #[serde(default)]
     pub review_decision: ReviewDecision,
-    /// A requested reviewer hasn't submitted yet; GitHub drops the request on
-    /// any submission. `REVIEW_REQUIRED` can't distinguish this from "nobody
-    /// has been asked".
+    /// Someone other than the author has been asked for a review or has given
+    /// one, a comment included. `REVIEW_REQUIRED` can't tell this from "nobody
+    /// has been asked", and GitHub drops a request on any submission.
     #[serde(default)]
-    pub review_requested: bool,
+    pub has_reviewer: bool,
     pub unresolved_threads: u32,
     #[serde(default)]
     pub head_branch: Option<String>,

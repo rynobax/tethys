@@ -175,7 +175,7 @@ pub fn react(state: &mut AppState, transitions: &[StatusTransition]) -> Reaction
 /// The tile's "no reviewer", inverted: someone has been asked, or has already
 /// reviewed it — changes requested counts.
 fn has_reviewer(s: &GithubPrStatus) -> bool {
-    s.review_requested
+    s.has_reviewer
         || !matches!(s.review_decision, ReviewDecision::None | ReviewDecision::ReviewRequired)
 }
 
@@ -615,7 +615,7 @@ mod tests {
 
     fn asked(number: u32) -> GithubPrStatus {
         status(number, |s| {
-            s.review_requested = true;
+            s.has_reviewer = true;
             s.review_decision = ReviewDecision::ReviewRequired;
         })
     }
@@ -659,7 +659,7 @@ mod tests {
         };
         // Taken out of Shipping by hand, then something else about the PR moves.
         let red = status(1, |s| {
-            s.review_requested = true;
+            s.has_reviewer = true;
             s.checks = ChecksRollup::Failure;
         });
         react(&mut state, &[transition(1, asked(1), red)]);
@@ -669,7 +669,7 @@ mod tests {
     #[test]
     fn auto_shipping_a_red_pr_nudges_it() {
         let red = status(1, |s| {
-            s.review_requested = true;
+            s.has_reviewer = true;
             s.checks = ChecksRollup::Failure;
         });
         let mut state = AppState {

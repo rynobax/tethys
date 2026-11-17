@@ -179,7 +179,7 @@ function prSignal(status: GithubPrStatus | null): ShippingSignal {
   if (
     (status.review_decision === "none" ||
       status.review_decision === "review_required") &&
-    !status.review_requested
+    !status.has_reviewer
   ) {
     return "no_reviewer";
   }

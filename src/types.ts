@@ -26,8 +26,8 @@ export interface GithubPrStatus {
   bugbot: ChecksRollup;
   has_merge_conflicts: boolean;
   review_decision: ReviewDecision;
-  /** With no verdict, tells "awaiting review" from "nobody asked". */
-  review_requested: boolean;
+  /** Someone other than the author was asked or has reviewed, a comment included. */
+  has_reviewer: boolean;
   unresolved_threads: number;
   /** `null` for statuses persisted before this field existed. */
   head_branch: string | null;

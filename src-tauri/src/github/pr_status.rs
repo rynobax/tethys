@@ -102,9 +102,16 @@ pub fn build_query(targets: &[Target]) -> (String, BTreeMap<String, String>) {
           stackEntry {
             position
           }
+          author { login }
           reviewDecision
           reviewRequests(first: 1) {
             totalCount
+          }
+          latestReviews(first: 20) {
+            nodes {
+              state
+              author { __typename login }
+            }
           }
           latestOpinionatedReviews(first: 20) {
             nodes {
@@ -270,12 +277,13 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
         ReviewDecision::None
     };
 
-    let review_requested = state == PrState::Open
-        && pr
+    let has_reviewer = state == PrState::Open
+        && (pr
             .get("reviewRequests")
             .and_then(|r| r.get("totalCount"))
             .and_then(|n| n.as_u64())
-            .is_some_and(|n| n > 0);
+            .is_some_and(|n| n > 0)
+            || someone_reviewed(pr));
 
     let (unresolved_threads, bugbot_unresolved) = if state == PrState::Open {
         pr.get("reviewThreads")
@@ -364,7 +372,7 @@ fn parse_pr_node(pr: &Value) -> Option<GithubPrStatus> {
         bugbot,
         has_merge_conflicts,
         review_decision,
-        review_requested,
+        has_reviewer,
         unresolved_threads,
         head_branch: pr
             .get("headRefName")
@@ -456,6 +464,35 @@ fn review_decision_from_reviews(pr: &Value) -> ReviewDecision {
     } else {
         ReviewDecision::None
     }
+}
+
+/// A submitted review of any kind, a comment included, by a person other than
+/// the PR's author. GitHub drops a reviewer's request once they submit, so
+/// without this a comment-only review reads as nobody having been asked.
+fn someone_reviewed(pr: &Value) -> bool {
+    let pr_author = pr
+        .get("author")
+        .and_then(|a| a.get("login"))
+        .and_then(|l| l.as_str());
+    pr.get("latestReviews")
+        .and_then(|r| r.get("nodes"))
+        .and_then(|n| n.as_array())
+        .is_some_and(|nodes| {
+            nodes.iter().any(|node| {
+                let author = node.get("author");
+                let is_bot = author
+                    .and_then(|a| a.get("__typename"))
+                    .and_then(|t| t.as_str())
+                    == Some("Bot");
+                let login = review_author(node);
+                let pending = node.get("state").and_then(|s| s.as_str()) == Some("PENDING");
+                !is_bot
+                    && !pending
+                    && login.is_some()
+                    && login != Some(BUGBOT_LOGIN)
+                    && login != pr_author
+            })
+        })
 }
 
 fn review_author(review: &Value) -> Option<&str> {
@@ -597,7 +634,7 @@ fn is_meaningful_change(old: Option<&GithubPrStatus>, new: Option<&GithubPrStatu
                 || a.bugbot != b.bugbot
                 || a.has_merge_conflicts != b.has_merge_conflicts
                 || a.review_decision != b.review_decision
-                || a.review_requested != b.review_requested
+                || a.has_reviewer != b.has_reviewer
                 || a.unresolved_threads != b.unresolved_threads
                 || a.head_branch != b.head_branch
                 || a.stack != b.stack
@@ -793,7 +830,7 @@ mod tests {
         assert!(is_meaningful_change(Some(&base), Some(&approved)));
 
         let mut requested = base.clone();
-        requested.review_requested = true;
+        requested.has_reviewer = true;
         assert!(is_meaningful_change(Some(&base), Some(&requested)));
     }
 
@@ -881,19 +918,51 @@ mod tests {
     }
 
     #[test]
-    fn parse_review_requested_from_pending_requests() {
+    fn parse_has_reviewer_from_pending_requests() {
         let s = parse(requested_pr(1));
-        assert!(s.review_requested);
+        assert!(s.has_reviewer);
         assert_eq!(s.review_decision, ReviewDecision::ReviewRequired);
 
         let s = parse(requested_pr(0));
-        assert!(!s.review_requested);
+        assert!(!s.has_reviewer);
         assert_eq!(s.review_decision, ReviewDecision::ReviewRequired);
     }
 
     #[test]
-    fn parse_review_requested_missing_field_is_false() {
-        assert!(!parse(reviewed_pr(Value::Null, json!([]))).review_requested);
+    fn parse_has_reviewer_missing_field_is_false() {
+        assert!(!parse(reviewed_pr(Value::Null, json!([]))).has_reviewer);
+    }
+
+    fn commented_pr(reviews: Value) -> Value {
+        json!({
+            "author": {"login": "rynobax"},
+            "reviewDecision": "REVIEW_REQUIRED",
+            "reviewRequests": {"totalCount": 0},
+            "latestReviews": {"nodes": reviews},
+        })
+    }
+
+    fn latest_review(state: &str, typename: &str, login: &str) -> Value {
+        json!({"state": state, "author": {"__typename": typename, "login": login}})
+    }
+
+    #[test]
+    fn a_comment_review_counts_as_a_reviewer() {
+        let s = parse(commented_pr(json!([latest_review(
+            "COMMENTED", "User", "shehry4r"
+        )])));
+        assert!(s.has_reviewer);
+    }
+
+    #[test]
+    fn the_author_bots_and_drafts_are_not_reviewers() {
+        let s = parse(commented_pr(json!([
+            latest_review("COMMENTED", "User", "rynobax"),
+            latest_review("COMMENTED", "Bot", "cursor"),
+            latest_review("COMMENTED", "Bot", "copilot-pull-request-reviewer"),
+            latest_review("PENDING", "User", "shehry4r"),
+        ])));
+        assert!(!s.has_reviewer);
     }
 
     #[test]
@@ -1188,7 +1257,7 @@ mod tests {
     fn an_answer_asked_for_before_the_stored_one_is_dropped() {
         let mut state = mk_state_tracking(&[512]);
         let mut newer = test_support::status(512);
-        newer.review_requested = true;
+        newer.has_reviewer = true;
         state.workspaces[0].repo_links[0].prs[0].status = Some(newer.clone());
 
         let mut older = test_support::status(512);

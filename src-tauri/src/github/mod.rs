@@ -44,7 +44,7 @@ pub(crate) mod test_support {
             bugbot: ChecksRollup::None,
             has_merge_conflicts: false,
             review_decision: ReviewDecision::None,
-            review_requested: false,
+            has_reviewer: false,
             unresolved_threads: 0,
             head_branch: None,
             stack: None,

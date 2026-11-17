@@ -76,6 +76,7 @@ impl Store {
             migrate_archived_to_folder(&mut initial, bytes);
             migrate_pr_slots(&mut initial, bytes);
             migrate_sessions(&mut initial, bytes);
+            migrate_review_requested(&mut initial, bytes);
         }
 
         let stranded = initial.prune_missing_folders();
@@ -324,6 +325,60 @@ struct OldAttachedPr {
     status: Option<GithubPrStatus>,
 }
 
+/// `review_requested` became `has_reviewer`. Carried over so the first poll
+/// doesn't read every asked-for PR as newly asked and auto-ship it.
+fn migrate_review_requested(state: &mut AppState, raw: &[u8]) {
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(raw) else {
+        return;
+    };
+    let Some(workspaces) = json.get("workspaces").and_then(|w| w.as_array()) else {
+        return;
+    };
+
+    let mut migrated = 0usize;
+    for ws_json in workspaces {
+        let Some(id) = ws_json.get("id").and_then(|i| i.as_str()) else {
+            continue;
+        };
+        let Some(links) = ws_json.get("repo_links").and_then(|l| l.as_array()) else {
+            continue;
+        };
+        for link_json in links {
+            let Some(repo_key) = link_json.get("repo_key").and_then(|k| k.as_str()) else {
+                continue;
+            };
+            let Some(prs) = link_json.get("prs").and_then(|p| p.as_array()) else {
+                continue;
+            };
+            let requested = prs.iter().filter_map(|p| {
+                let asked = p
+                    .get("status")
+                    .and_then(|s| s.get("review_requested"))
+                    .and_then(|r| r.as_bool())?;
+                let number = p.get("number").and_then(|n| n.as_u64())?;
+                let number = u32::try_from(number).ok()?;
+                asked.then_some(number)
+            });
+            for number in requested {
+                let status = state
+                    .workspaces
+                    .iter_mut()
+                    .find(|w| w.id == id)
+                    .and_then(|w| w.link_mut(repo_key))
+                    .and_then(|l| l.tracked_mut(number))
+                    .and_then(|p| p.status.as_mut());
+                if let Some(status) = status {
+                    status.has_reviewer = true;
+                    migrated += 1;
+                }
+            }
+        }
+    }
+    if migrated > 0 {
+        info!(count = migrated, "carried review requests over to has_reviewer");
+    }
+}
+
 fn migrate_sessions(state: &mut AppState, raw: &[u8]) {
     let Ok(json) = serde_json::from_slice::<serde_json::Value>(raw) else {
         return;
@@ -389,7 +444,7 @@ fn pick_surviving_session(list: &[serde_json::Value]) -> Option<&serde_json::Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{Origin, Workspace, WorkspaceStatus};
+    use crate::state::{Origin, RepoLink, Workspace, WorkspaceStatus};
     use chrono::Utc;
     use std::sync::Mutex;
 
@@ -479,6 +534,48 @@ mod tests {
             ]
         }"#
         .to_string()
+    }
+
+    #[tokio::test]
+    async fn review_requested_carries_over_to_has_reviewer() {
+        let mut ws = workspace("ws-1", WorkspaceStatus::Ready);
+        let mut link = RepoLink {
+            repo_key: "fe".into(),
+            worktree_path: "/tmp/fe".into(),
+            setup_script_ran_at: None,
+            prs: Vec::new(),
+            dismissed: Vec::new(),
+            created_branch: true,
+        };
+        link.track(1, Some(crate::github::test_support::status(1)));
+        link.track(2, Some(crate::github::test_support::status(2)));
+        ws.repo_links.push(link);
+        let mut json = serde_json::to_value(AppState {
+            workspaces: vec![ws],
+            ..Default::default()
+        })
+        .unwrap();
+        let prs = json["workspaces"][0]["repo_links"][0]["prs"]
+            .as_array_mut()
+            .unwrap();
+        for (pr, asked) in prs.iter_mut().zip([true, false]) {
+            let status = pr["status"].as_object_mut().unwrap();
+            status.remove("has_reviewer");
+            status.insert("review_requested".into(), asked.into());
+        }
+
+        let f = fixture_with_raw(&json.to_string()).await;
+        let has_reviewer = f
+            .store
+            .read(|s| {
+                s.workspaces[0].repo_links[0]
+                    .prs
+                    .iter()
+                    .map(|p| p.status.as_ref().unwrap().has_reviewer)
+                    .collect::<Vec<_>>()
+            })
+            .await;
+        assert_eq!(has_reviewer, vec![true, false]);
     }
 
     #[tokio::test]
