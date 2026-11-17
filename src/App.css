@@ -2331,10 +2331,9 @@ li.is-dragging {
 
 /* ── Fun mode ─────────────────────────────────────────────────────────────
    The world is a fixed canvas behind everything; the detail pane stands in
-   its middle, top to bottom, shrink-wrapped to the terminal plus whatever sits beside it
-   (the Notes rail, or the open panel at its dragged width). Centred with
-   auto margins rather than a transform, so fixed-position modals inside it
-   still cover the window. */
+   its middle, top to bottom, shrink-wrapped to the terminal plus the Notes
+   rail. Centred with auto margins rather than a transform, so fixed-position
+   modals inside it still cover the window. */
 
 .app.fun {
   display: block;
@@ -2389,10 +2388,24 @@ li.is-dragging {
 }
 
 /* Its fixed width is what the pane wraps; `max-width` still lets a narrow
-   window squeeze it. */
+   window squeeze it. Held to the left so it stays put when the Notes rail
+   gives way to the open panel. */
 .app.fun .session-terminal {
   width: var(--terminal-width);
   max-width: 100%;
+  align-self: flex-start;
+}
+
+/* Open notes lie over the right meadow against the window's edge, so opening
+   them never moves or resizes the pane: its `min-width` already counts the
+   rail they replace. */
+.app.fun .side-panel {
+  position: fixed;
+  top: var(--titlebar-h);
+  bottom: 0;
+  right: 0;
+  margin: 0;
+  box-shadow: -14px 0 28px -14px rgba(0, 0, 0, 0.55);
 }
 
 /* Only the workspace view sizes the pane. Everything else in it (a creation
