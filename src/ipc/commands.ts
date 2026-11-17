@@ -11,6 +11,7 @@ import type {
   GithubPrStatus,
   JobEvent,
   PrRef,
+  RegistryEdit,
   RegistryStatus,
   SessionInfo,
   SystemErrorEntry,
@@ -207,6 +208,15 @@ export const detachPr = (
   });
 
 export const registryStatus = () => invoke<RegistryStatus>("registry_status");
+
+/** Rejects when `repos.toml` doesn't load; the registry in use is kept. */
+export const reloadRegistry = () => invoke<RegistryStatus>("reload_registry");
+
+export const saveRegistry = (edit: RegistryEdit) =>
+  invoke<RegistryStatus>("save_registry", { edit });
+
+export const defaultWorkspaceDoc = () =>
+  invoke<string>("default_workspace_doc");
 
 export const listDiscrepancies = () =>
   invoke<Discrepancies>("list_discrepancies");

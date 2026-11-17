@@ -12,7 +12,7 @@ use crate::mcp::{CreateWorkspace, McpLaunch};
 use crate::paths::Paths;
 use crate::provision::{provision_workspace, WorkspaceProvision};
 use crate::provision_queue::ProvisionQueue;
-use crate::registry::{RegistryLoad, Repo};
+use crate::registry::{Registry, RegistryLoad, Repo};
 use crate::spare::Spares;
 use crate::sessions::{self, OpenSession, SessionSupervisor};
 use crate::state::{Origin, Workspace, WorkspaceId};
@@ -25,7 +25,7 @@ pub struct Accepted {
 
 pub struct Handoff {
     pub(crate) store: Arc<Store>,
-    pub(crate) registry: Arc<RegistryLoad>,
+    pub(crate) registry: Arc<Registry>,
     pub(crate) paths: Paths,
     pub(crate) in_progress: InProgressWorkspaces,
     pub(crate) queue: ProvisionQueue,
@@ -41,7 +41,8 @@ impl Handoff {
     /// Everything refusable is refused here: after `Ok`, the only failure
     /// channel left is a `CreationFailed` row.
     pub async fn accept(self: &Arc<Self>, req: CreateWorkspace) -> AppResult<Accepted> {
-        let reg = self.registry.require()?;
+        let registry = self.registry.get();
+        let reg = registry.require()?;
 
         let brief = req.brief.trim().to_string();
         if brief.is_empty() {
@@ -113,8 +114,16 @@ impl Handoff {
         let task_branch = branch.clone();
         let task_id = id.clone();
         tokio::spawn(async move {
-            this.provision_and_start(task_id, task_branch, workspace_dir, claim, selected, brief)
-                .await;
+            this.provision_and_start(
+                registry,
+                task_id,
+                task_branch,
+                workspace_dir,
+                claim,
+                selected,
+                brief,
+            )
+            .await;
         });
 
         Ok(Accepted {
@@ -123,8 +132,12 @@ impl Handoff {
         })
     }
 
+    /// `registry` is the snapshot `accept` checked, so an edit in between
+    /// can't change what's built.
+    #[allow(clippy::too_many_arguments)]
     async fn provision_and_start(
         &self,
+        registry: Arc<RegistryLoad>,
         workspace_id: String,
         branch: String,
         workspace_dir: String,
@@ -132,10 +145,7 @@ impl Handoff {
         repos: Vec<Repo>,
         brief: String,
     ) {
-        let reg = self
-            .registry
-            .require()
-            .expect("accept checked the registry");
+        let reg = registry.require().expect("accept checked the registry");
 
         let tx = JobTx::silent();
         let provisioned = provision_workspace(WorkspaceProvision {

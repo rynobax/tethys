@@ -53,7 +53,7 @@ const referenced = new Set(
 const emitted = new Set(
   [
     ...rustSource.matchAll(
-      /"((?:workspace|session|github|system_status|theme|pending_permissions|artifact|avatar):\w+)"/g,
+      /"((?:workspace|session|github|system_status|theme|pending_permissions|artifact|avatar|registry):\w+)"/g,
     ),
   ].map((m) => m[1]),
 );

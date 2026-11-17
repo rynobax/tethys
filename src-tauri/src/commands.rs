@@ -18,6 +18,7 @@ use crate::job::{JobEvent, JobTx};
 use crate::provision::{add_repos, provision_workspace, RepoAddition, WorkspaceProvision};
 use crate::reconcile::{self, Discrepancies};
 use crate::registry::{starter_template, RegistryLoad};
+use crate::registry_file::{self, RegistryEdit};
 use crate::sessions::{open_session, OpenSession, SessionInfo};
 use crate::shipping;
 use crate::state::{Folder, FolderId, Origin, PrRef, SystemErrorEntry, Workspace, WorkspaceId};
@@ -87,6 +88,9 @@ ui_commands! {
     list_system_errors(),
     dismiss_system_error(id: String),
     registry_status(),
+    reload_registry(),
+    save_registry(edit: RegistryEdit),
+    default_workspace_doc(),
     github_auth_status(),
     github_reprobe_auth(),
     request_github_poll(),
@@ -124,7 +128,92 @@ pub async fn list_workspaces(cx: &Ctx<'_>) -> AppResult<Vec<Workspace>> {
 }
 
 pub async fn registry_status(cx: &Ctx<'_>) -> AppResult<RegistryLoad> {
-    Ok((*cx.registry).clone())
+    Ok((*cx.registry.get()).clone())
+}
+
+/// Picks up hand edits to `repos.toml`. A file that doesn't load is reported
+/// and the registry in use is kept: one bad keystroke shouldn't stop creates.
+pub async fn reload_registry(cx: &Ctx<'_>) -> AppResult<RegistryLoad> {
+    match RegistryLoad::load(&cx.paths.repos_config_file()) {
+        load @ RegistryLoad::Ok { .. } => {
+            apply_registry(cx, load.clone());
+            Ok(load)
+        }
+        load @ RegistryLoad::Missing { .. } if cx.registry.get().require().is_err() => {
+            apply_registry(cx, load.clone());
+            Ok(load)
+        }
+        RegistryLoad::Missing { path } => Err(AppError::Other(format!(
+            "{} is gone. Saving here writes it again.",
+            path.display()
+        ))),
+        RegistryLoad::Invalid { error, .. } => Err(AppError::Other(format!(
+            "repos.toml has an error, so Tethys is still using what it last loaded: {error}"
+        ))),
+    }
+}
+
+/// Written only if the result loads, so the file never holds something
+/// Tethys would refuse at the next boot.
+pub async fn save_registry(cx: &Ctx<'_>, edit: RegistryEdit) -> AppResult<RegistryLoad> {
+    if !edit.worktree_root.is_absolute() {
+        return Err(AppError::Other("the worktree root must be an absolute path".into()));
+    }
+    let in_use: Vec<String> = cx
+        .store
+        .read(|s| {
+            let mut keys: Vec<String> = s
+                .workspaces
+                .iter()
+                .flat_map(|w| w.repo_links.iter().map(|l| l.repo_key.clone()))
+                .filter(|k| !edit.repos.iter().any(|r| &r.key == k))
+                .collect();
+            keys.sort();
+            keys.dedup();
+            keys
+        })
+        .await;
+    if !in_use.is_empty() {
+        return Err(AppError::Other(format!(
+            "workspaces still use {}. Disable instead, or delete those workspaces first.",
+            in_use.join(", ")
+        )));
+    }
+
+    let path = cx.paths.repos_config_file();
+    let existing = match tokio::fs::read_to_string(&path).await {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let text = registry_file::apply(&existing, &edit)?;
+    let load = RegistryLoad::parse(&path, &text);
+    if let RegistryLoad::Invalid { error, .. } = &load {
+        return Err(AppError::Other(error.clone()));
+    }
+
+    let tmp = path.with_extension("toml.tmp");
+    tokio::fs::write(&tmp, &text).await?;
+    tokio::fs::rename(&tmp, &path).await?;
+    info!(path = %path.display(), "saved repos.toml");
+    apply_registry(cx, load.clone());
+    Ok(load)
+}
+
+fn apply_registry(cx: &Ctx<'_>, load: RegistryLoad) {
+    cx.registry.set(load);
+    cx.spares.registry_changed();
+    let store = cx.store.clone();
+    let registry = cx.registry.get();
+    let paths = cx.paths.clone();
+    tokio::spawn(async move {
+        crate::refresh_workspace_docs(&store, &registry, &paths).await;
+    });
+    cx.events.emit("registry:changed", ());
+}
+
+pub async fn default_workspace_doc(_cx: &Ctx<'_>) -> AppResult<&'static str> {
+    Ok(crate::workspace_doc::DEFAULT_BODY)
 }
 
 pub async fn github_auth_status(cx: &Ctx<'_>) -> AppResult<AuthSnapshot> {
@@ -167,7 +256,7 @@ pub struct AttachPrArgs {
 pub async fn attach_pr(cx: &Ctx<'_>, args: AttachPrArgs) -> AppResult<GithubPrStatus> {
     let attached = github::attach(
         &cx.store,
-        &cx.registry,
+        &cx.registry.get(),
         &args.workspace_id,
         args.repo_key.as_deref(),
         &args.reference,
@@ -276,7 +365,7 @@ pub async fn open_config_location(cx: &Ctx<'_>, location: ConfigLocation) -> App
             open_in_editor(&path)
         }
         ConfigLocation::WorktreeRoot => {
-            open_workspace_in_editor(&cx.registry.require()?.worktree_root)
+            open_workspace_in_editor(&cx.registry.get().require()?.worktree_root)
         }
         ConfigLocation::CloneDir => {
             // Absent on a fresh install, and opening a missing path errors.
@@ -333,7 +422,8 @@ pub async fn create_workspace(
         agent_bin::resolve_named(bin)?;
     }
 
-    let reg = cx.registry.require()?;
+    let registry = cx.registry.get();
+    let reg = registry.require()?;
     let selected = reg.enabled_repos();
     if selected.is_empty() {
         return Err(AppError::Other(
@@ -406,7 +496,8 @@ pub async fn add_repo_to_workspace(
     args: AddRepoArgs,
     on_event: u32,
 ) -> AppResult<Workspace> {
-    let reg = cx.registry.require()?;
+    let registry = cx.registry.get();
+    let reg = registry.require()?;
     let tx = spawn_event_forwarder(cx.conn.json_channel(on_event));
     add_repos(RepoAddition {
         workspace_id: &args.workspace_id,
@@ -451,7 +542,7 @@ pub async fn delete_workspace(cx: &Ctx<'_>, id: WorkspaceId) -> AppResult<()> {
     if deleted.parent.is_some() {
         let store = cx.store.clone();
         let supervisor = cx.supervisor.clone();
-        let registry = cx.registry.clone();
+        let registry = cx.registry.get();
         tokio::spawn(async move {
             crate::child_events::child_deleted(&store, &supervisor, &registry, deleted).await;
         });
@@ -658,15 +749,14 @@ pub async fn dismiss_system_error(cx: &Ctx<'_>, id: String) -> AppResult<()> {
 pub async fn list_discrepancies(cx: &Ctx<'_>) -> AppResult<Discrepancies> {
     let snapshot = cx.store.read(|s| s.clone()).await;
     let pending = cx.in_progress.snapshot();
-    let reg = match &*cx.registry {
-        RegistryLoad::Ok { registry, .. } => Some(registry),
-        _ => None,
-    };
+    let registry = cx.registry.get();
+    let reg = registry.require().ok();
     Ok(reconcile::scan(&snapshot, reg, &pending).await)
 }
 
 pub async fn remove_orphan_dir(cx: &Ctx<'_>, path: PathBuf) -> AppResult<()> {
-    let reg = cx.registry.require()?;
+    let registry = cx.registry.get();
+    let reg = registry.require()?;
     if !reconcile::is_under(&reg.worktree_root, &path) {
         return Err(AppError::Other(format!(
             "refusing to remove {}: not under worktree_root",

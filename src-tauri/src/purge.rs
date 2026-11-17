@@ -13,7 +13,7 @@ use crate::git;
 use crate::job::JobTx;
 use crate::paths::Paths;
 use crate::reconcile;
-use crate::registry::{RegistryLoad, Repo};
+use crate::registry::{Registry, RegistryLoad, Repo};
 use crate::repo_env;
 use crate::setup::{self, ScriptKind};
 use crate::state::{SystemErrorEntry, Workspace};
@@ -28,7 +28,7 @@ const TICK_INTERVAL: Duration = Duration::from_secs(3600);
 async fn purge_workspace(
     store: &Arc<Store>,
     paths: &Paths,
-    registry: &Arc<RegistryLoad>,
+    registry: &RegistryLoad,
     workspace: &Workspace,
 ) -> AppResult<()> {
     let tx = JobTx::silent();
@@ -125,7 +125,7 @@ async fn run_teardown(repo: &Repo, worktree_path: &Path, tx: &JobTx) {
 pub struct Purger {
     store: Arc<Store>,
     paths: Paths,
-    registry: Arc<RegistryLoad>,
+    registry: Arc<Registry>,
     events: Events,
     force: Arc<Notify>,
 }
@@ -134,7 +134,7 @@ impl Purger {
     pub fn new(
         store: Arc<Store>,
         paths: Paths,
-        registry: Arc<RegistryLoad>,
+        registry: Arc<Registry>,
         events: Events,
     ) -> Self {
         Self {
@@ -180,7 +180,7 @@ impl Purger {
 
         info!(n = candidates.len(), "purger tick: candidates");
         for ws in candidates {
-            match purge_workspace(&self.store, &self.paths, &self.registry, &ws).await {
+            match purge_workspace(&self.store, &self.paths, &self.registry.get(), &ws).await {
                 Ok(_) => {
                     info!(id = %ws.id, branch = %ws.branch, "purged workspace");
                     self.store.notify_changed(&ws.id);

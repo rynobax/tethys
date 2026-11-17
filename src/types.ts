@@ -141,15 +141,29 @@ export interface Repo {
   remote_url: string;
   default_branch: string | null;
   default_setup_script: string | null;
+  teardown_script: string | null;
   setup_timeout_secs: number | null;
   copy_files: string[];
+  env: Record<string, string>;
+  claude_notes: string | null;
+}
+
+export interface RegistryEdit {
+  worktree_root: string;
+  repos: Repo[];
+  /** Empty or null for the built-in text. */
+  workspace_doc_body: string | null;
 }
 
 export type RegistryStatus =
   | {
       kind: "ok";
       path: string;
-      registry: { worktree_root: string; repos: Repo[] };
+      registry: {
+        worktree_root: string;
+        repos: Repo[];
+        workspace_doc: { body: string } | null;
+      };
     }
   | { kind: "missing"; path: string }
   | { kind: "invalid"; path: string; error: string };

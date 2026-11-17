@@ -8,6 +8,7 @@
 //! starting from scratch: the spare is already part way there.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -20,7 +21,7 @@ use crate::job::JobTx;
 use crate::paths::Paths;
 use crate::provision;
 use crate::provision_queue::ProvisionQueue;
-use crate::registry::{RegistryLoad, RepoRegistry};
+use crate::registry::{Registry, RepoRegistry};
 
 /// Dotted so it can't collide with a workspace directory, which is named
 /// after a branch.
@@ -42,13 +43,24 @@ enum Slot {
     Empty,
     /// Being built, or being claimed with the next one to follow.
     Building,
-    Ready(Vec<String>),
+    Ready(Built),
+}
+
+/// Where a spare is and what it holds. Kept rather than read off the registry,
+/// which may have moved `worktree_root` since.
+#[derive(Clone, Debug, PartialEq)]
+struct Built {
+    repos: Vec<String>,
+    root: PathBuf,
 }
 
 pub struct Spares {
     slot: Mutex<Slot>,
     changed: Notify,
-    registry: Arc<RegistryLoad>,
+    /// The registry changed mid-build, so what's being built may already be
+    /// the wrong thing.
+    stale: AtomicBool,
+    registry: Arc<Registry>,
     paths: Paths,
     queue: ProvisionQueue,
 }
@@ -61,10 +73,11 @@ pub enum TryTake {
 }
 
 impl Spares {
-    pub fn new(registry: Arc<RegistryLoad>, paths: Paths, queue: ProvisionQueue) -> Arc<Self> {
+    pub fn new(registry: Arc<Registry>, paths: Paths, queue: ProvisionQueue) -> Arc<Self> {
         Arc::new(Self {
             slot: Mutex::new(Slot::Empty),
             changed: Notify::new(),
+            stale: AtomicBool::new(false),
             registry,
             paths,
             queue,
@@ -74,43 +87,56 @@ impl Spares {
     /// Keeps a spare left from the last run if it still matches the registry,
     /// and builds one otherwise.
     pub async fn start(self: &Arc<Self>) {
-        let Ok(reg) = self.registry.require() else {
+        let registry = self.registry.get();
+        let Some(wanted) = registry.require().ok().and_then(wanted) else {
             return;
         };
-        let wanted = enabled_keys(reg);
-        if wanted.is_empty() {
-            return;
-        }
-        let root = spare_root(reg);
-        if let Some(found) = read_marker(&root).await {
-            if found == wanted && found.iter().all(|k| root.join(k).is_dir()) {
+        if let Some(found) = read_marker(&wanted.root).await {
+            if found == wanted.repos && found.iter().all(|k| wanted.root.join(k).is_dir()) {
                 info!(repos = ?found, "kept the spare from the last run");
-                self.set(Slot::Ready(found));
+                self.set(Slot::Ready(wanted));
                 return;
             }
         }
-        self.refill();
+        self.refill(None);
+    }
+
+    /// A spare for a different set of repos, or under a `worktree_root` that's
+    /// been moved, is thrown away and rebuilt. Other changes need nothing: a
+    /// create runs the setup script again and recomputes the rest.
+    pub fn registry_changed(self: &Arc<Self>) {
+        let registry = self.registry.get();
+        let wanted = registry.require().ok().and_then(wanted);
+        let mut slot = self.slot.lock().unwrap();
+        match &*slot {
+            Slot::Ready(built) if Some(built) == wanted.as_ref() => {}
+            Slot::Ready(built) => {
+                let old = built.root.clone();
+                *slot = Slot::Empty;
+                drop(slot);
+                self.refill(Some(old));
+            }
+            Slot::Building => self.stale.store(true, Ordering::SeqCst),
+            Slot::Empty => {
+                drop(slot);
+                self.refill(None);
+            }
+        }
     }
 
     /// Only a spare built for exactly `repos` is taken.
     pub fn try_take(self: &Arc<Self>, repos: &[String]) -> TryTake {
         let mut slot = self.slot.lock().unwrap();
         match &*slot {
-            Slot::Ready(keys) if keys == repos => {
-                let keys = keys.clone();
+            Slot::Ready(built) if built.repos == repos => {
+                let built = built.clone();
                 // The next one is on its way as soon as this lease is used, so
                 // a create arriving now waits for that rather than starting
                 // from scratch.
                 *slot = Slot::Building;
-                let root = self
-                    .registry
-                    .require()
-                    .map(spare_root)
-                    .expect("a spare is only built from a loaded registry");
                 TryTake::Taken(SpareLease {
                     spares: self.clone(),
-                    root,
-                    repos: keys,
+                    built: Some(built),
                     used: false,
                 })
             }
@@ -138,7 +164,7 @@ impl Spares {
     /// retried rather than given up on.
     pub fn refill_if_empty(self: &Arc<Self>) {
         if *self.slot.lock().unwrap() == Slot::Empty {
-            self.refill();
+            self.refill(None);
         }
     }
 
@@ -158,15 +184,22 @@ impl Spares {
         }
     }
 
-    fn refill(self: &Arc<Self>) {
+    /// `discard_first` is an old spare somewhere the new one won't be built.
+    fn refill(self: &Arc<Self>, discard_first: Option<PathBuf>) {
         self.set(Slot::Building);
         let this = self.clone();
         tokio::spawn(async move {
+            if let Some(old) = discard_first {
+                discard(&old, &this.paths).await;
+            }
             let built = this.build().await;
             this.set(match built {
-                Some(keys) => Slot::Ready(keys),
+                Some(built) => Slot::Ready(built),
                 None => Slot::Empty,
             });
+            if this.stale.swap(false, Ordering::SeqCst) {
+                this.registry_changed();
+            }
         });
     }
 
@@ -175,13 +208,15 @@ impl Spares {
         self.changed.notify_waiters();
     }
 
-    async fn build(&self) -> Option<Vec<String>> {
-        let reg = self.registry.require().ok()?;
+    async fn build(&self) -> Option<Built> {
+        let _slot = self.queue.acquire().await;
+        // Read after the wait, which can be long, so it's current.
+        let registry = self.registry.get();
+        let reg = registry.require().ok()?;
         let repos = reg.enabled_repos();
         if repos.is_empty() {
             return None;
         }
-        let _slot = self.queue.acquire().await;
         let root = spare_root(reg);
         discard(&root, &self.paths).await;
 
@@ -215,7 +250,7 @@ impl Spares {
             return None;
         }
         info!(secs = started.elapsed().as_secs(), "spare ready");
-        Some(keys)
+        Some(Built { repos: keys, root })
     }
 }
 
@@ -223,30 +258,34 @@ impl Spares {
 /// left of it is thrown away and the next one built.
 pub struct SpareLease {
     spares: Arc<Spares>,
-    root: PathBuf,
-    repos: Vec<String>,
+    /// Only `None` once dropped.
+    built: Option<Built>,
     used: bool,
 }
 
 impl SpareLease {
     /// Called before the first worktree is moved out.
     pub fn worktree(&mut self, repo_key: &str) -> PathBuf {
+        let root = &self.built.as_ref().expect("held until drop").root;
         if !self.used {
             self.used = true;
-            if let Err(e) = std::fs::remove_file(self.root.join(MARKER)) {
+            if let Err(e) = std::fs::remove_file(root.join(MARKER)) {
                 warn!(error = %e, "could not unmark the spare");
             }
         }
-        self.root.join(repo_key)
+        root.join(repo_key)
     }
 }
 
 impl Drop for SpareLease {
     fn drop(&mut self) {
+        let built = self.built.take().expect("dropped once");
         if self.used {
-            self.spares.refill();
+            self.spares.refill(None);
         } else {
-            self.spares.set(Slot::Ready(std::mem::take(&mut self.repos)));
+            self.spares.set(Slot::Ready(built));
+            // Given back after an edit that made it the wrong spare.
+            self.spares.registry_changed();
         }
     }
 }
@@ -255,8 +294,13 @@ fn spare_root(reg: &RepoRegistry) -> PathBuf {
     reg.worktree_root.join(SPARE_DIR)
 }
 
-fn enabled_keys(reg: &RepoRegistry) -> Vec<String> {
-    reg.enabled_repos().into_iter().map(|r| r.key).collect()
+/// What a spare built now would be; `None` if there's nothing to build.
+fn wanted(reg: &RepoRegistry) -> Option<Built> {
+    let repos: Vec<String> = reg.enabled_repos().into_iter().map(|r| r.key).collect();
+    (!repos.is_empty()).then(|| Built {
+        repos,
+        root: spare_root(reg),
+    })
 }
 
 async fn read_marker(root: &Path) -> Option<Vec<String>> {

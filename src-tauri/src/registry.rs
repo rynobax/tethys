@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 
 use schemars::{schema_for, JsonSchema};
@@ -99,6 +100,26 @@ pub struct Repo {
     pub github_slug: Option<GithubSlug>,
 }
 
+/// `repos.toml` as currently loaded, replaced whole when it's edited. Take a
+/// snapshot with `get` and hold it for the length of an operation, so a
+/// create never sees half of one version and half of the next.
+#[derive(Debug)]
+pub struct Registry(std::sync::RwLock<Arc<RegistryLoad>>);
+
+impl Registry {
+    pub fn new(load: RegistryLoad) -> Arc<Self> {
+        Arc::new(Self(std::sync::RwLock::new(Arc::new(load))))
+    }
+
+    pub fn get(&self) -> Arc<RegistryLoad> {
+        self.0.read().unwrap().clone()
+    }
+
+    pub fn set(&self, load: RegistryLoad) {
+        *self.0.write().unwrap() = Arc::new(load);
+    }
+}
+
 fn enabled_by_default() -> bool {
     true
 }
@@ -122,41 +143,48 @@ pub enum RegistryLoad {
 impl RegistryLoad {
     pub fn load(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
-            Ok(s) => match toml::from_str::<RepoRegistry>(&s) {
-                Ok(mut registry) => {
-                    if let Err(e) = validate_worktree_root(&registry.worktree_root) {
-                        warn!(error = %e, "repos.toml loaded but worktree_root is unusable");
-                        return RegistryLoad::Invalid {
-                            path: path.to_path_buf(),
-                            error: format!("worktree_root: {e}"),
-                        };
-                    }
-                    if let Err(e) = validate_repo_envs(&registry.repos) {
-                        warn!(error = %e, "repos.toml loaded but a repo's env is unusable");
-                        return RegistryLoad::Invalid {
-                            path: path.to_path_buf(),
-                            error: e,
-                        };
-                    }
-                    populate_github_slugs(&mut registry);
-                    info!(
-                        repos = registry.repos.len(),
-                        worktree_root = %registry.worktree_root.display(),
-                        "repos.toml loaded",
-                    );
-                    RegistryLoad::Ok {
-                        path: path.to_path_buf(),
-                        registry,
-                    }
-                }
-                Err(e) => RegistryLoad::Invalid {
-                    path: path.to_path_buf(),
-                    error: e.to_string(),
-                },
-            },
+            Ok(s) => Self::parse(path, &s),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => RegistryLoad::Missing {
                 path: path.to_path_buf(),
             },
+            Err(e) => RegistryLoad::Invalid {
+                path: path.to_path_buf(),
+                error: e.to_string(),
+            },
+        }
+    }
+
+    /// `path` is only where the text says it came from.
+    pub fn parse(path: &Path, s: &str) -> Self {
+        match toml::from_str::<RepoRegistry>(s) {
+            Ok(mut registry) => {
+                if let Err(e) = validate_worktree_root(&registry.worktree_root) {
+                    warn!(error = %e, "repos.toml loaded but worktree_root is unusable");
+                    return RegistryLoad::Invalid {
+                        path: path.to_path_buf(),
+                        error: format!("worktree_root: {e}"),
+                    };
+                }
+                if let Err(e) =
+                    validate_repo_keys(&registry.repos).and_then(|()| validate_repo_envs(&registry.repos))
+                {
+                    warn!(error = %e, "repos.toml loaded but a repo is unusable");
+                    return RegistryLoad::Invalid {
+                        path: path.to_path_buf(),
+                        error: e,
+                    };
+                }
+                populate_github_slugs(&mut registry);
+                info!(
+                    repos = registry.repos.len(),
+                    worktree_root = %registry.worktree_root.display(),
+                    "repos.toml loaded",
+                );
+                RegistryLoad::Ok {
+                    path: path.to_path_buf(),
+                    registry,
+                }
+            }
             Err(e) => RegistryLoad::Invalid {
                 path: path.to_path_buf(),
                 error: e.to_string(),
@@ -200,6 +228,31 @@ impl RepoRegistry {
     pub fn plan_worktree_path(&self, workspace_dir: &str, repo_key: &str) -> PathBuf {
         self.worktree_root.join(workspace_dir).join(repo_key)
     }
+}
+
+/// Keys name directories and are how `state.json` refers to a repo.
+fn validate_repo_keys(repos: &[Repo]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for repo in repos {
+        let key = repo.key.as_str();
+        let valid = !key.is_empty()
+            && !key.starts_with('.')
+            && key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        if !valid {
+            return Err(format!(
+                "repo key '{key}' must be letters, digits, '-', '_' and '.', not starting with '.'"
+            ));
+        }
+        if !seen.insert(key) {
+            return Err(format!("repo key '{key}' is used twice"));
+        }
+        if repo.remote_url.trim().is_empty() {
+            return Err(format!("repo '{key}' has no remote_url"));
+        }
+    }
+    Ok(())
 }
 
 /// Keys must be names a shell can export; values must fit on one `.env` line,

@@ -15,7 +15,7 @@ use crate::job::JobTx;
 use crate::paths::Paths;
 use crate::provision::{self, RepoAddition};
 use crate::provision_queue::ProvisionQueue;
-use crate::registry::RegistryLoad;
+use crate::registry::Registry;
 use crate::state::Progress;
 use crate::store::Store;
 
@@ -30,11 +30,12 @@ const TOOL_TIMEOUT_SECS: u32 = 60 * 60;
 pub struct McpLaunch {
     server_bin: PathBuf,
     socket: PathBuf,
-    repo_keys: Vec<String>,
+    /// Read when a session starts, so it gets the repos as they are then.
+    registry: Arc<Registry>,
 }
 
 impl McpLaunch {
-    pub fn resolve(paths: &Paths, registry: &RegistryLoad) -> Option<Self> {
+    pub fn resolve(paths: &Paths, registry: Arc<Registry>) -> Option<Self> {
         let server_bin = match crate::paths::tethys_mcp_bin() {
             Ok(p) if p.exists() => p,
             Ok(p) => {
@@ -49,15 +50,26 @@ impl McpLaunch {
                 return None;
             }
         };
-        let repo_keys = registry
-            .require()
-            .map(|reg| reg.repos.iter().map(|r| r.key.clone()).collect())
-            .unwrap_or_default();
         Some(Self {
             server_bin,
             socket: paths.mcp_socket(),
-            repo_keys,
+            registry,
         })
+    }
+
+    /// Comma-separated, as `ENV_REPO_KEYS` wants.
+    fn repo_keys(&self) -> String {
+        self.registry
+            .get()
+            .require()
+            .map(|reg| {
+                reg.repos
+                    .iter()
+                    .map(|r| r.key.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default()
     }
 
     /// Identity rides in the server's `env`, never a tool argument, so an agent
@@ -90,7 +102,7 @@ impl McpLaunch {
                     (tethys_mcp::ENV_SOCKET, self.socket.to_string_lossy().into_owned()),
                     (tethys_mcp::ENV_WORKSPACE_ID, workspace_id.to_string()),
                     (tethys_mcp::ENV_SESSION_ID, session_id.to_string()),
-                    (tethys_mcp::ENV_REPO_KEYS, self.repo_keys.join(",")),
+                    (tethys_mcp::ENV_REPO_KEYS, self.repo_keys()),
                 ]
                 .iter()
                 .map(|(k, v)| format!("{k}={}", toml_string(v)))
@@ -120,7 +132,7 @@ impl McpLaunch {
                         tethys_mcp::ENV_SOCKET: self.socket,
                         tethys_mcp::ENV_WORKSPACE_ID: workspace_id,
                         tethys_mcp::ENV_SESSION_ID: session_id,
-                        tethys_mcp::ENV_REPO_KEYS: self.repo_keys.join(","),
+                        tethys_mcp::ENV_REPO_KEYS: self.repo_keys(),
                     },
                 },
             },
@@ -133,7 +145,7 @@ impl McpLaunch {
 pub struct McpServices {
     pub handoff: Arc<Handoff>,
     pub store: Arc<Store>,
-    pub registry: Arc<RegistryLoad>,
+    pub registry: Arc<Registry>,
     pub paths: Paths,
     pub queue: ProvisionQueue,
     pub budgets: Arc<Budgets>,
@@ -217,7 +229,7 @@ async fn link_pr(services: &McpServices, req: LinkPr) -> Response {
     );
     let attached = github::attach(
         &services.store,
-        &services.registry,
+        &services.registry.get(),
         &req.from_workspace,
         req.repo_key.as_deref(),
         &req.reference,
@@ -357,7 +369,8 @@ async fn detach_artifact(services: &McpServices, req: ArtifactTarget) -> Respons
 /// A repo already linked is reported back rather than refused, so an agent
 /// retrying an interrupted call gets its paths instead of an error.
 async fn add_missing_repos(services: &McpServices, req: &AddRepos) -> AppResult<Response> {
-    let reg = services.registry.require()?;
+    let registry = services.registry.get();
+    let reg = registry.require()?;
     let workspace_id = &req.from_workspace;
 
     let mut wanted: Vec<String> = Vec::with_capacity(req.repos.len());
@@ -438,7 +451,21 @@ mod tests {
         McpLaunch {
             server_bin: PathBuf::from("/opt/tethys/tethys-mcp"),
             socket: PathBuf::from("/tmp/app/mcp.sock"),
-            repo_keys: vec!["nl-frontend".into(), "nl-backend".into()],
+            registry: crate::registry::Registry::new(crate::registry::RegistryLoad::Ok {
+                path: PathBuf::new(),
+                registry: toml::from_str(
+                    r#"
+                    worktree_root = "/tmp/wt"
+                    [[repo]]
+                    key = "nl-frontend"
+                    remote_url = "git@github.com:me/nl-frontend.git"
+                    [[repo]]
+                    key = "nl-backend"
+                    remote_url = "git@github.com:me/nl-backend.git"
+                    "#,
+                )
+                .unwrap(),
+            }),
         }
     }
 

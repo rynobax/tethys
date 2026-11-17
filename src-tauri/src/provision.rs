@@ -673,7 +673,7 @@ mod tests {
         async fn new(f: &Fixture, setup_script: &str) -> Self {
             let mut ctx = Self::bare(f, setup_script).await;
             ctx.spares = Spares::new(
-                Arc::new(crate::registry::RegistryLoad::Missing {
+                crate::registry::Registry::new(crate::registry::RegistryLoad::Missing {
                     path: PathBuf::new(),
                 }),
                 f.paths.clone(),
@@ -691,7 +691,7 @@ mod tests {
         /// A second `Spares` over the same disk, as after a restart.
         fn spares_from_registry(&self, f: &Fixture) -> Arc<Spares> {
             Spares::new(
-                Arc::new(crate::registry::RegistryLoad::Ok {
+                crate::registry::Registry::new(crate::registry::RegistryLoad::Ok {
                     path: PathBuf::new(),
                     registry: self.registry.clone(),
                 }),
@@ -734,7 +734,7 @@ mod tests {
                 queue: crate::provision_queue::ProvisionQueue::new(),
                 in_progress: crate::inprogress::InProgressWorkspaces::new(),
                 spares: Spares::new(
-                    Arc::new(crate::registry::RegistryLoad::Missing {
+                    crate::registry::Registry::new(crate::registry::RegistryLoad::Missing {
                         path: PathBuf::new(),
                     }),
                     f.paths.clone(),

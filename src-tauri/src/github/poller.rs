@@ -12,7 +12,7 @@ use crate::github::pr_status::{
 };
 use crate::github::status::GithubPrStatus;
 use crate::github::GithubSlug;
-use crate::registry::RegistryLoad;
+use crate::registry::{Registry, RegistryLoad};
 use crate::shipping::{self, Shipper};
 use crate::state::AppState;
 use crate::store::Store;
@@ -79,7 +79,7 @@ impl PollerEvents for LiveEvents {
 
 pub struct GithubPoller {
     store: Arc<Store>,
-    registry: Arc<RegistryLoad>,
+    registry: Arc<Registry>,
     source: Box<dyn PrSource>,
     events: Box<dyn PollerEvents>,
     inner: Mutex<PollerInner>,
@@ -87,13 +87,13 @@ pub struct GithubPoller {
 }
 
 impl GithubPoller {
-    pub fn new(store: Arc<Store>, registry: Arc<RegistryLoad>, events: LiveEvents) -> Self {
+    pub fn new(store: Arc<Store>, registry: Arc<Registry>, events: LiveEvents) -> Self {
         Self::with_seams(store, registry, Box::new(GhCli), Box::new(events))
     }
 
     pub fn with_seams(
         store: Arc<Store>,
-        registry: Arc<RegistryLoad>,
+        registry: Arc<Registry>,
         source: Box<dyn PrSource>,
         events: Box<dyn PollerEvents>,
     ) -> Self {
@@ -238,7 +238,8 @@ impl GithubPoller {
     }
 
     async fn collect_targets(&self) -> Vec<Target> {
-        let registry = match self.registry.as_ref() {
+        let load = self.registry.get();
+        let registry = match load.as_ref() {
             RegistryLoad::Ok { registry, .. } => registry,
             _ => return Vec::new(),
         };
@@ -520,7 +521,7 @@ mod tests {
     fn poller_over(store: Arc<Store>, source: ScriptedSource) -> Arc<GithubPoller> {
         Arc::new(GithubPoller::with_seams(
             store,
-            Arc::new(RegistryLoad::Missing {
+            crate::registry::Registry::new(crate::registry::RegistryLoad::Missing {
                 path: "/nonexistent".into(),
             }),
             Box::new(source),

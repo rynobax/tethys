@@ -2438,3 +2438,138 @@ li.is-dragging {
   cursor: default;
   opacity: 0.35;
 }
+
+.settings-icon {
+  width: 7px;
+  font-size: 10px;
+  line-height: 1;
+  display: inline-flex;
+  justify-content: center;
+}
+
+.settings-modal {
+  width: min(720px, 90vw);
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.settings-modal section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-modal h4 {
+  margin: 4px 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.settings-modal .section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-modal textarea {
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  text-transform: none;
+  letter-spacing: normal;
+  resize: vertical;
+}
+
+.settings-modal textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+
+.settings-modal .mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.settings-problem {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 4px;
+  color: var(--danger);
+  background: color-mix(in oklab, var(--danger) 10%, transparent);
+  white-space: pre-wrap;
+}
+
+.settings-repos {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-repo {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.settings-repo.disabled .settings-repo-toggle {
+  color: var(--muted);
+}
+
+.settings-repo-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 10px 2px 2px;
+}
+
+.settings-repo-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  border: none;
+  background: transparent;
+  text-align: left;
+  font-weight: 500;
+}
+
+.settings-repo-toggle .chevron {
+  width: 10px;
+  color: var(--muted);
+}
+
+.settings-modal label.settings-enabled {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.settings-repo-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 12px 12px;
+}
+
+/* The modal scrolls; its buttons stay in reach. */
+.settings-modal .modal-actions {
+  position: sticky;
+  bottom: -20px;
+  margin: 8px -24px -20px;
+  padding: 12px 24px 20px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+
+.settings-modal p {
+  margin: 0;
+}

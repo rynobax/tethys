@@ -16,7 +16,7 @@ State is in `~/Library/Application Support/app.tethys.dev/` (`state.json`, `repo
 
 The daemon won't start while another Tethys is running. To run one beside it, set `TETHYS_DATA_DIR=$(mktemp -d)` (`docs/diagnostics.md`); add `TETHYS_TEST=1` to keep the window hidden.
 
-Boot rewrites Tethys's hook entries in `~/.claude/settings.json` (idempotent) and each workspace root's generated `CLAUDE.md` (`workspace_doc.rs`, prose in `repos.toml`'s `[workspace_doc]`).
+Boot rewrites Tethys's hook entries in `~/.claude/settings.json` (idempotent) and each workspace root's generated `CLAUDE.md` (`workspace_doc.rs`, prose in `repos.toml`'s `[workspace_doc]`), which a save in Settings also does.
 
 ## After a change
 
@@ -29,6 +29,7 @@ Boot rewrites Tethys's hook entries in `~/.claude/settings.json` (idempotent) an
 - MCP tools take the calling workspace from the server's `env` block, never from arguments, so an agent can only act on its own workspace.
 - Reactions to PR status (Nudges, auto-ship) are edge-triggered: they fire when a status changes, not while it holds.
 - No agent abstraction and no renderer interface for fun mode. Each has a sample of two at most; don't add a trait until a third exists.
+- `repos.toml` changes while Tethys runs: Settings writes it (through `toml_edit`, keeping the user's comments) and swaps the `Registry`. Take one `registry.get()` snapshot per operation and hold it, never re-read mid-way. A spare for the wrong repos or root is rebuilt; anything else a create recomputes.
 - `folder: None` is the Default folder, deliberately not a `Folder`. Folders only decide where a row is drawn.
 
 ## Design notes

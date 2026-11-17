@@ -32,6 +32,7 @@ import { PrViews, PrViewsProvider } from "./PrViews";
 import { TabContent, TabStrip, useWorkspaceTabs } from "./WorkspaceTabs";
 import { Sidebar } from "./Sidebar";
 import { SystemStatus } from "./SystemStatus";
+import { Settings } from "./Settings";
 import { applyTheme, ThemeContext } from "./theme";
 import { useBackendJob, type JobState } from "./useBackendJob";
 import { useAppEvent } from "./ipc/events";
@@ -266,6 +267,7 @@ function App() {
   }, [refresh]);
 
   useAppEvent("workspace:changed", () => refresh());
+  useAppEvent("registry:changed", () => refresh());
   useAppEvent("session:changed", (payload) => {
     refreshSessionFor(payload.workspace_id);
   });
@@ -636,6 +638,7 @@ function App() {
                   discrepancies={discrepancies}
                   onDiscrepancyChange={refresh}
                 />
+                <Settings registry={registry} />
                 <GithubAuthFooter />
               </div>
             </aside>

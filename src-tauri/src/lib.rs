@@ -28,6 +28,7 @@ mod pty;
 mod purge;
 mod reconcile;
 mod registry;
+mod registry_file;
 mod repo_env;
 mod scrollback;
 mod session_inbox;
@@ -66,7 +67,7 @@ use crate::mcp::McpLaunch;
 use crate::paths::Paths;
 use crate::provision_queue::ProvisionQueue;
 use crate::purge::Purger;
-use crate::registry::RegistryLoad;
+use crate::registry::{Registry, RegistryLoad};
 use crate::sessions::SessionSupervisor;
 use crate::shipping::Shipper;
 use crate::store::Store;
@@ -75,7 +76,7 @@ use crate::ui_socket::Events;
 /// Everything a UI command can reach.
 pub struct Daemon {
     pub store: Arc<Store>,
-    pub registry: Arc<RegistryLoad>,
+    pub registry: Arc<Registry>,
     pub paths: Paths,
     pub events: Events,
     pub supervisor: Arc<SessionSupervisor>,
@@ -183,7 +184,7 @@ async fn boot(paths: Paths) -> Result<Arc<Daemon>, Box<dyn std::error::Error>> {
             error!(?path, %error, "repos.toml failed to load")
         }
     }
-    let registry = Arc::new(registry_load);
+    let registry = Registry::new(registry_load);
 
     let events = Events::default();
     let store = Store::load(paths.state_file(), Box::new(events.clone()))
@@ -239,7 +240,7 @@ async fn boot(paths: Paths) -> Result<Arc<Daemon>, Box<dyn std::error::Error>> {
         let spares = spares.clone();
         tokio::spawn(async move { spares.start().await });
     }
-    let mcp_launch = McpLaunch::resolve(&paths, &registry);
+    let mcp_launch = McpLaunch::resolve(&paths, registry.clone());
 
     let shipper = Arc::new(Shipper {
         store: store.clone(),
@@ -304,7 +305,7 @@ async fn boot(paths: Paths) -> Result<Arc<Daemon>, Box<dyn std::error::Error>> {
     let paths_for_docs = paths.clone();
     let registry_for_docs = registry.clone();
     tokio::spawn(async move {
-        refresh_workspace_docs(&store_for_docs, &registry_for_docs, &paths_for_docs).await;
+        refresh_workspace_docs(&store_for_docs, &registry_for_docs.get(), &paths_for_docs).await;
     });
 
     Ok(Arc::new(Daemon {
@@ -410,7 +411,7 @@ async fn shutdown_requested(mut control: File) {
 }
 
 /// How edits to `repos.toml` reach workspaces already on disk.
-async fn refresh_workspace_docs(store: &Arc<Store>, registry: &RegistryLoad, paths: &Paths) {
+pub(crate) async fn refresh_workspace_docs(store: &Arc<Store>, registry: &RegistryLoad, paths: &Paths) {
     let Ok(reg) = registry.require() else { return };
     let workspaces = store.read(|s| s.workspaces.clone()).await;
     let mut written = 0usize;

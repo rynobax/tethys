@@ -379,7 +379,7 @@ mod tests {
             isolated: true,
         };
         std::fs::create_dir_all(&paths.data_dir).unwrap();
-        let registry = Arc::new(registry(tmp.path()));
+        let registry = crate::registry::Registry::new(registry(tmp.path()));
         let events = Events::default();
         let store = Store::load(paths.state_file(), Box::new(events.clone()))
             .await
@@ -418,7 +418,7 @@ mod tests {
             shipper,
             in_progress: InProgressWorkspaces::new(),
             spares: crate::spare::Spares::new(
-                Arc::new(crate::registry::RegistryLoad::Missing {
+                crate::registry::Registry::new(crate::registry::RegistryLoad::Missing {
                     path: PathBuf::new(),
                 }),
                 paths.clone(),
@@ -567,6 +567,66 @@ mod tests {
             err.starts_with("invalid args for command `create_folder`"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_saved_registry_is_written_and_used_at_once() {
+        let h = harness(no_registry).await;
+        let mut c = Client::connect(&h.socket).await;
+        let root = h._tmp.path().join("worktrees");
+        let edit = |repos: Value| {
+            json!({ "edit": { "worktree_root": root, "repos": repos, "workspace_doc_body": null } })
+        };
+
+        let reply = c
+            .call(
+                "save_registry",
+                edit(json!([{ "key": "api", "remote_url": "git@github.com:me/api.git" }])),
+            )
+            .await;
+        assert_eq!(reply["ok"]["kind"], "ok", "{reply}");
+        let status = c.call("registry_status", json!({})).await;
+        assert_eq!(status["ok"]["registry"]["repos"][0]["key"], "api");
+        let file = std::fs::read_to_string(h.daemon.paths.repos_config_file()).unwrap();
+        assert!(file.contains("key = \"api\""), "{file}");
+
+        h.daemon
+            .store
+            .mutate(|s| {
+                let mut ws = crate::state::Workspace::draft(
+                    "ws-1".into(),
+                    "feat/x".into(),
+                    crate::agent::Agent::Claude,
+                    None,
+                    crate::state::Origin::Ui,
+                    None,
+                );
+                ws.repo_links.push(crate::state::RepoLink {
+                    repo_key: "api".into(),
+                    worktree_path: root.join("feat-x").join("api"),
+                    setup_script_ran_at: None,
+                    prs: Vec::new(),
+                    dismissed: Vec::new(),
+                    created_branch: true,
+                });
+                s.workspaces.push(ws);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let reply = c.call("save_registry", edit(json!([]))).await;
+        let err = reply["err"].as_str().unwrap_or_default();
+        assert!(err.contains("workspaces still use api"), "{reply}");
+
+        let reply = c
+            .call(
+                "save_registry",
+                edit(json!([{ "key": "api", "remote_url": "" }])),
+            )
+            .await;
+        assert!(reply["err"].as_str().unwrap_or_default().contains("no remote_url"), "{reply}");
+        let file_after = std::fs::read_to_string(h.daemon.paths.repos_config_file()).unwrap();
+        assert_eq!(file_after, file, "a refused save leaves the file alone");
     }
 
     #[tokio::test]
