@@ -58,6 +58,10 @@ function fail(e: unknown): never {
 }
 
 async function boot() {
+  // A packaged app takes its icon from the bundle; dev runs Electron's own.
+  if (!app.isPackaged) {
+    app.dock?.setIcon(path.join(__dirname, "../../src-tauri/icons/icon.png"));
+  }
   daemonProcess = await startDaemon((code, signal) => {
     if (quitting) return;
     dialog.showErrorBox(
