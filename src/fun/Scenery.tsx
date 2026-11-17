@@ -731,6 +731,48 @@ export function Boat() {
   );
 }
 
+/** Turned from the viewer towards the line, which runs off to its right. */
+const OFFICE_TURN = 0.7;
+
+/** A seaside kiosk, a striped awning over its window. */
+function TicketOffice({ at }: { at: Vec2 }) {
+  const wall = "#f2e6cf";
+  const trim = "#c0533f";
+  return (
+    <group position={[at.x, 0, at.z]} rotation-y={OFFICE_TURN}>
+      <mesh position-y={0.4}>
+        <boxGeometry args={[0.7, 0.8, 0.55]} />
+        <meshStandardMaterial color={wall} flatShading />
+      </mesh>
+      {/* The window, dark inside, with a counter under it. */}
+      <mesh position={[0, 0.52, 0.276]}>
+        <planeGeometry args={[0.44, 0.26]} />
+        <meshBasicMaterial color="#3a2a20" />
+      </mesh>
+      <mesh position={[0, 0.38, 0.32]}>
+        <boxGeometry args={[0.5, 0.03, 0.1]} />
+        <meshStandardMaterial color="#a77b50" flatShading />
+      </mesh>
+      {/* The awning, red and white stripes tipped out over the window. */}
+      <group position={[0, 0.72, 0.36]} rotation-x={0.5}>
+        {[0, 1, 2, 3, 4].map((i) => (
+          <mesh key={i} position-x={-0.24 + i * 0.12}>
+            <boxGeometry args={[0.12, 0.02, 0.22]} />
+            <meshStandardMaterial
+              color={i % 2 ? "#ffffff" : trim}
+              flatShading
+            />
+          </mesh>
+        ))}
+      </group>
+      <mesh position-y={0.83}>
+        <boxGeometry args={[0.8, 0.06, 0.65]} />
+        <meshStandardMaterial color={trim} flatShading />
+      </mesh>
+    </group>
+  );
+}
+
 /**
  * An irregular, unit-sized shoreline: a few slow waves round a circle, kept
  * inside it so the water stays within the rectangle walkers keep out of.
@@ -757,8 +799,8 @@ function shorelineShape(grow: number): THREE.Shape {
 }
 
 /**
- * Water running off the window's edge with a sandy rim, lily pads, reeds, and
- * a pier out into it with a boat waiting at the end.
+ * Water running off the window's edge with a sandy rim, lily pads, reeds, a
+ * pier out into it with a boat waiting at the end, and a ticket office.
  */
 function LakeArea({
   lake,
@@ -867,6 +909,7 @@ function LakeArea({
           </mesh>
         )),
       )}
+      <TicketOffice at={lake.office} />
       {/* Moored alongside the pier's end, bow out to the open water. */}
       <group position={[lake.berth.x, 0.02, lake.berth.z]}>
         <group ref={boat} rotation-y={-Math.PI / 2} scale={BOAT_SCALE}>

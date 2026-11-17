@@ -155,7 +155,10 @@ export function computeStage(
       pitch: stage,
       lake: pond,
       ...zones,
-      obstacles: obstacles(zones),
+      obstacles: [
+        ...obstacles(zones),
+        ...(pond ? [{ ...pond.office, r: 0.45 }] : []),
+      ],
       // Walked round, unless heading for a ring on the pool or the boat.
       blocks: [
         zones.lounge?.pool,
@@ -363,8 +366,8 @@ function obstacles({
 
 /**
  * The back corner of the left meadow away from the panel: water running off
- * the window's edge, a pier out into it from the shore, and the shore round
- * it where the merged wait to be deleted.
+ * the window's edge, a pier out into it from the shore, a ticket office below
+ * it, and the shore round it where the merged wait to be deleted.
  */
 function lake(region: Region, visible: Bounds): Lake | null {
   const width = region.xMax - region.xMin;
@@ -387,7 +390,17 @@ function lake(region: Region, visible: Bounds): Lake | null {
   for (let x = pierEnd.x + 0.3; x <= shore.xMax - 0.2; x += DOCK_STEP) {
     dock.push({ x, z });
   }
+  // Below the water at the window's edge, the line running on from its
+  // window towards the panel, far enough from the water for a walker to get
+  // past the line to the front.
+  const office = { x: region.xMin + 0.5, z: water.zMax + 0.85 };
+  const tickets: Vec2[] = [];
+  for (let x = office.x + 0.8; x <= shore.xMax - 0.2; x += DOCK_STEP) {
+    tickets.push({ x, z: office.z + 0.25 });
+  }
   return {
+    office,
+    tickets,
     water,
     shore,
     pierFoot: { x: water.xMax + 0.35, z },

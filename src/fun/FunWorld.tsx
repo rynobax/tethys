@@ -327,8 +327,7 @@ const COMPACT: ReadonlySet<Activity> = new Set([
   "quilt",
   "cheer",
 ]);
-/** How far every other tag in the line for the boat is lifted, clear of its
- *  neighbours'. */
+/** How far every other tag in a line is lifted, clear of its neighbours'. */
 const DOCK_STAGGER_PX = 26;
 
 /**
@@ -484,7 +483,7 @@ function LabelProjector({
       let x = ((v.x + 1) / 2) * size.width;
       const y =
         ((1 - v.y) / 2) * size.height -
-        (a.activity === "queue" && (sim.dockIndex(r.id) ?? 0) % 2
+        (a.activity === "queue" && (sim.lineIndex(r.id) ?? 0) % 2
           ? DOCK_STAGGER_PX
           : 0);
       // Kept on screen, and above all out from under the terminal pane: the

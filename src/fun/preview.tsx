@@ -105,6 +105,8 @@ const SAMPLES: Sample[] = [
     mood: "shipping",
     approved: true,
   },
+  { id: "q", branch: "green-light", mood: "shipping", approved: true },
+  { id: "r", branch: "lgtm-ship-it", mood: "shipping", approved: true },
 ];
 
 const FOLDERS: Folder[] = [

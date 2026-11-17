@@ -46,7 +46,8 @@ export interface Layout {
   obstacles: Obstacle[];
   /** Larger rectangles nobody walks across, unless heading into them. */
   blocks: Region[];
-  /** The top of the left meadow, where merged residents wait to be deleted. */
+  /** The top of the left meadow, where the ready to merge line up for
+   *  tickets and the merged wait to be deleted. */
   lake: Lake | null;
   /** Down the left meadow's outer edge, one per folder in order, as fit. */
   houses: House[];
@@ -75,6 +76,10 @@ export interface Lake {
   /** The line for the boat, first by the boat: along the pier, then on up
    *  the shore. */
   dock: Vec2[];
+  /** On the shore below the water, its window turned to the line for it. */
+  office: Vec2;
+  /** The line of the ready to merge for tickets, first at the window. */
+  tickets: Vec2[];
   /** Off the edge of the window, where a boat sails to and is gone. */
   exit: Vec2;
 }
@@ -182,7 +187,8 @@ export type Activity =
   | "chosen"
   /** Just merged: popping the champagne where it stands. */
   | "pop"
-  /** Merged: in the line on the pier, waiting to be deleted. */
+  /** In a line: on the pier once merged, waiting to be deleted, or at the
+   *  ticket office once ready to merge. */
   | "queue"
   /** Deleted after merging: in a boat, sailing off across the lake. */
   | "sail"
@@ -342,6 +348,7 @@ export class Sim {
   private boards = new Map<string, number>();
   private plotsHeld = new Map<string, number>();
   private docks = new Map<string, number>();
+  private tickets = new Map<string, number>();
   /** When each house went up: one just built takes its folk straight in. */
   private housesBuilt: number[] = [];
   /** Each quilter's place on the porch. */
@@ -373,6 +380,7 @@ export class Sim {
     prune(this.naps, layout.lounge?.naps.length ?? 0);
     prune(this.boards, layout.workshop?.boards.length ?? 0);
     prune(this.docks, layout.lake?.dock.length ?? 0);
+    prune(this.tickets, layout.lake?.tickets.length ?? 0);
     prune(this.quilters, layout.porch?.places.length ?? 0);
     const plots = layout.workshop?.garden.plots.length ?? 0;
     prune(this.plotsHeld, plots);
@@ -560,6 +568,7 @@ export class Sim {
       this.boards,
       this.plotsHeld,
       this.docks,
+      this.tickets,
       this.quilters,
     ];
   }
@@ -591,7 +600,7 @@ export class Sim {
       return region;
     }
     const lake = this.layout?.lake;
-    // The merged in line for the boat, the ready to merge about the shore.
+    // The merged and the ready to merge, in their lines or about the shore.
     if ((mood === "shipped" || mood === "ready") && lake) return lake.shore;
     // Off the street, so nobody stands about in front of the houses.
     const street = this.layout?.street;
@@ -818,6 +827,7 @@ export class Sim {
       this.naps.delete(a.id);
     }
     if (r.mood !== "shipped" || right) this.docks.delete(a.id);
+    if (r.mood !== "ready" || right) this.tickets.delete(a.id);
     if (!r.quilts || !QUILTING.has(r.mood) || !right) {
       this.quilters.delete(a.id);
     }
@@ -896,9 +906,14 @@ export class Sim {
       case "working":
         this.work(a, region);
         return;
-      case "shipped": {
-        // In line for the boat, or about the shore once the line is full.
-        const place = this.dockSpot(a);
+      case "shipped":
+      case "ready": {
+        // In line for the boat, or for tickets, or about the shore once the
+        // line is full.
+        const place =
+          r.mood === "shipped"
+            ? this.placeInLine(a, this.docks, this.layout?.lake?.dock)
+            : this.placeInLine(a, this.tickets, this.layout?.lake?.tickets);
         if (!place) break;
         a.spot = null;
         this.head(a, place, "queue");
@@ -1092,18 +1107,21 @@ export class Sim {
     return best;
   }
 
-  /** Its place in the line for the boat, moving up whenever one ahead is
-   *  free; `null` when the line is full. */
-  private dockSpot(a: Agent): Vec2 | null {
-    const dock = this.layout?.lake?.dock ?? [];
-    const held = this.docks.get(a.id);
-    const taken = new Set(this.docks.values());
-    const free = dock.findIndex((_, i) => !taken.has(i));
+  /** Its place in a line, moving up whenever one ahead is free; `null` when
+   *  the line is full. */
+  private placeInLine(
+    a: Agent,
+    book: Map<string, number>,
+    line: Vec2[] = [],
+  ): Vec2 | null {
+    const held = book.get(a.id);
+    const taken = new Set(book.values());
+    const free = line.findIndex((_, i) => !taken.has(i));
     if (free >= 0 && (held === undefined || free < held)) {
-      this.docks.set(a.id, free);
+      book.set(a.id, free);
     }
-    const i = this.docks.get(a.id);
-    return i === undefined ? null : dock[i];
+    const i = book.get(a.id);
+    return i === undefined ? null : line[i];
   }
 
   /** Its folder's house, when the folder is shut and the house is out. */
@@ -1257,9 +1275,10 @@ export class Sim {
     return undefined;
   }
 
-  /** Its place in the line for the boat, so alternate name tags can stagger. */
-  dockIndex(id: string): number | undefined {
-    return this.docks.get(id);
+  /** Its place in the line for the boat or for tickets, so alternate name
+   *  tags can stagger. */
+  lineIndex(id: string): number | undefined {
+    return this.docks.get(id) ?? this.tickets.get(id);
   }
 
   /** A plot's crop and growth, for the scene. */
@@ -1424,7 +1443,7 @@ export class Sim {
     ) {
       wantFacing = 0;
     } else if (a.activity === "queue") {
-      // Turned towards the boat, half to the viewer.
+      // Turned towards the boat, or the ticket window, half to the viewer.
       wantFacing = -1.1;
     } else if (a.activity === "board") {
       // Back to the viewer, facing the board behind its spot.
