@@ -192,7 +192,6 @@ async fn create_workspace(services: &McpServices, req: CreateWorkspace) -> Respo
     debug!(
         from_workspace = %req.from_workspace,
         branch = %req.branch,
-        repos = req.repos.len(),
         "handoff requested"
     );
     match services.handoff.accept(req).await {

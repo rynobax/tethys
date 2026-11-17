@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::registry::RepoRegistry;
+use crate::spare::SPARE_DIR;
 use crate::state::AppState;
 
 #[derive(Debug, Default, Serialize)]
@@ -77,7 +78,7 @@ pub async fn scan(
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if known_dirs.contains(name) || in_progress.contains(name) {
+        if known_dirs.contains(name) || in_progress.contains(name) || name == SPARE_DIR {
             continue;
         }
         out.orphaned_dirs.push(OrphanedDir {

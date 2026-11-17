@@ -66,7 +66,6 @@ pub struct CreateWorkspace {
     pub from_workspace: String,
     #[serde(default)]
     pub from_session: Option<String>,
-    pub repos: Vec<String>,
     pub branch: String,
     pub brief: String,
     #[serde(default)]

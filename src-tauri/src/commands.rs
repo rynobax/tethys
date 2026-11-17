@@ -17,7 +17,7 @@ use crate::github::{self, GithubPrStatus};
 use crate::job::{JobEvent, JobTx};
 use crate::provision::{add_repos, provision_workspace, RepoAddition, WorkspaceProvision};
 use crate::reconcile::{self, Discrepancies};
-use crate::registry::{starter_template, RegistryLoad, Repo};
+use crate::registry::{starter_template, RegistryLoad};
 use crate::sessions::{open_session, OpenSession, SessionInfo};
 use crate::shipping;
 use crate::state::{Folder, FolderId, Origin, PrRef, SystemErrorEntry, Workspace, WorkspaceId};
@@ -293,7 +293,6 @@ pub struct CreateWorkspaceArgs {
     /// Frontend-minted, so the draft's row appears in place immediately.
     pub workspace_id: WorkspaceId,
     pub branch: String,
-    pub repo_selections: Vec<String>,
     pub agent: Agent,
     pub agent_binary: Option<String>,
     pub folder: Option<FolderId>,
@@ -312,11 +311,6 @@ pub async fn create_workspace(
     if requested.is_empty() {
         return Err(AppError::Other("branch is required".into()));
     }
-    if args.repo_selections.is_empty() {
-        return Err(AppError::Other(
-            "pick at least one repo to include in the workspace".into(),
-        ));
-    }
     let agent_binary = args
         .agent_binary
         .as_ref()
@@ -327,15 +321,12 @@ pub async fn create_workspace(
     }
 
     let reg = cx.registry.require()?;
-    let selected: Vec<Repo> = args
-        .repo_selections
-        .iter()
-        .map(|k| {
-            reg.find_repo(k)
-                .cloned()
-                .ok_or_else(|| AppError::Other(format!("unknown repo key: {k}")))
-        })
-        .collect::<AppResult<Vec<_>>>()?;
+    let selected = reg.enabled_repos();
+    if selected.is_empty() {
+        return Err(AppError::Other(
+            "every repo in repos.toml is disabled; enable one to create a workspace".into(),
+        ));
+    }
 
     let branch_name::Reserved {
         branch,
@@ -385,6 +376,7 @@ pub async fn create_workspace(
         store: &cx.store,
         claim,
         queue: &cx.queue,
+        spares: &cx.spares,
         tx: &tx,
     })
     .await

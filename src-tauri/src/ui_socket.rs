@@ -417,6 +417,13 @@ mod tests {
             artifacts,
             shipper,
             in_progress: InProgressWorkspaces::new(),
+            spares: crate::spare::Spares::new(
+                Arc::new(crate::registry::RegistryLoad::Missing {
+                    path: PathBuf::new(),
+                }),
+                paths.clone(),
+                ProvisionQueue::new(),
+            ),
             queue: ProvisionQueue::new(),
             agent_bins: AgentBins::default(),
             tmux_bin: PathBuf::new(),
@@ -639,6 +646,7 @@ mod tests {
                     worktree_root,
                     repos: vec![Repo {
                         key: "api".into(),
+                        enabled: true,
                         remote_url: origin.to_string_lossy().into_owned(),
                         default_branch: None,
                         default_setup_script: None,
@@ -663,7 +671,6 @@ mod tests {
                     "args": {
                         "workspace_id": "ws-1",
                         "branch": "feat/x",
-                        "repo_selections": ["api"],
                         "agent": "claude",
                         "agent_binary": null,
                         "folder": null,

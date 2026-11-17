@@ -55,6 +55,13 @@ Marking a workspace deleted without touching disk. Reversible for the grace wind
 **Purge**:
 The background teardown that runs after the grace window: worktrees removed, Tethys-created branches deleted, workspace dropped from state.
 
+**Enabled Repo**:
+A repo every new workspace gets. All repos are enabled unless `repos.toml` says otherwise; a disabled one can still be added to a workspace later.
+
+**Spare**:
+The next workspace's worktrees, built and set up before anyone asks for them, so a create only moves them into place and switches branches. There is at most one.
+_Avoid_: Pool, cache, template
+
 **Setup Queue**:
 The line workspaces wait in to be provisioned, because Tethys sets up one at a time. First asked for, first built — and a workspace waiting its turn is **Queued**: asked for, nothing on disk yet, nothing running.
 _Avoid_: Job queue, build queue

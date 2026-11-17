@@ -130,7 +130,6 @@ export interface CreateWorkspaceArgs {
   /** Frontend-minted so the draft's sidebar row holds its position. */
   workspace_id: WorkspaceId;
   branch: string;
-  repo_selections: string[];
   agent: Agent;
   agent_binary: string | null;
   folder: FolderId | null;
@@ -138,6 +137,7 @@ export interface CreateWorkspaceArgs {
 
 export interface Repo {
   key: string;
+  enabled: boolean;
   remote_url: string;
   default_branch: string | null;
   default_setup_script: string | null;

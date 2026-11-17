@@ -15,6 +15,7 @@ use crate::reconcile;
 use crate::registry::{self, Repo, RepoRegistry};
 use crate::repo_env;
 use crate::setup::{self, ScriptKind};
+use crate::spare::{Spares, TryTake};
 use crate::state::{RepoLink, Workspace, WorkspaceStatus};
 use crate::store::Store;
 use crate::workspace_doc;
@@ -23,25 +24,16 @@ pub struct RepoProvision<'a> {
     pub repo: &'a Repo,
     pub worktree_path: &'a Path,
     pub branch: &'a str,
+    /// The spare's worktree for this repo, moved to `worktree_path` instead of
+    /// adding a new one.
+    pub from_spare: Option<&'a Path>,
     pub paths: &'a Paths,
     pub tx: &'a JobTx,
 }
 
 /// Atomic for its own repo only: sibling repos are the caller's to roll back.
 pub async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLink> {
-    let clone_path = ctx.paths.repo_clone_path(&ctx.repo.key);
-
-    git::ensure_clone(&clone_path, &ctx.repo.remote_url, ctx.tx, &ctx.repo.key).await?;
-    // A stray checkout would become the base of the pull and of any worktree
-    // branched off HEAD.
-    git::ensure_clone_on_default_branch(
-        &clone_path,
-        ctx.repo.default_branch.as_deref(),
-        ctx.tx,
-        &ctx.repo.key,
-    )
-    .await?;
-    git::pull_clone(&clone_path, ctx.tx, &ctx.repo.key).await?;
+    let clone_path = update_clone(ctx.repo, ctx.paths, ctx.tx).await?;
 
     let branch_preexisted = git::branch_exists(&clone_path, ctx.branch).await?;
     let remote_exists = !branch_preexisted
@@ -57,57 +49,42 @@ pub async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLi
     }
 
     let provisioned = async {
-        git::worktree_add(
-            &clone_path,
-            ctx.worktree_path,
-            ctx.branch,
-            &plan.source,
-            ctx.tx,
-            &ctx.repo.key,
-        )
-        .await?;
+        match ctx.from_spare {
+            None => {
+                git::worktree_add(
+                    &clone_path,
+                    ctx.worktree_path,
+                    ctx.branch,
+                    &plan.source,
+                    ctx.tx,
+                    &ctx.repo.key,
+                )
+                .await?
+            }
+            Some(spare) => {
+                git::worktree_move(&clone_path, spare, ctx.worktree_path, ctx.tx, &ctx.repo.key)
+                    .await?;
+                git::switch_worktree_branch(
+                    &clone_path,
+                    ctx.worktree_path,
+                    ctx.branch,
+                    &plan.source,
+                    ctx.tx,
+                    &ctx.repo.key,
+                )
+                .await?;
+            }
+        }
 
-        copy_configured_files(
-            &clone_path,
-            ctx.worktree_path,
-            &ctx.repo.copy_files,
-            ctx.tx,
-            &ctx.repo.key,
-        )
-        .await?;
-
-        let env = repo_env::render(ctx.repo, ctx.worktree_path);
-        repo_env::write_dotenv(ctx.worktree_path, &env, ctx.tx, &ctx.repo.key).await?;
-
-        let mut link = RepoLink {
+        let setup_script_ran_at = fill_worktree(ctx.repo, ctx.worktree_path, ctx.paths, ctx.tx).await?;
+        Ok::<RepoLink, AppError>(RepoLink {
             repo_key: ctx.repo.key.clone(),
             worktree_path: ctx.worktree_path.to_path_buf(),
-            setup_script_ran_at: None,
+            setup_script_ran_at,
             prs: Vec::new(),
             dismissed: Vec::new(),
             created_branch,
-        };
-
-        if let Some(script) = ctx
-            .repo
-            .default_setup_script
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            setup::run_repo_script(
-                ScriptKind::Setup,
-                script,
-                ctx.worktree_path,
-                &env,
-                ctx.repo.setup_timeout_secs,
-                ctx.tx,
-                &ctx.repo.key,
-            )
-            .await?;
-            link.setup_script_ran_at = Some(Utc::now());
-        }
-
-        Ok::<RepoLink, AppError>(link)
+        })
     }
     .await;
 
@@ -126,6 +103,52 @@ pub async fn provision_repo_worktree(ctx: RepoProvision<'_>) -> AppResult<RepoLi
             Err(e)
         }
     }
+}
+
+/// Clones on first use, then brings the clone's default branch up to date.
+pub async fn update_clone(repo: &Repo, paths: &Paths, tx: &JobTx) -> AppResult<PathBuf> {
+    let clone_path = paths.repo_clone_path(&repo.key);
+    git::ensure_clone(&clone_path, &repo.remote_url, tx, &repo.key).await?;
+    // A stray checkout would become the base of the pull and of any worktree
+    // branched off HEAD.
+    git::ensure_clone_on_default_branch(&clone_path, repo.default_branch.as_deref(), tx, &repo.key)
+        .await?;
+    git::pull_clone(&clone_path, tx, &repo.key).await?;
+    Ok(clone_path)
+}
+
+/// Everything a checked-out worktree gets before it's usable: copied files,
+/// its `.env`, and the setup script, whose run time is returned.
+pub async fn fill_worktree(
+    repo: &Repo,
+    worktree_path: &Path,
+    paths: &Paths,
+    tx: &JobTx,
+) -> AppResult<Option<chrono::DateTime<Utc>>> {
+    let clone_path = paths.repo_clone_path(&repo.key);
+    copy_configured_files(&clone_path, worktree_path, &repo.copy_files, tx, &repo.key).await?;
+
+    let env = repo_env::render(repo, worktree_path);
+    repo_env::write_dotenv(worktree_path, &env, tx, &repo.key).await?;
+
+    let Some(script) = repo
+        .default_setup_script
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    setup::run_repo_script(
+        ScriptKind::Setup,
+        script,
+        worktree_path,
+        &env,
+        repo.setup_timeout_secs,
+        tx,
+        &repo.key,
+    )
+    .await?;
+    Ok(Some(Utc::now()))
 }
 
 /// Carries gitignored files (`.env` etc.) that `git worktree add` doesn't.
@@ -210,12 +233,26 @@ pub struct WorkspaceProvision<'a> {
     /// returns.
     pub claim: InProgressGuard,
     pub queue: &'a ProvisionQueue,
+    pub spares: &'a Arc<Spares>,
     pub tx: &'a JobTx,
 }
 
 pub async fn provision_workspace(ctx: WorkspaceProvision<'_>) -> AppResult<Workspace> {
     let _claim = ctx.claim;
     let mut waited = false;
+
+    let keys: Vec<String> = ctx.repos.iter().map(|r| r.key.clone()).collect();
+    let mut spare = match ctx.spares.try_take(&keys) {
+        TryTake::Taken(lease) => Some(lease),
+        TryTake::None => None,
+        TryTake::Building => {
+            waited = true;
+            ctx.tx
+                .status("waiting for the spare workspace to finish building", None);
+            set_status(ctx.store, ctx.workspace_id, WorkspaceStatus::Queued).await;
+            ctx.spares.take(&keys).await
+        }
+    };
     let _slot = match ctx.queue.try_acquire() {
         Some(slot) => slot,
         None => {
@@ -226,6 +263,10 @@ pub async fn provision_workspace(ctx: WorkspaceProvision<'_>) -> AppResult<Works
             ctx.queue.acquire().await
         }
     };
+    if spare.is_none() {
+        // Queued behind this create, which holds the slot until it's done.
+        ctx.spares.refill_if_empty();
+    }
 
     // Left `Queued`, not `CreationFailed`: it was called off, not failed.
     let live = ctx
@@ -248,10 +289,15 @@ pub async fn provision_workspace(ctx: WorkspaceProvision<'_>) -> AppResult<Works
     let orchestrate = async {
         for repo in ctx.repos {
             let worktree_path = ctx.registry.plan_worktree_path(ctx.workspace_dir, &repo.key);
+            let from_spare = spare.as_mut().map(|s| s.worktree(&repo.key));
+            if from_spare.is_some() {
+                ctx.tx.status("starting from the spare", Some(&repo.key));
+            }
             let link = provision_repo_worktree(RepoProvision {
                 repo,
                 worktree_path: &worktree_path,
                 branch: ctx.branch,
+                from_spare: from_spare.as_deref(),
                 paths: ctx.paths,
                 tx: ctx.tx,
             })
@@ -429,6 +475,7 @@ async fn add_one_repo(
         repo,
         worktree_path,
         branch,
+        from_spare: None,
         paths: ctx.paths,
         tx: ctx.tx,
     })
@@ -575,6 +622,7 @@ mod tests {
     fn repo(key: &str, origin: &Path, setup_script: Option<&str>) -> Repo {
         Repo {
             key: key.into(),
+            enabled: true,
             remote_url: origin.to_string_lossy().into_owned(),
             default_branch: None,
             default_setup_script: setup_script.map(String::from),
@@ -617,10 +665,42 @@ mod tests {
         registry: RepoRegistry,
         queue: crate::provision_queue::ProvisionQueue,
         in_progress: crate::inprogress::InProgressWorkspaces,
+        spares: Arc<Spares>,
     }
 
     impl TestCtx {
+        /// Its spares never build: without a registry there's nothing to.
         async fn new(f: &Fixture, setup_script: &str) -> Self {
+            let mut ctx = Self::bare(f, setup_script).await;
+            ctx.spares = Spares::new(
+                Arc::new(crate::registry::RegistryLoad::Missing {
+                    path: PathBuf::new(),
+                }),
+                f.paths.clone(),
+                ctx.queue.clone(),
+            );
+            ctx
+        }
+
+        async fn with_spares(f: &Fixture, setup_script: &str) -> Self {
+            let mut ctx = Self::bare(f, setup_script).await;
+            ctx.spares = ctx.spares_from_registry(f);
+            ctx
+        }
+
+        /// A second `Spares` over the same disk, as after a restart.
+        fn spares_from_registry(&self, f: &Fixture) -> Arc<Spares> {
+            Spares::new(
+                Arc::new(crate::registry::RegistryLoad::Ok {
+                    path: PathBuf::new(),
+                    registry: self.registry.clone(),
+                }),
+                f.paths.clone(),
+                self.queue.clone(),
+            )
+        }
+
+        async fn bare(f: &Fixture, setup_script: &str) -> Self {
             let store = Store::load(
                 f.paths.data_dir.join("state.json"),
                 Box::new(crate::store::NullNotifier),
@@ -653,6 +733,13 @@ mod tests {
                 },
                 queue: crate::provision_queue::ProvisionQueue::new(),
                 in_progress: crate::inprogress::InProgressWorkspaces::new(),
+                spares: Spares::new(
+                    Arc::new(crate::registry::RegistryLoad::Missing {
+                        path: PathBuf::new(),
+                    }),
+                    f.paths.clone(),
+                    crate::provision_queue::ProvisionQueue::new(),
+                ),
             }
         }
 
@@ -672,10 +759,107 @@ mod tests {
                 store: &self.store,
                 claim,
                 queue: &self.queue,
+                spares: &self.spares,
                 tx: &JobTx::silent(),
             })
             .await
         }
+    }
+
+    /// Each setup run appends a line, so the count says whether a worktree
+    /// came from the spare (built, then claimed) or was made fresh.
+    const COUNT_SETUP_RUNS: &str = "echo run >> setup-runs.log";
+
+    fn setup_runs(worktree: &Path) -> usize {
+        std::fs::read_to_string(worktree.join("setup-runs.log"))
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn a_create_takes_over_the_spare_and_another_is_built() {
+        let f = fixture();
+        let ctx = TestCtx::with_spares(&f, COUNT_SETUP_RUNS).await;
+        ctx.spares.start().await;
+        assert!(ctx.spares.settled().await, "spare built");
+        let spare = f.worktree_root.join(crate::spare::SPARE_DIR).join("api");
+        assert_eq!(setup_runs(&spare), 1);
+
+        // Lands on origin after the spare was cut.
+        git_ok(&f.origin, &["commit", "--allow-empty", "-m", "later"]);
+
+        let ws = ctx.provision(&f, "ws-a", "feat/a").await.unwrap();
+        let wt = &ws.repo_links[0].worktree_path;
+        assert_eq!(wt, &f.worktree_root.join("feat-a").join("api"));
+        assert_eq!(setup_runs(wt), 2, "built as the spare, set up again once claimed");
+        assert_eq!(git_out(wt, &["rev-parse", "--abbrev-ref", "HEAD"]), "feat/a");
+        assert_eq!(git_out(wt, &["log", "-1", "--format=%s"]), "later");
+        assert!(ws.repo_links[0].created_branch);
+
+        assert!(ctx.spares.settled().await, "next spare built");
+        assert_eq!(setup_runs(&spare), 1, "a new spare, not what was left of the old");
+    }
+
+    #[tokio::test]
+    async fn a_create_waits_for_a_spare_still_being_built() {
+        let f = fixture();
+        let ctx = TestCtx::with_spares(&f, COUNT_SETUP_RUNS).await;
+        ctx.spares.start().await;
+
+        let ws = ctx.provision(&f, "ws-a", "feat/a").await.unwrap();
+        assert_eq!(setup_runs(&ws.repo_links[0].worktree_path), 2);
+    }
+
+    #[tokio::test]
+    async fn a_create_called_off_in_the_queue_leaves_the_spare_alone() {
+        let f = fixture();
+        let ctx = TestCtx::with_spares(&f, COUNT_SETUP_RUNS).await;
+        ctx.spares.start().await;
+        assert!(ctx.spares.settled().await);
+        ctx.store
+            .update_workspace("ws-a", |ws| {
+                ws.deleted_at = Some(Utc::now());
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        ctx.provision(&f, "ws-a", "feat/a").await.unwrap_err();
+
+        let ws = ctx.provision(&f, "ws-b", "feat/b").await.unwrap();
+        assert_eq!(setup_runs(&ws.repo_links[0].worktree_path), 2);
+    }
+
+    #[tokio::test]
+    async fn a_spare_from_the_last_run_is_kept() {
+        let f = fixture();
+        let ctx = TestCtx::with_spares(&f, COUNT_SETUP_RUNS).await;
+        ctx.spares.start().await;
+        assert!(ctx.spares.settled().await);
+        let spare = f.worktree_root.join(crate::spare::SPARE_DIR).join("api");
+        std::fs::write(spare.join("from-last-run"), "").unwrap();
+
+        let restarted = ctx.spares_from_registry(&f);
+        restarted.start().await;
+        assert!(restarted.settled().await);
+        assert!(spare.join("from-last-run").exists(), "kept, not rebuilt");
+    }
+
+    #[tokio::test]
+    async fn a_half_built_spare_is_rebuilt() {
+        let f = fixture();
+        let ctx = TestCtx::with_spares(&f, COUNT_SETUP_RUNS).await;
+        ctx.spares.start().await;
+        assert!(ctx.spares.settled().await);
+        let root = f.worktree_root.join(crate::spare::SPARE_DIR);
+        std::fs::remove_file(root.join(".tethys-spare.json")).unwrap();
+        std::fs::write(root.join("api").join("from-last-run"), "").unwrap();
+
+        let restarted = ctx.spares_from_registry(&f);
+        restarted.start().await;
+        assert!(restarted.settled().await);
+        assert!(!root.join("api").join("from-last-run").exists(), "rebuilt");
+        assert_eq!(setup_runs(&root.join("api")), 1);
     }
 
     #[tokio::test]
@@ -686,6 +870,7 @@ mod tests {
             repo: &repo("api", &f.origin, None),
             worktree_path: &wt,
             branch: "feat/new",
+            from_spare: None,
             paths: &f.paths,
             tx: &JobTx::silent(),
         })
@@ -708,6 +893,7 @@ mod tests {
             repo: &repo("api", &f.origin, None),
             worktree_path: &first,
             branch: "feat/shared",
+            from_spare: None,
             paths: &f.paths,
             tx: &JobTx::silent(),
         })
@@ -721,6 +907,7 @@ mod tests {
             repo: &repo("api", &f.origin, None),
             worktree_path: &second,
             branch: "feat/shared",
+            from_spare: None,
             paths: &f.paths,
             tx: &JobTx::silent(),
         })
@@ -741,6 +928,7 @@ mod tests {
             repo: &repo("api", &f.origin, Some("exit 7")),
             worktree_path: &wt,
             branch: "feat/doomed",
+            from_spare: None,
             paths: &f.paths,
             tx: &JobTx::silent(),
         })
@@ -765,6 +953,7 @@ mod tests {
             repo: &repo("api", &f.origin, None),
             worktree_path: &first,
             branch: "feat/precious",
+            from_spare: None,
             paths: &f.paths,
             tx: &JobTx::silent(),
         })
@@ -778,6 +967,7 @@ mod tests {
             repo: &repo("api", &f.origin, Some("exit 7")),
             worktree_path: &second,
             branch: "feat/precious",
+            from_spare: None,
             paths: &f.paths,
             tx: &JobTx::silent(),
         })
@@ -804,6 +994,7 @@ mod tests {
             repo: &repo("api", &f.origin, None),
             worktree_path: &first,
             branch: "feat/a",
+            from_spare: None,
             paths: &f.paths,
             tx: &JobTx::silent(),
         })
@@ -816,6 +1007,7 @@ mod tests {
             repo: &r,
             worktree_path: &wt,
             branch: "feat/b",
+            from_spare: None,
             paths: &f.paths,
             tx: &JobTx::silent(),
         })
@@ -841,6 +1033,7 @@ mod tests {
             repo: &repo("api", &f.origin, None),
             worktree_path: &first,
             branch: "feat/a",
+            from_spare: None,
             paths: &f.paths,
             tx: &JobTx::silent(),
         })
@@ -857,6 +1050,7 @@ mod tests {
             repo: &r,
             worktree_path: &wt,
             branch: "feat/b",
+            from_spare: None,
             paths: &f.paths,
             tx: &JobTx::silent(),
         })
@@ -951,6 +1145,7 @@ mod tests {
                 repo: &r,
                 worktree_path: &wt,
                 branch: "feat/x",
+                from_spare: None,
                 paths: &f.paths,
                 tx: &JobTx::silent(),
             })

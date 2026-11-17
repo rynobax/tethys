@@ -295,6 +295,116 @@ pub async fn worktree_add(
     Ok(())
 }
 
+/// For a spare, which has no branch until a workspace claims it.
+pub async fn worktree_add_detached(
+    clone_path: &Path,
+    worktree_path: &Path,
+    tx: &JobTx,
+    repo: &str,
+) -> AppResult<()> {
+    tx.status(
+        format!("creating worktree at {}", worktree_path.display()),
+        Some(repo),
+    );
+    if let Some(parent) = worktree_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let args: [&OsStr; 6] = [
+        "-C".as_ref(),
+        clone_path.as_os_str(),
+        "worktree".as_ref(),
+        "add".as_ref(),
+        "--detach".as_ref(),
+        worktree_path.as_os_str(),
+    ];
+    run_streamed("git", args, tx, repo)
+        .await?
+        .check(format!("git worktree add {}", worktree_path.display()))?;
+    Ok(())
+}
+
+pub async fn worktree_move(
+    clone_path: &Path,
+    from: &Path,
+    to: &Path,
+    tx: &JobTx,
+    repo: &str,
+) -> AppResult<()> {
+    tx.status(format!("moving worktree to {}", to.display()), Some(repo));
+    if let Some(parent) = to.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let args: [&OsStr; 6] = [
+        "-C".as_ref(),
+        clone_path.as_os_str(),
+        "worktree".as_ref(),
+        "move".as_ref(),
+        from.as_os_str(),
+        to.as_os_str(),
+    ];
+    run_streamed("git", args, tx, repo)
+        .await?
+        .check(format!("git worktree move {}", from.display()))?;
+    Ok(())
+}
+
+/// `worktree_add`'s branch handling for a worktree that already exists. A
+/// fresh branch starts from the clone's HEAD, not the worktree's, which was
+/// whatever the clone had when the spare was built. Changes to tracked files
+/// are discarded: nobody made them on purpose.
+pub async fn switch_worktree_branch(
+    clone_path: &Path,
+    worktree_path: &Path,
+    branch: &str,
+    source: &WorktreeBranch,
+    tx: &JobTx,
+    repo: &str,
+) -> AppResult<()> {
+    tx.status(format!("switching worktree to {branch}"), Some(repo));
+    let start_point = match source {
+        WorktreeBranch::NewFromHead => Some(head_commit(clone_path).await?),
+        WorktreeBranch::TrackRemote(start_point) => Some(start_point.clone()),
+        WorktreeBranch::ExistingLocal => None,
+    };
+    let mut args: Vec<&OsStr> = vec![
+        "-C".as_ref(),
+        worktree_path.as_os_str(),
+        "switch".as_ref(),
+        "--discard-changes".as_ref(),
+    ];
+    if matches!(source, WorktreeBranch::TrackRemote(_)) {
+        args.push("--track".as_ref());
+    }
+    if start_point.is_some() {
+        args.push("-c".as_ref());
+    }
+    args.push(branch.as_ref());
+    if let Some(start_point) = &start_point {
+        args.push(start_point.as_ref());
+    }
+    run_streamed("git", args, tx, repo)
+        .await?
+        .check(format!("git switch {branch} in {}", worktree_path.display()))?;
+    Ok(())
+}
+
+async fn head_commit(clone_path: &Path) -> AppResult<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(clone_path)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .stderr(Stdio::null())
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(AppError::Other(format!(
+            "could not read HEAD of {}",
+            clone_path.display()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 /// `pull_clone` and `worktree_add` both build on whatever the clone has checked
 /// out. With no override and no `origin/HEAD`, leave it alone rather than guess.
 pub async fn ensure_clone_on_default_branch(

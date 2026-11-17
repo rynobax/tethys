@@ -1,6 +1,6 @@
 # Tethys
 
-Desktop app for running many Claude Code (or codex) sessions in parallel across git worktrees. A **workspace** is N worktrees, one per repo, plus the one agent session running at their root. Hooks drive its "your turn" state.
+Desktop app for running many Claude Code (or codex) sessions in parallel across git worktrees. A **workspace** is N worktrees, one per enabled repo, plus the one agent session running at their root. Hooks drive its "your turn" state.
 
 A personal tool for Ryan: macOS only, single user, never distributed. Take macOS-specific paths and Electron features without guarding them. Work and commit directly on `main`; no branches or PRs.
 
@@ -41,7 +41,7 @@ Read the one for the area you're changing. They hold the reasons and traps the c
 | Session lifecycle, strays, memory budget | `docs/sessions.md` |
 | Claude vs codex, the codex command line, terminal replay | `docs/agents.md` |
 | `mcp__tethys__*` tools | `docs/mcp-tools.md` |
-| Setup queue, per-worktree env | `docs/provisioning.md` |
+| Setup queue, the spare, per-worktree env | `docs/provisioning.md` |
 | Child workspaces and the session inbox | `docs/children.md` |
 | Tracked PRs, stacks, Shipping | `docs/prs.md` |
 | Workspace tabs, artifacts, the PR webview | `docs/workspace-tabs.md` |

@@ -13,6 +13,7 @@ use crate::paths::Paths;
 use crate::provision::{provision_workspace, WorkspaceProvision};
 use crate::provision_queue::ProvisionQueue;
 use crate::registry::{RegistryLoad, Repo};
+use crate::spare::Spares;
 use crate::sessions::{self, OpenSession, SessionSupervisor};
 use crate::state::{Origin, Workspace, WorkspaceId};
 use crate::store::Store;
@@ -28,6 +29,7 @@ pub struct Handoff {
     pub(crate) paths: Paths,
     pub(crate) in_progress: InProgressWorkspaces,
     pub(crate) queue: ProvisionQueue,
+    pub(crate) spares: Arc<Spares>,
     pub(crate) supervisor: Arc<SessionSupervisor>,
     /// Empty when tmux didn't resolve at boot.
     pub(crate) tmux_bin: PathBuf,
@@ -48,24 +50,12 @@ impl Handoff {
             ));
         }
 
-        if req.repos.is_empty() {
+        let selected = reg.enabled_repos();
+        if selected.is_empty() {
             return Err(AppError::Other(
-                "name at least one repo for the new workspace".into(),
+                "every repo in repos.toml is disabled, so there's nothing to build".into(),
             ));
         }
-        let selected: Vec<Repo> = req
-            .repos
-            .iter()
-            .map(|k| {
-                reg.find_repo(k).cloned().ok_or_else(|| {
-                    let known: Vec<&str> = reg.repos.iter().map(|r| r.key.as_str()).collect();
-                    AppError::Other(format!(
-                        "unknown repo key: {k}. Known repos: {}",
-                        known.join(", ")
-                    ))
-                })
-            })
-            .collect::<AppResult<Vec<_>>>()?;
 
         let requested = validate_branch(&req.branch)?;
 
@@ -158,6 +148,7 @@ impl Handoff {
             store: &self.store,
             claim,
             queue: &self.queue,
+            spares: &self.spares,
             tx: &tx,
         })
         .await;

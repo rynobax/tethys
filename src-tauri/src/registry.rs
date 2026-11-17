@@ -47,6 +47,11 @@ pub struct Repo {
     /// `<data_dir>/repos/<key>/`, never touching your own checkouts.
     pub remote_url: String,
 
+    /// Whether every new workspace gets this repo. A disabled repo can still be
+    /// added to a workspace afterwards. Defaults to on.
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+
     /// Branch new worktrees are cut from. Defaults to `origin/HEAD`.
     #[serde(default)]
     pub default_branch: Option<String>,
@@ -92,6 +97,10 @@ pub struct Repo {
     #[serde(skip, default)]
     #[schemars(skip)]
     pub github_slug: Option<GithubSlug>,
+}
+
+fn enabled_by_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -173,6 +182,11 @@ impl RegistryLoad {
 impl RepoRegistry {
     pub fn find_repo(&self, key: &str) -> Option<&Repo> {
         self.repos.iter().find(|r| r.key == key)
+    }
+
+    /// What every new workspace is made of, in registry order.
+    pub fn enabled_repos(&self) -> Vec<Repo> {
+        self.repos.iter().filter(|r| r.enabled).cloned().collect()
     }
 
     pub fn workspace_doc_body(&self) -> &str {
@@ -282,6 +296,7 @@ worktree_root = "CHANGE_ME_TO_AN_ABSOLUTE_PATH"
 # [[repo]]
 # key = "frontend"
 # remote_url = "git@github.com:me/frontend.git"
+# enabled = false                  # leave out of new workspaces; add it when needed
 # default_branch = "main"          # defaults to the remote's default branch
 # default_setup_script = "pnpm install"
 # setup_timeout_secs = 600

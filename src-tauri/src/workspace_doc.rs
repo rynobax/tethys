@@ -225,6 +225,7 @@ mod tests {
     fn repo(key: &str, notes: Option<&str>) -> Repo {
         Repo {
             key: key.into(),
+            enabled: true,
             remote_url: format!("git@github.com:me/{key}.git"),
             default_branch: None,
             default_setup_script: None,

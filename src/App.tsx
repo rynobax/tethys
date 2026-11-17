@@ -715,7 +715,6 @@ function App() {
 
           {creating && registry?.kind === "ok" && (
             <CreateWorkspaceDialog
-              repos={registry.registry.repos}
               folders={folders}
               onClose={() => setCreating(false)}
               onSubmit={(partial) => {
@@ -1352,27 +1351,6 @@ function AddRepoPopup({
   );
 }
 
-const LAST_REPO_SELECTION_KEY = "tethys.createWorkspace.lastRepoSelection";
-
-function loadLastRepoSelection(repos: Repo[]): Set<string> {
-  const available = new Set(repos.map((r) => r.key));
-  try {
-    const raw = localStorage.getItem(LAST_REPO_SELECTION_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        const restored = parsed.filter(
-          (k): k is string => typeof k === "string" && available.has(k),
-        );
-        if (restored.length > 0) return new Set(restored);
-      }
-    }
-  } catch {
-    /* unparseable starts fresh */
-  }
-  return available;
-}
-
 const LAST_FOLDER_KEY = "tethys.createWorkspace.lastFolder";
 
 function loadLastFolder(folders: Folder[]): FolderId | null {
@@ -1388,20 +1366,15 @@ function loadLastFolder(folders: Folder[]): FolderId | null {
 type CreateWorkspaceFormArgs = Omit<CreateWorkspaceArgs, "workspace_id">;
 
 function CreateWorkspaceDialog({
-  repos,
   folders,
   onClose,
   onSubmit,
 }: {
-  repos: Repo[];
   folders: Folder[];
   onClose: () => void;
   onSubmit: (args: CreateWorkspaceFormArgs) => void;
 }) {
   const [branch, setBranch] = useState("");
-  const [selected, setSelected] = useState<Set<string>>(() =>
-    loadLastRepoSelection(repos),
-  );
   const [agentBinary, setAgentBinary] = useState<string>(
     AGENT_CHOICES[0].binary,
   );
@@ -1409,32 +1382,17 @@ function CreateWorkspaceDialog({
     loadLastFolder(folders),
   );
 
-  const toggle = (key: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
-
-  const canSubmit = branch.trim().length > 0 && selected.size > 0;
+  const canSubmit = branch.trim().length > 0;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    const repoSelections = Array.from(selected);
     try {
-      localStorage.setItem(
-        LAST_REPO_SELECTION_KEY,
-        JSON.stringify(repoSelections),
-      );
       localStorage.setItem(LAST_FOLDER_KEY, folder ?? "");
     } catch {
       /* the preference just won't persist */
     }
     onSubmit({
       branch: branch.trim(),
-      repo_selections: repoSelections,
       agent: agentFor(agentBinary),
       agent_binary:
         agentBinary === AGENT_CHOICES[0].binary ? null : agentBinary,
@@ -1462,31 +1420,6 @@ function CreateWorkspaceDialog({
             placeholder="e.g. ryan/session-resume"
           />
         </label>
-        <div className="repo-select">
-          <div className="repo-select-label">Repos</div>
-          {repos.length === 0 ? (
-            <p className="muted">
-              No repos in registry. Add some to <code>repos.toml</code>.
-            </p>
-          ) : (
-            <ul>
-              {repos.map((r) => (
-                <li key={r.key}>
-                  <label className="repo-row">
-                    <input
-                      type="checkbox"
-                      checked={selected.has(r.key)}
-                      onChange={() => toggle(r.key)}
-                    />
-                    <span className="repo-display" title={r.key}>
-                      {r.key}
-                    </span>
-                  </label>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
         {folders.length > 0 && (
           <label>
             Folder

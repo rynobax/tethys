@@ -35,6 +35,7 @@ mod sessions;
 mod shipping;
 mod setup;
 mod shell;
+mod spare;
 mod state;
 mod store;
 mod strays;
@@ -85,6 +86,7 @@ pub struct Daemon {
     pub shipper: Arc<Shipper>,
     pub in_progress: InProgressWorkspaces,
     pub queue: ProvisionQueue,
+    pub spares: Arc<spare::Spares>,
     pub agent_bins: AgentBins,
     /// Empty when tmux didn't resolve at boot.
     pub tmux_bin: PathBuf,
@@ -232,6 +234,11 @@ async fn boot(paths: Paths) -> Result<Arc<Daemon>, Box<dyn std::error::Error>> {
 
     let in_progress = InProgressWorkspaces::new();
     let queue = ProvisionQueue::new();
+    let spares = spare::Spares::new(registry.clone(), paths.clone(), queue.clone());
+    {
+        let spares = spares.clone();
+        tokio::spawn(async move { spares.start().await });
+    }
     let mcp_launch = McpLaunch::resolve(&paths, &registry);
 
     let shipper = Arc::new(Shipper {
@@ -249,6 +256,7 @@ async fn boot(paths: Paths) -> Result<Arc<Daemon>, Box<dyn std::error::Error>> {
         paths: paths.clone(),
         in_progress: in_progress.clone(),
         queue: queue.clone(),
+        spares: spares.clone(),
         supervisor: supervisor.clone(),
         tmux_bin: tmux_bin.clone(),
         agent_bins: agent_bins.clone(),
@@ -312,6 +320,7 @@ async fn boot(paths: Paths) -> Result<Arc<Daemon>, Box<dyn std::error::Error>> {
         shipper,
         in_progress,
         queue,
+        spares,
         agent_bins,
         tmux_bin,
         mcp: mcp_launch,

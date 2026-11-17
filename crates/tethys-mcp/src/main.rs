@@ -28,7 +28,6 @@ use tethys_mcp::{
 
 #[derive(Debug, Deserialize)]
 struct CreateWorkspaceArgs {
-    repos: Vec<String>,
     branch: String,
     brief: String,
     #[serde(default)]
@@ -113,16 +112,9 @@ impl TethysServer {
         let schema = json!({
             "type": "object",
             "properties": {
-                "repos": {
-                    "type": "array",
-                    "items": self.repo_key_items(),
-                    "minItems": 1,
-                    "description": "Repo keys the new workspace should span. \
-                        Each becomes a git worktree checked out on `branch`.",
-                },
                 "branch": {
                     "type": "string",
-                    "description": "Branch to create in every listed repo. If the \
+                    "description": "Branch to create in every repo. If the \
                         name is already in use today's date is appended (then a \
                         number, if that's taken too), and the branch actually \
                         used is reported back.",
@@ -141,7 +133,7 @@ impl TethysServer {
                         workspace finishes its work. Default to false if unsure.",
                 },
             },
-            "required": ["repos", "branch", "brief"],
+            "required": ["branch", "brief"],
             "additionalProperties": false,
         });
         schema
@@ -155,8 +147,8 @@ impl TethysServer {
             Cow::Borrowed(TOOL_CREATE_WORKSPACE),
             Cow::Borrowed(
                 "Hand work off to a new Tethys workspace, running independently of \
-                 this session. Creates a fresh git worktree per listed repo, all on \
-                 a new branch, then starts one Claude session at the workspace root \
+                 this session. Creates a fresh git worktree for each of Ryan's standard \
+                 repos, all on a new branch, then starts one Claude session at the workspace root \
                  with your brief as its first message.\n\n\
                  Provisioning (clone, dependency install, setup scripts) takes \
                  minutes and happens in the background: this call returns as soon as \
@@ -527,7 +519,6 @@ impl TethysServer {
         let request = Request::CreateWorkspace(CreateWorkspace {
             from_workspace: self.from_workspace.clone(),
             from_session: self.from_session.clone(),
-            repos: args.repos,
             branch: args.branch,
             brief: args.brief,
             as_child: args.as_child,
@@ -840,16 +831,10 @@ mod tests {
     }
 
     #[test]
-    fn the_repos_argument_enumerates_the_registry() {
+    fn a_handoff_gets_the_enabled_repos_without_naming_them() {
         let schema = serde_json::to_value(server().create_workspace_schema()).expect("serialize");
-        assert_eq!(
-            schema["properties"]["repos"]["items"]["enum"],
-            serde_json::json!(["nl-frontend", "nl-backend"])
-        );
-        assert_eq!(
-            schema["required"],
-            serde_json::json!(["repos", "branch", "brief"])
-        );
+        assert!(schema["properties"]["repos"].is_null());
+        assert_eq!(schema["required"], serde_json::json!(["branch", "brief"]));
     }
 
     #[test]
@@ -883,10 +868,10 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_registry_leaves_the_enum_out() {
+    fn an_empty_registry_leaves_the_add_repos_enum_out() {
         let mut server = server();
         server.repo_keys.clear();
-        let schema = serde_json::to_value(server.create_workspace_schema()).expect("serialize");
+        let schema = serde_json::to_value(server.add_repos_schema()).expect("serialize");
         assert!(schema["properties"]["repos"]["items"]["enum"].is_null());
         assert_eq!(schema["properties"]["repos"]["items"]["type"], "string");
     }
