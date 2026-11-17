@@ -385,11 +385,7 @@ mod tests {
             .await
             .unwrap();
         let artifacts = Arc::new(ArtifactStore::new(events.clone(), store.clone()));
-        let supervisor = Arc::new(SessionSupervisor::new(
-            events.clone(),
-            store.clone(),
-            artifacts.clone(),
-        ));
+        let supervisor = Arc::new(SessionSupervisor::new(events.clone(), store.clone()));
         let shipper = Arc::new(Shipper {
             store: store.clone(),
             supervisor: supervisor.clone(),

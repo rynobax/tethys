@@ -30,14 +30,6 @@ pub struct HookMessage {
     pub transcript_path: Option<String>,
     pub source: Option<String>,
     pub notification_type: Option<String>,
-    pub last_assistant_message: Option<String>,
-    pub tool_name: Option<String>,
-    /// The only fields of `tool_input` Tethys reads; the rest never crosses
-    /// the socket.
-    pub tool_file_path: Option<String>,
-    pub tool_command: Option<String>,
-    /// The tail of a tool's stdout, read only for ummon's review URL.
-    pub tool_stdout: Option<String>,
     /// `None` for sessions Tethys didn't spawn.
     pub spawn_token: Option<String>,
     /// Claude's cross-session inbox, from `CLAUDE_CODE_MESSAGING_*`.

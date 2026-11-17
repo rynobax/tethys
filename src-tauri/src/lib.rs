@@ -207,11 +207,7 @@ async fn boot(paths: Paths) -> Result<Arc<Daemon>, Box<dyn std::error::Error>> {
     }
 
     let artifacts = Arc::new(ArtifactStore::new(events.clone(), store.clone()));
-    let supervisor = Arc::new(SessionSupervisor::new(
-        events.clone(),
-        store.clone(),
-        artifacts.clone(),
-    ));
+    let supervisor = Arc::new(SessionSupervisor::new(events.clone(), store.clone()));
 
     let budgets = Arc::new(Budgets::new(events.clone()));
     if !tmux_bin.as_os_str().is_empty() {
@@ -265,6 +261,7 @@ async fn boot(paths: Paths) -> Result<Arc<Daemon>, Box<dyn std::error::Error>> {
         paths: paths.clone(),
         queue: queue.clone(),
         budgets: budgets.clone(),
+        artifacts: artifacts.clone(),
     };
     if let Err(e) = mcp::listen(&paths.mcp_socket(), mcp_services).await {
         error!(error = %e, "mcp listener failed to start");

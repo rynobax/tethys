@@ -748,17 +748,6 @@ html,
   padding: 1px 8px;
 }
 
-.artifact-diagram {
-  flex: 1;
-  overflow: auto;
-  padding: 12px;
-}
-
-.artifact-diagram svg {
-  max-width: 100%;
-  height: auto;
-}
-
 .artifact-page {
   flex: 1;
   border: none;
@@ -766,22 +755,6 @@ html,
   /* A frame's `prefers-color-scheme` is its element's `color-scheme`, which
      a theme sets; pages keep seeing the system's. */
   color-scheme: light dark;
-}
-
-.artifact-broken {
-  flex: 1;
-  overflow: auto;
-  display: flex;
-  flex-direction: column;
-}
-
-.artifact-source {
-  margin: 0;
-  padding: 12px;
-  font-size: 12px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  color: var(--fg);
 }
 
 .artifact-error {
@@ -2387,7 +2360,7 @@ li.is-dragging {
     14px 0 28px -14px rgba(0, 0, 0, 0.55);
 }
 
-/* A PR, page, diagram or review takes the right meadow too: the pane keeps
+/* A PR, page or review takes the right meadow too: the pane keeps
    the left edge it has on Chat and runs to the window's right, over a world
    that carries on underneath as if the pane were narrow. */
 .app.fun .detail:has(.main-tab-body) {

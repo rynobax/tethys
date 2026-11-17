@@ -113,17 +113,14 @@ The collapsible pane beside the Chat that holds the workspace's Notes.
 _Avoid_: Inspector, drawer, right pane
 
 **Artifact**:
-Something a session produced that Tethys can show rather than leave as text in the terminal. Belongs to the workspace the session runs in, and kept with it until closed or crowded out by newer ones.
+Something a session produced and attached for Tethys to show in a tab. Belongs to the workspace the session runs in, and kept with it until closed, detached or crowded out by newer ones.
 _Avoid_: Output, attachment
 
-**Diagram**:
-An Artifact that is a Mermaid diagram, taken from the source a session wrote in its reply.
-
 **Page**:
-An Artifact that is an HTML file a session wrote inside the workspace, shown as the file currently on disk.
+An Artifact that is a file inside the workspace, usually an HTML page but sometimes an image or video, shown as the file currently on disk.
 
 **Review**:
-An Artifact that is an ummon review a session started on one of the workspace's repos.
+An Artifact that is an ummon review a session started on one of the workspace's repos, attached by its localhost URL.
 
 ### Fun mode
 

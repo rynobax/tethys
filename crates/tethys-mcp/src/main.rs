@@ -20,10 +20,10 @@ use serde_json::json;
 use tokio::net::UnixStream;
 
 use tethys_mcp::{
-    read_frame, write_frame, AddRepos, CreateWorkspace, LeaveShipping, LinkPr, Request,
+    read_frame, write_frame, AddRepos, ArtifactTarget, CreateWorkspace, LeaveShipping, LinkPr, Request,
     RequestMemoryBudget, Response, SetProgress, ENV_REPO_KEYS, ENV_SESSION_ID, ENV_SOCKET,
     ENV_WORKSPACE_ID, TOOL_ADD_REPOS, TOOL_CREATE_WORKSPACE, TOOL_LEAVE_SHIPPING, TOOL_LINK_PR,
-    TOOL_REQUEST_MEMORY_BUDGET, TOOL_SET_PROGRESS,
+    TOOL_ATTACH_ARTIFACT, TOOL_DETACH_ARTIFACT, TOOL_REQUEST_MEMORY_BUDGET, TOOL_SET_PROGRESS,
 };
 
 #[derive(Debug, Deserialize)]
@@ -58,6 +58,11 @@ struct RequestMemoryBudgetArgs {
 struct SetProgressArgs {
     done: u32,
     total: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct ArtifactArgs {
+    target: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -388,6 +393,56 @@ impl TethysServer {
         )
     }
 
+    fn artifact_schema(&self) -> JsonObject {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "An absolute path to a file inside this \
+                        workspace (a path relative to the workspace root also \
+                        works), or a localhost URL.",
+                },
+            },
+            "required": ["target"],
+            "additionalProperties": false,
+        });
+        schema
+            .as_object()
+            .cloned()
+            .expect("input schema literal is an object")
+    }
+
+    fn attach_artifact_tool(&self) -> Tool {
+        Tool::new(
+            Cow::Borrowed(TOOL_ATTACH_ARTIFACT),
+            Cow::Borrowed(
+                "Show something you made in a tab beside this Tethys workspace's \
+                 chat, so Ryan can look at it without leaving Tethys: an HTML \
+                 page, image or video inside the workspace, or the localhost URL \
+                 of an ummon review you started. Use it instead of `open`ing a \
+                 file in a browser.\n\n\
+                 Attaching the same target again reloads it, so call it again \
+                 after you change the file. A file must already exist inside the \
+                 workspace; a URL must be on localhost.",
+            ),
+            self.artifact_schema(),
+        )
+    }
+
+    fn detach_artifact_tool(&self) -> Tool {
+        Tool::new(
+            Cow::Borrowed(TOOL_DETACH_ARTIFACT),
+            Cow::Borrowed(
+                "Close a tab you opened with attach_artifact, passing the same \
+                 target. Ryan closes tabs himself too, so only call it when what \
+                 you attached is no longer worth looking at, such as a page you've \
+                 replaced with another.",
+            ),
+            self.artifact_schema(),
+        )
+    }
+
     /// Protocol `2026-07-28` requires `ttlMs`, which `with_all_items` omits;
     /// without it Claude Code retries until "tools fetch failed". Zero, since
     /// the `repos` enum is fixed at spawn.
@@ -399,6 +454,8 @@ impl TethysServer {
             self.request_memory_budget_tool(),
             self.leave_shipping_tool(),
             self.set_progress_tool(),
+            self.attach_artifact_tool(),
+            self.detach_artifact_tool(),
         ])
             .with_ttl_ms(0)
             .with_cache_scope(CacheScope::Private)
@@ -449,6 +506,8 @@ impl ServerHandler for TethysServer {
             TOOL_REQUEST_MEMORY_BUDGET => self.request_memory_budget(request.arguments).await,
             TOOL_LEAVE_SHIPPING => self.leave_shipping(request.arguments).await,
             TOOL_SET_PROGRESS => self.set_progress(request.arguments).await,
+            TOOL_ATTACH_ARTIFACT => self.attach_artifact(request.arguments).await,
+            TOOL_DETACH_ARTIFACT => self.detach_artifact(request.arguments).await,
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool: {other}"),
                 None,
@@ -685,6 +744,57 @@ impl TethysServer {
             .into(),
             Response::Rejected { message } => failed(format!("progress not recorded: {message}")),
             other => failed(format!("Tethys answered set_progress with {other:?}")),
+        })
+    }
+}
+
+impl TethysServer {
+    fn artifact_target(&self, arguments: Option<JsonObject>) -> Result<ArtifactTarget, ErrorData> {
+        let args: ArtifactArgs = parse_args(arguments)?;
+        Ok(ArtifactTarget {
+            from_workspace: self.from_workspace.clone(),
+            from_session: self.from_session.clone(),
+            target: args.target,
+        })
+    }
+
+    async fn attach_artifact(
+        &self,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let request = Request::AttachArtifact(self.artifact_target(arguments)?);
+        let response = match self.send(&request).await {
+            Ok(response) => response,
+            Err(e) => return Ok(failed(format!("nothing was attached: {e}"))),
+        };
+        Ok(match response {
+            Response::Attached { label, reloaded } => {
+                let what = if reloaded { "Reloaded" } else { "Attached" };
+                CallToolResult::success(vec![ContentBlock::text(format!(
+                    "{what} {label}; it's open in a tab beside the chat."
+                ))])
+                .into()
+            }
+            Response::Rejected { message } => failed(format!("nothing was attached: {message}")),
+            other => failed(format!("Tethys answered attach_artifact with {other:?}")),
+        })
+    }
+
+    async fn detach_artifact(
+        &self,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let request = Request::DetachArtifact(self.artifact_target(arguments)?);
+        let response = match self.send(&request).await {
+            Ok(response) => response,
+            Err(e) => return Ok(failed(format!("nothing was detached: {e}"))),
+        };
+        Ok(match response {
+            Response::Detached => {
+                CallToolResult::success(vec![ContentBlock::text("Detached.".to_string())]).into()
+            }
+            Response::Rejected { message } => failed(format!("nothing was detached: {message}")),
+            other => failed(format!("Tethys answered detach_artifact with {other:?}")),
         })
     }
 }

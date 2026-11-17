@@ -13,10 +13,11 @@ GitHub sends `frame-ancestors 'none'`, so a PR is a `<webview>`, not an iframe. 
 
 ## Artifacts
 
-Artifacts come from hooks, not xterm's buffer. Claude draws on the alternate screen, so the buffer only ever holds the visible part of a diagram.
+An agent attaches them with `mcp__tethys__attach_artifact` and removes them with `detach_artifact`. Nothing is detected from hooks or output: guessing from Write calls, `open` commands and prose was unreliable.
 
-- `last_assistant_message` is only the turn's final text block, so a diagram before a tool call is missed.
-- Pages are also caught by a Bash `open`, because `/show-me` writes with a heredoc the file tools never see. Sandboxed sessions can't `open`, so it's also read off `PostToolUseFailure` and off a final message asking for `! open`.
-- A Review's iframe has no sandbox, because ummon's server checks the request's origin.
-- Pages load through `tethys-file:`, which serves only files under `worktree_root` (symlinks resolved), since agents write them.
+- Attaching the same target again bumps its revision, which is what reloads the tab. Nothing watches the file.
+- A URL must be on localhost, because a Review's iframe has no sandbox: ummon's server checks the request's origin.
+- Pages load through `tethys-file:`, which serves only files under `worktree_root` (symlinks resolved), since agents write them. Attach refuses anything outside the workspace for the same reason.
+- `net.fetch` answers a `file:` Range with the whole file as a 200, so `pages.ts` answers ranges itself with a 206. Without that, and the scheme's `stream` privilege, a large video won't start until it's read in full and can't seek.
 - A Page's "Open in browser" is a daemon command: the bridge only hands http(s) URLs to the OS.
+- `Workspace::artifacts` skips entries it can't read, so a stored diagram from before they were removed doesn't fail the whole of `state.json`.

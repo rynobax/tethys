@@ -12,6 +12,8 @@ pub const TOOL_ADD_REPOS: &str = "add_repos";
 pub const TOOL_REQUEST_MEMORY_BUDGET: &str = "request_memory_budget";
 pub const TOOL_LEAVE_SHIPPING: &str = "leave_shipping";
 pub const TOOL_SET_PROGRESS: &str = "set_progress";
+pub const TOOL_ATTACH_ARTIFACT: &str = "attach_artifact";
+pub const TOOL_DETACH_ARTIFACT: &str = "detach_artifact";
 
 /// Bare, as codex grants them.
 pub const TOOL_NAMES: &[&str] = &[
@@ -21,6 +23,8 @@ pub const TOOL_NAMES: &[&str] = &[
     TOOL_REQUEST_MEMORY_BUDGET,
     TOOL_LEAVE_SHIPPING,
     TOOL_SET_PROGRESS,
+    TOOL_ATTACH_ARTIFACT,
+    TOOL_DETACH_ARTIFACT,
 ];
 
 /// Qualified, as Claude's `--allowed-tools` wants them. An unlisted tool
@@ -32,6 +36,8 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "mcp__tethys__request_memory_budget",
     "mcp__tethys__leave_shipping",
     "mcp__tethys__set_progress",
+    "mcp__tethys__attach_artifact",
+    "mcp__tethys__detach_artifact",
 ];
 
 pub const ENV_SOCKET: &str = "TETHYS_MCP_SOCKET";
@@ -51,6 +57,8 @@ pub enum Request {
     RequestMemoryBudget(RequestMemoryBudget),
     LeaveShipping(LeaveShipping),
     SetProgress(SetProgress),
+    AttachArtifact(ArtifactTarget),
+    DetachArtifact(ArtifactTarget),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +127,16 @@ pub struct SetProgress {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactTarget {
+    /// Also the workspace the artifact belongs to, as with `LinkPr`.
+    pub from_workspace: String,
+    #[serde(default)]
+    pub from_session: Option<String>,
+    /// A file path inside the workspace, or a localhost URL.
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddedRepo {
     pub repo_key: String,
     pub worktree_path: String,
@@ -152,6 +170,12 @@ pub enum Response {
     BudgetDenied,
     LeftShipping,
     ProgressSet,
+    Attached {
+        label: String,
+        /// False the first time; true when it was already attached and reloaded.
+        reloaded: bool,
+    },
+    Detached,
     Rejected {
         message: String,
     },

@@ -244,13 +244,9 @@ export interface Theme {
 export type Artifact = {
   id: string;
   label: string;
-  /** Bumped on each re-sighting so a page tab reloads in place. */
+  /** Bumped on each re-attach so the tab reloads in place. */
   revision: number;
-} & (
-  | { kind: "diagram"; source: string }
-  | { kind: "page"; path: string }
-  | { kind: "review"; url: string }
-);
+} & ({ kind: "page"; path: string } | { kind: "review"; url: string });
 
 export interface ArtifactChangedEvent {
   workspace_id: WorkspaceId;

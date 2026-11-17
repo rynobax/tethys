@@ -6,6 +6,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
 
 use crate::agent_cmd::toml_string;
+use crate::artifacts::ArtifactStore;
 use crate::budget::{Budgets, Decision, OverrideRequest};
 use crate::error::{AppError, AppResult};
 use crate::github;
@@ -19,7 +20,7 @@ use crate::state::Progress;
 use crate::store::Store;
 
 pub use tethys_mcp::{
-    AddRepos, AddedRepo, CreateWorkspace, LeaveShipping, LinkPr, Request, RequestMemoryBudget,
+    AddRepos, AddedRepo, ArtifactTarget, CreateWorkspace, LeaveShipping, LinkPr, Request, RequestMemoryBudget,
     Response, SetProgress,
 };
 
@@ -136,6 +137,7 @@ pub struct McpServices {
     pub paths: Paths,
     pub queue: ProvisionQueue,
     pub budgets: Arc<Budgets>,
+    pub artifacts: Arc<ArtifactStore>,
 }
 
 pub async fn listen(socket_path: &Path, services: McpServices) -> AppResult<()> {
@@ -179,6 +181,8 @@ async fn serve_connection(mut stream: UnixStream, services: McpServices) -> AppR
         Request::RequestMemoryBudget(req) => request_memory_budget(&services, req).await,
         Request::LeaveShipping(req) => leave_shipping(&services, req).await,
         Request::SetProgress(req) => set_progress(&services, req).await,
+        Request::AttachArtifact(req) => attach_artifact(&services, req).await,
+        Request::DetachArtifact(req) => detach_artifact(&services, req).await,
     };
     tethys_mcp::write_frame(&mut stream, &response).await?;
     Ok(())
@@ -330,6 +334,27 @@ async fn set_progress(services: &McpServices, req: SetProgress) -> Response {
     }
 }
 
+async fn attach_artifact(services: &McpServices, req: ArtifactTarget) -> Response {
+    match services.artifacts.attach(&req.from_workspace, &req.target).await {
+        Ok(artifact) => Response::Attached {
+            label: artifact.label,
+            reloaded: artifact.revision > 0,
+        },
+        Err(e) => Response::Rejected {
+            message: e.to_string(),
+        },
+    }
+}
+
+async fn detach_artifact(services: &McpServices, req: ArtifactTarget) -> Response {
+    match services.artifacts.detach(&req.from_workspace, &req.target).await {
+        Ok(()) => Response::Detached,
+        Err(e) => Response::Rejected {
+            message: e.to_string(),
+        },
+    }
+}
+
 /// A repo already linked is reported back rather than refused, so an agent
 /// retrying an interrupted call gets its paths instead of an error.
 async fn add_missing_repos(services: &McpServices, req: &AddRepos) -> AppResult<Response> {
@@ -444,7 +469,8 @@ mod tests {
             args[1],
             "--allowed-tools=mcp__tethys__create_workspace,mcp__tethys__link_pr,\
              mcp__tethys__add_repos,mcp__tethys__request_memory_budget,\
-             mcp__tethys__leave_shipping,mcp__tethys__set_progress"
+             mcp__tethys__leave_shipping,mcp__tethys__set_progress,\
+             mcp__tethys__attach_artifact,mcp__tethys__detach_artifact"
         );
     }
 }

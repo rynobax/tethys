@@ -11,7 +11,6 @@ import { openUrl } from "./ipc/commands";
 import { useAppEvent } from "./ipc/events";
 import { GithubChip, PrDetachButton } from "./GithubChip";
 import { usePrViewSlot } from "./PrViews";
-import { isDark, useTheme } from "./theme";
 import type { Artifact, GithubPrStatus, Workspace } from "./types";
 import { useHorizontalScroll } from "./useHorizontalScroll";
 import { linkPrEntries, prGroups } from "./workspaceDerived";
@@ -241,9 +240,7 @@ export function TabStrip({
           role="tab"
           className={`main-tab artifact ${selected === a.id ? "active" : ""}`}
           onClick={() => select(a.id)}
-          title={
-            a.kind === "page" ? a.path : a.kind === "review" ? a.url : a.label
-          }
+          title={a.kind === "page" ? a.path : a.url}
         >
           <span className="main-tab-glyph">{ARTIFACT_GLYPHS[a.kind]}</span>
           <span className="main-tab-label">{a.label}</span>
@@ -295,8 +292,6 @@ export function TabContent({
   const artifact = tabs.artifacts.find((a) => a.id === tabs.selected);
   if (!artifact) return null;
   switch (artifact.kind) {
-    case "diagram":
-      return <DiagramView key={artifact.id} source={artifact.source} />;
     case "page":
       return <PageView workspaceId={workspaceId} artifact={artifact} />;
     case "review":
@@ -305,7 +300,6 @@ export function TabContent({
 }
 
 const ARTIFACT_GLYPHS: Record<Artifact["kind"], string> = {
-  diagram: "◇",
   page: "▤",
   review: "≣",
 };
@@ -338,85 +332,6 @@ function ReviewView({ artifact }: { artifact: Artifact & { kind: "review" } }) {
       />
     </div>
   );
-}
-
-function DiagramView({ source }: { source: string }) {
-  const theme = useTheme();
-  const dark = theme ? isDark(theme.colors.background) : prefersDark();
-  const [svg, setSvg] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    setSvg(null);
-    setError(null);
-    renderMermaid(source, dark)
-      .then((out) => {
-        if (!cancelled) setSvg(out);
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setError(errorText(e));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [source, dark]);
-
-  const copy = () => {
-    navigator.clipboard
-      .writeText(source)
-      .then(() => {
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1200);
-      })
-      .catch((e) => console.error("clipboard write failed:", e));
-  };
-
-  return (
-    <div className="artifact-view">
-      <div className="artifact-toolbar">
-        <span className="artifact-toolbar-title">mermaid</span>
-        <button type="button" onClick={copy}>
-          {copied ? "Copied" : "Copy source"}
-        </button>
-      </div>
-      {svg ? (
-        <div
-          className="artifact-diagram"
-          dangerouslySetInnerHTML={{ __html: svg }}
-        />
-      ) : error ? (
-        <div className="artifact-broken">
-          <pre className="artifact-source">{source}</pre>
-          <div className="artifact-error">{error}</div>
-        </div>
-      ) : (
-        <div className="artifact-pending">Rendering…</div>
-      )}
-    </div>
-  );
-}
-
-let mermaidCounter = 0;
-
-async function renderMermaid(source: string, dark: boolean): Promise<string> {
-  // A couple of megabytes; loaded on first use.
-  const mermaid = (await import("mermaid")).default;
-  mermaid.initialize({
-    startOnLoad: false,
-    theme: dark ? "dark" : "default",
-    securityLevel: "strict",
-    fontFamily: "ui-sans-serif, system-ui, sans-serif",
-  });
-  const id = `tethys-mermaid-${mermaidCounter++}`;
-  try {
-    const { svg } = await mermaid.render(id, source);
-    return svg;
-  } finally {
-    // On a parse error mermaid leaves its scratch element behind.
-    document.getElementById(`d${id}`)?.remove();
-  }
 }
 
 function PageView({
@@ -491,13 +406,4 @@ function PrView({
       <div ref={hostRef} className="pr-view-host" />
     </div>
   );
-}
-
-function errorText(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  return String(e);
-}
-
-function prefersDark(): boolean {
-  return window.matchMedia("(prefers-color-scheme: dark)").matches;
 }

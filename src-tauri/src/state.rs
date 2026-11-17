@@ -64,7 +64,7 @@ pub struct Workspace {
     #[serde(default)]
     pub progress: Option<Progress>,
     /// Oldest first.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::artifacts::known_only")]
     pub artifacts: Vec<Artifact>,
 }
 

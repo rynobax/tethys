@@ -7,7 +7,6 @@ use serde::Serialize;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::artifacts::{self, ArtifactStore};
 use crate::error::{AppError, AppResult};
 use crate::agent::Agent;
 use crate::paths::Paths;
@@ -86,24 +85,18 @@ pub struct SessionSupervisor {
     /// sweep.
     serving_agents: Mutex<HashSet<u32>>,
     turn: Arc<TurnTracker>,
-    artifacts: Arc<ArtifactStore>,
     store: Arc<Store>,
     events: Events,
 }
 
 impl SessionSupervisor {
-    pub fn new(
-        events: Events,
-        store: Arc<Store>,
-        artifacts: Arc<ArtifactStore>,
-    ) -> Self {
+    pub fn new(events: Events, store: Arc<Store>) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             budget_notices: Mutex::new(HashMap::new()),
             serving_agents: Mutex::new(HashSet::new()),
             turn: Arc::new(TurnTracker::new()),
-            artifacts,
             store,
             events,
         }
@@ -418,15 +411,10 @@ impl SessionSupervisor {
         match msg.event.as_str() {
             "session-start" => self.handle_session_start(msg).await,
             "user-submit" | "pre-tool" => self.handle_resume_working(msg).await,
-            "post-tool" => {
-                self.record_page_if_written(&msg).await;
-                self.record_review_if_started(&msg).await;
-                self.handle_resume_working(msg).await
-            }
-            // Registered to carry a budget notice back. It also fires for a
-            // tool the user interrupted, so it says nothing about turns. A
-            // sandboxed `open` of a page lands here rather than in post-tool.
-            "post-tool-failure" => self.record_page_if_written(&msg).await,
+            "post-tool" => self.handle_resume_working(msg).await,
+            // Registered only to carry a budget notice back. It also fires for
+            // a tool the user interrupted, so it says nothing about turns.
+            "post-tool-failure" => {}
             // `interrupt` is codex's escape.
             "stop" | "stop-failure" | "interrupt" => self.handle_stop(msg).await,
             "notify" => self.handle_notify(msg).await,
@@ -446,52 +434,6 @@ impl SessionSupervisor {
     async fn handle_stop(&self, msg: HookMessage) {
         self.set_turn_from_hook(&msg, SessionRuntimeState::Idle, None)
             .await;
-        let Some((ws_id, _)) = self.resolve_session(&msg).await else { return };
-        let Some(message) = msg.last_assistant_message.as_deref() else { return };
-        self.artifacts.record_diagrams(&ws_id, message).await;
-        let pages = artifacts::pages_mentioned(message, msg.cwd.as_deref());
-        if pages.is_empty() {
-            return;
-        }
-        let Some(root) = self.workspace_root(&ws_id).await else { return };
-        for path in pages {
-            self.artifacts.record_page(&ws_id, &root, &path).await;
-        }
-    }
-
-    async fn workspace_root(&self, ws_id: &str) -> Option<PathBuf> {
-        self.store
-            .read(|s| s.find_workspace(ws_id).and_then(|w| w.root_buf()))
-            .await
-    }
-
-    async fn record_page_if_written(&self, msg: &HookMessage) {
-        let call = artifacts::ToolCall {
-            tool_name: msg.tool_name.as_deref(),
-            file_path: msg.tool_file_path.as_deref(),
-            command: msg.tool_command.as_deref(),
-            cwd: msg.cwd.as_deref(),
-        };
-        let Some(path) = artifacts::page_written(&call) else { return };
-        let Some((ws_id, _)) = self.resolve_session(msg).await else { return };
-        let Some(root) = self.workspace_root(&ws_id).await else { return };
-        self.artifacts.record_page(&ws_id, &root, &path).await;
-    }
-
-    async fn record_review_if_started(&self, msg: &HookMessage) {
-        let reviews = msg
-            .tool_stdout
-            .as_deref()
-            .map(artifacts::reviews_started)
-            .unwrap_or_default();
-        if reviews.is_empty() {
-            return;
-        }
-        let Some((ws_id, _)) = self.resolve_session(msg).await else { return };
-        let Some(root) = self.workspace_root(&ws_id).await else { return };
-        for review in reviews {
-            self.artifacts.record_review(&ws_id, &root, review).await;
-        }
     }
 
     async fn handle_notify(&self, msg: HookMessage) {

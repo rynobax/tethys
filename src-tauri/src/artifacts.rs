@@ -1,25 +1,22 @@
-//! Things a session produced that Tethys can show: mermaid **Diagrams** from
-//! the `Stop` hook's reply, HTML **Pages** from `PostToolUse`, and ummon
-//! **Reviews** from the output of a Bash call that ran `ummon`.
+//! Things a session attached through `mcp__tethys__attach_artifact` for Tethys
+//! to show: HTML **Pages** inside the workspace, and ummon **Reviews**.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use serde::{Deserialize, Deserializer, Serialize};
+use tracing::warn;
 
+use crate::error::{AppError, AppResult};
 use crate::state::WorkspaceId;
 use crate::store::Store;
 use crate::ui_socket::Events;
 
 const CAP_PER_WORKSPACE: usize = 12;
 
-const LABEL_MAX_CHARS: usize = 18;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ArtifactKind {
-    Diagram { source: String },
     Page { path: PathBuf },
     Review { url: String },
 }
@@ -30,11 +27,11 @@ pub struct Artifact {
     pub label: String,
     #[serde(flatten)]
     pub kind: ArtifactKind,
-    /// Lets the UI reload a re-seen artifact in place.
+    /// Lets the UI reload a re-attached artifact in place.
     pub revision: u32,
 }
 
-/// `artifact_id` is `None` when one was dismissed.
+/// `artifact_id` is `None` when one was removed.
 #[derive(Debug, Clone, Serialize)]
 pub struct ArtifactChanged {
     pub workspace_id: WorkspaceId,
@@ -58,80 +55,62 @@ impl ArtifactStore {
             .unwrap_or_default()
     }
 
-    pub async fn record_diagrams(&self, workspace_id: &str, message: &str) {
-        let diagrams = extract_diagrams(message);
-        if diagrams.is_empty() {
-            debug!(workspace_id, "Stop with no mermaid fences");
-            return;
-        }
-        for (label, source) in diagrams {
-            self.record(workspace_id, label, ArtifactKind::Diagram { source })
-                .await;
-        }
-    }
-
-    pub async fn record_page(&self, workspace_id: &str, workspace_root: &Path, path: &Path) {
-        if !crate::reconcile::is_under(workspace_root, path) {
-            debug!(
-                workspace_id,
-                path = %path.display(),
-                "ignoring HTML written outside the workspace"
-            );
-            return;
-        }
-        // So an `open ./x.html` and a `Write /abs/x.html` are one page.
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let label = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "page".to_string());
-        self.record(workspace_id, label, ArtifactKind::Page { path })
-            .await;
-    }
-
-    pub async fn record_review(&self, workspace_id: &str, workspace_root: &Path, review: Review) {
-        if !crate::reconcile::is_under(workspace_root, &review.repo) {
-            debug!(
-                workspace_id,
-                repo = %review.repo.display(),
-                "ignoring an ummon review outside the workspace"
-            );
-            return;
-        }
-        let label = review
-            .repo
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "review".to_string());
-        self.record(workspace_id, label, ArtifactKind::Review { url: review.url })
-            .await;
-    }
-
-    pub async fn dismiss(&self, workspace_id: &str, artifact_id: &str) {
-        let result = self
-            .store
-            .update_workspace_quiet(workspace_id, |ws| {
-                ws.artifacts.retain(|a| a.id != artifact_id);
-                Ok(())
-            })
-            .await;
-        match result {
-            Ok(()) => self.emit(workspace_id, None),
-            Err(e) => warn!(workspace_id, error = %e, "dismissing artifact"),
-        }
-    }
-
-    async fn record(&self, workspace_id: &str, label: String, kind: ArtifactKind) {
-        let result = self
+    /// Attaching what's already attached bumps it to newest and reloads it.
+    pub async fn attach(&self, workspace_id: &str, target: &str) -> AppResult<Artifact> {
+        let root = self.root(workspace_id).await?;
+        let (label, kind) = attachable(target, &root).map_err(AppError::Other)?;
+        let artifact = self
             .store
             .update_workspace_quiet(workspace_id, |ws| {
                 Ok(upsert(&mut ws.artifacts, label, kind))
             })
-            .await;
-        match result {
-            Ok(id) => self.emit(workspace_id, Some(id)),
-            Err(e) => warn!(workspace_id, error = %e, "recording artifact"),
+            .await?;
+        self.emit(workspace_id, Some(artifact.id.clone()));
+        Ok(artifact)
+    }
+
+    pub async fn detach(&self, workspace_id: &str, target: &str) -> AppResult<()> {
+        let root = self.root(workspace_id).await?;
+        let kind = resolve(target, &root);
+        let removed = self
+            .remove(workspace_id, |a| a.kind == kind)
+            .await?;
+        if !removed {
+            return Err(AppError::Other(format!("nothing is attached as {target}")));
         }
+        Ok(())
+    }
+
+    pub async fn dismiss(&self, workspace_id: &str, artifact_id: &str) {
+        if let Err(e) = self.remove(workspace_id, |a| a.id == artifact_id).await {
+            warn!(workspace_id, error = %e, "dismissing artifact");
+        }
+    }
+
+    async fn remove(
+        &self,
+        workspace_id: &str,
+        matches: impl Fn(&Artifact) -> bool,
+    ) -> AppResult<bool> {
+        let removed = self
+            .store
+            .update_workspace_quiet(workspace_id, |ws| {
+                let before = ws.artifacts.len();
+                ws.artifacts.retain(|a| !matches(a));
+                Ok(ws.artifacts.len() != before)
+            })
+            .await?;
+        if removed {
+            self.emit(workspace_id, None);
+        }
+        Ok(removed)
+    }
+
+    async fn root(&self, workspace_id: &str) -> AppResult<PathBuf> {
+        self.store
+            .with_workspace(workspace_id, |ws| ws.root_buf())
+            .await?
+            .ok_or_else(|| AppError::Other("this workspace has no worktrees yet".into()))
     }
 
     fn emit(&self, workspace_id: &str, artifact_id: Option<String>) {
@@ -145,17 +124,72 @@ impl ArtifactStore {
     }
 }
 
+/// A URL is a Review and anything else a Page, its path taken from the
+/// workspace root when relative.
+fn resolve(target: &str, root: &Path) -> ArtifactKind {
+    let target = target.trim();
+    if target.starts_with("http://") || target.starts_with("https://") {
+        return ArtifactKind::Review {
+            url: target.to_string(),
+        };
+    }
+    let path = root.join(target);
+    // So `./x.html` and `/abs/x.html` are one page.
+    let path = path.canonicalize().unwrap_or(path);
+    ArtifactKind::Page { path }
+}
+
+/// Pages load through `tethys-file:`, which serves only files under the
+/// workspace, and a Review's iframe is unsandboxed, so it must be local.
+fn attachable(target: &str, root: &Path) -> Result<(String, ArtifactKind), String> {
+    let kind = resolve(target, root);
+    let label = match &kind {
+        ArtifactKind::Review { url } if !is_local(url) => {
+            return Err(format!("{url} isn't a localhost URL"));
+        }
+        ArtifactKind::Review { .. } => "review".to_string(),
+        ArtifactKind::Page { path } if !path.is_file() => {
+            return Err(format!("there's no file at {}", path.display()));
+        }
+        ArtifactKind::Page { path } if !crate::reconcile::is_under(root, path) => {
+            return Err(format!("{} is outside this workspace", path.display()));
+        }
+        ArtifactKind::Page { path } => path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "page".to_string()),
+    };
+    Ok((label, kind))
+}
+
+fn is_local(url: &str) -> bool {
+    ["http://localhost", "http://127.0.0.1"].iter().any(|host| {
+        url.strip_prefix(host)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with([':', '/']))
+    })
+}
+
+/// For `Workspace::artifacts`: an artifact of a kind since retired (diagrams)
+/// is dropped rather than failing the whole of `state.json`.
+pub fn known_only<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Artifact>, D::Error> {
+    let raw = Vec::<serde_json::Value>::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect())
+}
+
 pub fn prune_missing_pages(artifacts: &mut Vec<Artifact>) -> usize {
     let before = artifacts.len();
     artifacts.retain(|a| match &a.kind {
         ArtifactKind::Page { path } => path.exists(),
-        ArtifactKind::Diagram { .. } | ArtifactKind::Review { .. } => true,
+        ArtifactKind::Review { .. } => true,
     });
     before - artifacts.len()
 }
 
-/// Same page path or diagram source bumps the existing artifact to newest.
-fn upsert(list: &mut Vec<Artifact>, label: String, kind: ArtifactKind) -> String {
+/// Same page path or URL bumps the existing artifact to newest.
+fn upsert(list: &mut Vec<Artifact>, label: String, kind: ArtifactKind) -> Artifact {
     let existing = list.iter().position(|a| a.kind == kind);
     let artifact = match existing {
         Some(i) => {
@@ -170,388 +204,32 @@ fn upsert(list: &mut Vec<Artifact>, label: String, kind: ArtifactKind) -> String
             revision: 0,
         },
     };
-    let id = artifact.id.clone();
-    list.push(artifact);
+    list.push(artifact.clone());
     if list.len() > CAP_PER_WORKSPACE {
         let excess = list.len() - CAP_PER_WORKSPACE;
         list.drain(..excess);
     }
-    id
-}
-
-pub struct ToolCall<'a> {
-    pub tool_name: Option<&'a str>,
-    pub file_path: Option<&'a str>,
-    pub command: Option<&'a str>,
-    pub cwd: Option<&'a str>,
-}
-
-/// The Bash `open` route catches pages however they were written (e.g. a
-/// heredoc) — `/show-me` ends every page with one. `apply_patch` is codex's.
-pub fn page_written(call: &ToolCall<'_>) -> Option<PathBuf> {
-    match call.tool_name? {
-        "Write" | "Edit" | "MultiEdit" | "apply_patch" => {
-            html_path(PathBuf::from(call.file_path?))
-        }
-        "Bash" => {
-            let opened = opened_paths(call.command?).into_iter().find_map(html_path)?;
-            Some(match call.cwd {
-                Some(cwd) if opened.is_relative() => Path::new(cwd).join(opened),
-                _ => opened,
-            })
-        }
-        _ => None,
-    }
-}
-
-pub struct Review {
-    pub repo: PathBuf,
-    pub url: String,
-}
-
-/// ummon prints `ummon is reviewing <repo> at <url>` once it has registered a
-/// workspace. One command can register several repos, so every line counts.
-pub fn reviews_started(stdout: &str) -> Vec<Review> {
-    let mut out: Vec<Review> = Vec::new();
-    for line in stdout.lines() {
-        let Some(rest) = line.trim().strip_prefix("ummon is reviewing ") else {
-            continue;
-        };
-        let Some((repo, url)) = rest.rsplit_once(" at ") else {
-            continue;
-        };
-        let url = url.trim();
-        let local = url.starts_with("http://localhost:") || url.starts_with("http://127.0.0.1:");
-        if local && !out.iter().any(|r| r.url == url) {
-            out.push(Review {
-                repo: PathBuf::from(repo),
-                url: url.to_string(),
-            });
-        }
-    }
-    out
-}
-
-/// A sandboxed session can't `open` a page itself, so it asks Ryan to, in
-/// prose: "To view the page: ! open /abs/page.html." Those are pages too.
-pub fn pages_mentioned(message: &str, cwd: Option<&str>) -> Vec<PathBuf> {
-    const OPENING: &[char] = &['`', '\'', '"', '(', '['];
-    const CLOSING: &[char] = &['`', '\'', '"', ')', ']', '.', ',', ';', ':', '?', '!'];
-    let unwrap = |w: &str| w.trim_start_matches(OPENING).trim_end_matches(CLOSING).to_string();
-    let words: Vec<&str> = message.split_whitespace().collect();
-    words
-        .windows(2)
-        .filter(|w| unwrap(w[0]) == "open")
-        .filter_map(|w| html_path(PathBuf::from(unwrap(w[1]))))
-        .map(|path| match cwd {
-            Some(cwd) if path.is_relative() => Path::new(cwd).join(path),
-            _ => path,
-        })
-        .collect()
-}
-
-fn html_path(path: PathBuf) -> Option<PathBuf> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    (ext == "html" || ext == "htm").then_some(path)
-}
-
-/// Quotes are honoured; no expansion or substitution.
-fn opened_paths(command: &str) -> Vec<PathBuf> {
-    command
-        .split(['\n', ';', '|', '&'])
-        .filter_map(|segment| {
-            let mut words = shell_words(segment).into_iter();
-            (words.next().as_deref() == Some("open")).then(|| {
-                words
-                    .filter(|w| !w.starts_with('-'))
-                    .map(PathBuf::from)
-                    .collect::<Vec<_>>()
-            })
-        })
-        .flatten()
-        .collect()
-}
-
-fn shell_words(s: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut cur = String::new();
-    let mut quote: Option<char> = None;
-    for c in s.chars() {
-        match (quote, c) {
-            (Some(q), c) if c == q => quote = None,
-            (Some(_), c) => cur.push(c),
-            (None, '\'' | '"') => quote = Some(c),
-            (None, c) if c.is_whitespace() => {
-                if !cur.is_empty() {
-                    words.push(std::mem::take(&mut cur));
-                }
-            }
-            (None, c) => cur.push(c),
-        }
-    }
-    if !cur.is_empty() {
-        words.push(cur);
-    }
-    words
-}
-
-/// `(label, source)` for every mermaid fence.
-fn extract_diagrams(message: &str) -> Vec<(String, String)> {
-    let lines: Vec<&str> = message.lines().collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let Some(fence) = open_fence(lines[i]) else {
-            i += 1;
-            continue;
-        };
-        let start = i + 1;
-        let mut end = start;
-        while end < lines.len() && !closes_fence(lines[end], fence) {
-            end += 1;
-        }
-        let body = &lines[start..end.min(lines.len())];
-        let source = dedent(body);
-        if !source.trim().is_empty() {
-            let label = diagram_label(&source, &lines[..i]);
-            out.push((label, source));
-        }
-        i = end + 1;
-    }
-    out
-}
-
-/// Returns the fence run so the close can match it.
-fn open_fence(line: &str) -> Option<&str> {
-    let trimmed = line.trim_start();
-    let marker = if trimmed.starts_with("```") {
-        '`'
-    } else if trimmed.starts_with("~~~") {
-        '~'
-    } else {
-        return None;
-    };
-    let run = trimmed.chars().take_while(|&c| c == marker).count();
-    let info = trimmed[run..].trim();
-    let first_word = info.split_whitespace().next()?;
-    first_word
-        .eq_ignore_ascii_case("mermaid")
-        .then_some(&trimmed[..run])
-}
-
-fn closes_fence(line: &str, fence: &str) -> bool {
-    let trimmed = line.trim();
-    let marker = fence.chars().next().unwrap_or('`');
-    trimmed.len() >= fence.len() && trimmed.chars().all(|c| c == marker)
-}
-
-fn dedent(lines: &[&str]) -> String {
-    let indent = lines
-        .iter()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
-        .min()
-        .unwrap_or(0);
-    lines
-        .iter()
-        .map(|l| if l.trim().is_empty() { "" } else { &l[indent..] })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn diagram_label(source: &str, preceding: &[&str]) -> String {
-    let label = title_directive(source)
-        .or_else(|| lead_in(preceding))
-        .or_else(|| diagram_keyword(source))
-        .unwrap_or_else(|| "diagram".to_string());
-    truncate(&label, LABEL_MAX_CHARS)
-}
-
-/// `title: X` (frontmatter) or `title X` (gantt, pie, …).
-fn title_directive(source: &str) -> Option<String> {
-    source.lines().find_map(|l| {
-        let rest = l.trim().strip_prefix("title")?;
-        let rest = rest.strip_prefix(':').unwrap_or(rest);
-        let title = rest.trim();
-        (!title.is_empty() && rest.starts_with(|c: char| c.is_whitespace()))
-            .then(|| title.to_string())
-    })
-}
-
-fn lead_in(preceding: &[&str]) -> Option<String> {
-    let line = preceding.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty())?;
-    if let Some(heading) = line.trim_start_matches('#').strip_prefix(' ') {
-        if line.starts_with('#') {
-            return Some(strip_punct(heading));
-        }
-    }
-    if let Some(rest) = line.strip_prefix("**") {
-        if let Some(end) = rest.find("**") {
-            return Some(strip_punct(&rest[..end]));
-        }
-    }
-    (line.chars().count() <= 40).then(|| strip_punct(line))
-}
-
-fn strip_punct(s: &str) -> String {
-    s.trim()
-        .trim_end_matches(['.', ':', '—', '-'])
-        .trim()
-        .to_string()
-}
-
-fn diagram_keyword(source: &str) -> Option<String> {
-    let mut in_frontmatter = false;
-    for line in source.lines() {
-        let t = line.trim();
-        if t == "---" {
-            in_frontmatter = !in_frontmatter;
-            continue;
-        }
-        if in_frontmatter || t.is_empty() || t.starts_with("%%") {
-            continue;
-        }
-        return t.split_whitespace().next().map(|w| w.to_string());
-    }
-    None
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max - 1).collect();
-    out.push('…');
-    out
+    artifact
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_page_the_agent_asks_ryan_to_open_is_found() {
-        let msg = "**To view the page:** `! open /w/x/settings-after.html`. The sandbox stops me.\n\
-                   Or open ./b.htm, but not open the door or the src/index.html I edited.";
-        assert_eq!(
-            pages_mentioned(msg, Some("/w/x")),
-            vec![
-                PathBuf::from("/w/x/settings-after.html"),
-                PathBuf::from("/w/x/./b.htm"),
-            ]
-        );
-        assert_eq!(
-            pages_mentioned("! open /w/x/a.html.", None),
-            vec![PathBuf::from("/w/x/a.html")]
-        );
+    fn page(path: &str) -> ArtifactKind {
+        ArtifactKind::Page { path: path.into() }
     }
 
     #[test]
-    fn a_review_is_read_off_ummons_output() {
-        let out = "Restacked x.\nummon is reviewing /w/a b/repo at http://localhost:7337/w/abc123\nQuestions ...\n";
-        let reviews = reviews_started(out);
-        assert_eq!(reviews.len(), 1);
-        assert_eq!(reviews[0].repo, PathBuf::from("/w/a b/repo"));
-        assert_eq!(reviews[0].url, "http://localhost:7337/w/abc123");
-    }
-
-    #[test]
-    fn one_command_registering_two_repos_starts_two_reviews() {
-        let out = "ummon is reviewing /w/nl-frontend at http://localhost:7337/w/b47d\n\
-                   ummon is reviewing /w/nl-backend at http://localhost:7337/w/b519\n\
-                   ummon is reviewing /w/nl-backend at http://localhost:7337/w/b519\n";
-        let repos: Vec<PathBuf> = reviews_started(out).into_iter().map(|r| r.repo).collect();
-        assert_eq!(
-            repos,
-            vec![PathBuf::from("/w/nl-frontend"), PathBuf::from("/w/nl-backend")]
-        );
-    }
-
-    #[test]
-    fn only_a_local_url_is_a_review() {
-        assert!(reviews_started("ummon is reviewing /r at https://evil.example/w/1").is_empty());
-        assert!(reviews_started("nothing to see").is_empty());
-    }
-
-    const SCREENSHOT: &str = r#"**Today.** Every clip is its own round trip to the original recording.
-
-```mermaid
-flowchart LR
-    A[audio.raw] --> B[prod_ingest]
-```
-
-The bottleneck is the red box.
-
-**Proposed.** Build the parquet with `--inline-audio`.
-
-```mermaid
-flowchart LR
-    A[audio.raw] --> F[parquet]
-```
-"#;
-
-    #[test]
-    fn extracts_every_fence_with_the_bold_lead_in_as_label() {
-        let got = extract_diagrams(SCREENSHOT);
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].0, "Today");
-        assert!(got[0].1.starts_with("flowchart LR\n"));
-        assert_eq!(got[1].0, "Proposed");
-    }
-
-    #[test]
-    fn ignores_other_fences_and_matches_the_fence_style() {
-        let msg = "```rust\nfn x() {}\n```\n~~~mermaid\npie\n  \"a\" : 1\n~~~\n```\nplain\n```";
-        let got = extract_diagrams(msg);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].1, "pie\n  \"a\" : 1");
-    }
-
-    #[test]
-    fn dedents_a_fence_inside_a_list_item() {
-        let msg = "- item\n\n  ```mermaid\n  graph TD\n    A --> B\n  ```\n";
-        let got = extract_diagrams(msg);
-        assert_eq!(got[0].1, "graph TD\n  A --> B");
-    }
-
-    #[test]
-    fn an_unterminated_fence_runs_to_the_end() {
-        let msg = "```mermaid\nflowchart TD\n  A --> B";
-        let got = extract_diagrams(msg);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].1, "flowchart TD\n  A --> B");
-    }
-
-    #[test]
-    fn label_prefers_title_then_heading_then_keyword() {
-        let titled = "---\ntitle: Loader path\n---\nflowchart LR\n A-->B";
-        assert_eq!(diagram_label(titled, &["**Today.**"]), "Loader path");
-        let gantt = "gantt\n    title Release plan\n    section A";
-        assert_eq!(diagram_label(gantt, &[]), "Release plan");
-        assert_eq!(
-            diagram_label("flowchart LR\n A-->B", &["## Data flow", ""]),
-            "Data flow"
-        );
-        assert_eq!(
-            diagram_label("sequenceDiagram\n A->>B: hi", &["Some long paragraph of prose that is far too long to be a title for anything."]),
-            "sequenceDiagram"
-        );
-        assert_eq!(
-            diagram_label("flowchart LR\n A-->B", &["A ridiculously long heading line"]),
-            "A ridiculously lo…"
-        );
-    }
-
-    #[test]
-    fn same_diagram_bumps_instead_of_duplicating_and_moves_to_newest() {
+    fn the_same_page_bumps_instead_of_duplicating_and_moves_to_newest() {
         let mut list = Vec::new();
-        let a = upsert(&mut list, "a".into(), ArtifactKind::Diagram { source: "A".into() });
-        let b = upsert(&mut list, "b".into(), ArtifactKind::Diagram { source: "B".into() });
-        let again = upsert(&mut list, "a2".into(), ArtifactKind::Diagram { source: "A".into() });
-        assert_eq!(a, again);
-        assert_ne!(a, b);
+        let a = upsert(&mut list, "a".into(), page("/w/a.html"));
+        let b = upsert(&mut list, "b".into(), page("/w/b.html"));
+        let again = upsert(&mut list, "a2".into(), page("/w/a.html"));
+        assert_eq!(a.id, again.id);
+        assert_ne!(a.id, b.id);
         assert_eq!(list.len(), 2);
-        assert_eq!(list[1].id, a);
+        assert_eq!(list[1].id, a.id);
         assert_eq!(list[1].revision, 1);
         assert_eq!(list[1].label, "a", "a bump keeps the original label");
     }
@@ -560,67 +238,74 @@ flowchart LR
     fn cap_evicts_the_oldest() {
         let mut list = Vec::new();
         for i in 0..(CAP_PER_WORKSPACE + 3) {
-            upsert(&mut list, i.to_string(), ArtifactKind::Diagram { source: i.to_string() });
+            upsert(&mut list, i.to_string(), page(&format!("/w/{i}.html")));
         }
         assert_eq!(list.len(), CAP_PER_WORKSPACE);
         assert_eq!(list[0].label, "3");
     }
 
-    fn call<'a>(
-        tool_name: &'a str,
-        file_path: Option<&'a str>,
-        command: Option<&'a str>,
-    ) -> ToolCall<'a> {
-        ToolCall {
-            tool_name: Some(tool_name),
-            file_path,
-            command,
-            cwd: Some("/w/repo"),
-        }
-    }
-
     #[test]
-    fn boot_prune_drops_pages_whose_file_is_gone_and_keeps_diagrams() {
+    fn boot_prune_drops_pages_whose_file_is_gone_and_keeps_reviews() {
         let dir = tempfile::tempdir().unwrap();
         let present = dir.path().join("here.html");
         std::fs::write(&present, "<p/>").unwrap();
         let mut list = Vec::new();
-        upsert(&mut list, "d".into(), ArtifactKind::Diagram { source: "graph TD".into() });
+        let review = ArtifactKind::Review {
+            url: "http://localhost:7337/w/1".into(),
+        };
+        upsert(&mut list, "r".into(), review);
         upsert(&mut list, "here".into(), ArtifactKind::Page { path: present });
         upsert(&mut list, "gone".into(), ArtifactKind::Page { path: dir.path().join("gone.html") });
         assert_eq!(prune_missing_pages(&mut list), 1);
-        assert_eq!(list.iter().map(|a| a.label.as_str()).collect::<Vec<_>>(), ["d", "here"]);
+        assert_eq!(list.iter().map(|a| a.label.as_str()).collect::<Vec<_>>(), ["r", "here"]);
     }
 
     #[test]
-    fn file_tools_count_only_for_html() {
-        assert_eq!(
-            page_written(&call("Write", Some("/w/show-me-x.html"), None)),
-            Some(PathBuf::from("/w/show-me-x.html"))
-        );
-        assert!(page_written(&call("Edit", Some("/w/a.HTM"), None)).is_some());
-        assert!(page_written(&call("Write", Some("/w/a.md"), None)).is_none());
-        assert!(page_written(&call("Write", None, None)).is_none());
-        assert!(page_written(&call("Read", Some("/w/a.html"), None)).is_none());
+    fn a_page_is_attachable_only_if_it_exists_inside_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(root.join("repo")).unwrap();
+        std::fs::write(root.join("repo/x.html"), "<p/>").unwrap();
+        std::fs::write(dir.path().join("outside.html"), "<p/>").unwrap();
+
+        let (label, kind) = attachable("repo/x.html", &root).unwrap();
+        assert_eq!(label, "x.html");
+        let abs = root.join("repo/x.html");
+        assert_eq!(attachable(abs.to_str().unwrap(), &root).unwrap().1, kind);
+
+        assert!(attachable("repo/missing.html", &root).is_err());
+        assert!(attachable("../outside.html", &root).is_err());
     }
 
     #[test]
-    fn bash_open_of_an_html_file_counts_and_resolves_against_cwd() {
-        let heredoc_then_open = "mkdir -p ./tmp && cat > ./tmp/x.html <<'HTML'\n<p>hi</p>\nHTML\nopen ./tmp/x.html";
+    fn only_a_localhost_url_is_attachable() {
+        let root = Path::new("/w");
+        let (label, kind) = attachable("http://localhost:7337/w/abc", root).unwrap();
+        assert_eq!(label, "review");
         assert_eq!(
-            page_written(&call("Bash", None, Some(heredoc_then_open))),
-            Some(PathBuf::from("/w/repo/./tmp/x.html"))
+            kind,
+            ArtifactKind::Review {
+                url: "http://localhost:7337/w/abc".into()
+            }
         );
-        assert_eq!(
-            page_written(&call("Bash", None, Some("open -a \"Google Chrome\" /abs/p.html"))),
-            Some(PathBuf::from("/abs/p.html"))
-        );
-        assert_eq!(
-            page_written(&call("Bash", None, Some("open 'my page.html'"))),
-            Some(PathBuf::from("/w/repo/my page.html"))
-        );
-        assert!(page_written(&call("Bash", None, Some("open https://example.com"))).is_none());
-        assert!(page_written(&call("Bash", None, Some("cat > a.html <<EOF\nx\nEOF"))).is_none());
-        assert!(page_written(&call("Bash", None, Some("echo open a.html"))).is_none());
+        assert!(attachable("http://127.0.0.1:7337/w/abc", root).is_ok());
+        assert!(attachable("https://evil.example/w/1", root).is_err());
+        assert!(attachable("http://localhost.evil.example/", root).is_err());
+    }
+
+    #[test]
+    fn a_stored_diagram_is_dropped_on_load() {
+        #[derive(Deserialize)]
+        struct Holder {
+            #[serde(deserialize_with = "known_only")]
+            artifacts: Vec<Artifact>,
+        }
+        let raw = r#"{"artifacts": [
+            {"id": "1", "label": "d", "kind": "diagram", "source": "graph TD", "revision": 0},
+            {"id": "2", "label": "p", "kind": "page", "path": "/w/p.html", "revision": 3}
+        ]}"#;
+        let held: Holder = serde_json::from_str(raw).unwrap();
+        assert_eq!(held.artifacts.len(), 1);
+        assert_eq!(held.artifacts[0].id, "2");
     }
 }
