@@ -8,6 +8,7 @@ import { startDaemon } from "./daemon";
 import { openExternal } from "./open-external";
 import { registerPageScheme, servePages } from "./pages";
 import { policePrViews, watchPrWrites } from "./pr-view";
+import { savedZoomFactor, zoomMenuItems } from "./zoom";
 
 // A test run's data dir holds Electron's profile too, so it never shares the
 // single-instance lock or the GitHub login with real use.
@@ -116,6 +117,7 @@ function createWindow(): BrowserWindow {
       sandbox: false,
       nodeIntegration: false,
       webviewTag: true,
+      zoomFactor: savedZoomFactor(),
       additionalArguments: [`--tethys-socket=${socketPath()}`],
     },
   });
@@ -186,9 +188,7 @@ function installMenu(
           { role: "forceReload" },
           { role: "toggleDevTools" },
           { type: "separator" },
-          { role: "resetZoom" },
-          { role: "zoomIn" },
-          { role: "zoomOut" },
+          ...zoomMenuItems(win.webContents),
           { type: "separator" },
           { role: "togglefullscreen" },
           { type: "separator" },

@@ -430,25 +430,33 @@ function LabelProjector({
   stage: Stage | null;
 }) {
   const v = useMemo(() => new THREE.Vector3(), []);
-  // Each tag's width, kept by an observer rather than read every frame.
-  const widths = useMemo(() => new WeakMap<Element, number>(), []);
+  // Each tag's size, kept by an observer rather than read every frame.
+  const sizes = useMemo(
+    () => new WeakMap<Element, { width: number; height: number }>(),
+    [],
+  );
   const observer = useMemo(
     () =>
       new ResizeObserver((entries) => {
         for (const e of entries) {
-          widths.set(e.target, e.borderBoxSize[0]?.inlineSize ?? 0);
+          const box = e.borderBoxSize[0];
+          sizes.set(e.target, {
+            width: box?.inlineSize ?? 0,
+            height: box?.blockSize ?? 0,
+          });
         }
       }),
-    [widths],
+    [sizes],
   );
   useEffect(() => () => observer.disconnect(), [observer]);
-  const widthOf = (node: Element | null) => {
-    if (!node) return 0;
-    if (!widths.has(node)) {
-      widths.set(node, (node as HTMLElement).offsetWidth);
+  const sizeOf = (node: Element | null) => {
+    if (!node) return { width: 0, height: 0 };
+    if (!sizes.has(node)) {
+      const el = node as HTMLElement;
+      sizes.set(node, { width: el.offsetWidth, height: el.offsetHeight });
       observer.observe(node);
     }
-    return widths.get(node)!;
+    return sizes.get(node)!;
   };
   useFrame(({ camera, size }) => {
     const toPx = (x: number) => size.width / 2 + x * PIXELS_PER_UNIT;
@@ -490,11 +498,16 @@ function LabelProjector({
           : Math.max(x, toPx(stage.panel.xMax) + half);
       };
       const tag = Math.max(
-        widthOf(el.querySelector(".fun-pill")),
-        widthOf(el.querySelector(".fun-note")),
+        sizeOf(el.querySelector(".fun-pill")).width,
+        sizeOf(el.querySelector(".fun-note")).width,
       );
       x = clamp(x, tag);
-      el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`;
+      // Its top left on a whole device pixel: a tag between pixels is drawn
+      // blurred, which shows on a screen that isn't Retina.
+      const box = sizeOf(el);
+      const dpr = window.devicePixelRatio;
+      const snap = (px: number) => (Math.round(px * dpr) / dpr).toFixed(2);
+      el.style.transform = `translate(${snap(x - box.width / 2)}px, ${snap(y - box.height)}px)`;
       el.style.opacity = String(a.portalScale);
       // Indoors, its tag goes in with it.
       el.style.visibility = a.portalScale < 0.02 ? "hidden" : "";

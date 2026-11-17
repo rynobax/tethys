@@ -32,8 +32,9 @@ html,
 
 :root:has(.titlebar) {
   /* The native title bar's height on macOS 26, measured, which the hidden
-     style still centres the traffic lights in. */
-  --titlebar-h: 32px;
+     style still centres the traffic lights in, whatever the page's zoom
+     (`--zoom`, set by the preload). */
+  --titlebar-h: calc(32px / var(--zoom, 1));
 }
 
 :root.full-screen {
@@ -50,7 +51,7 @@ html,
   display: flex;
   align-items: center;
   /* Clear of the traffic lights, where macOS 26 starts a window's title. */
-  padding-left: 76px;
+  padding-left: calc(76px / var(--zoom, 1));
   overflow: hidden;
   background: var(--bg);
   color: var(--muted);

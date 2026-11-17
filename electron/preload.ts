@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, webUtils } from "electron";
+import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
 
 import type { TethysBridge } from "../src/ipc/bridge";
 import { DaemonClient } from "./client";
@@ -37,6 +37,16 @@ window.addEventListener("pagehide", () => client.close());
 ipcRenderer.on("full-screen", (_event, on: boolean) => {
   document.documentElement.classList.toggle("full-screen", on);
 });
+
+// The page's zoom, for what must stay the native size whatever it is: the
+// strip under the traffic lights. A zoom resizes the viewport.
+const markZoom = () =>
+  document.documentElement.style.setProperty(
+    "--zoom",
+    String(webFrame.getZoomFactor()),
+  );
+window.addEventListener("DOMContentLoaded", markZoom);
+window.addEventListener("resize", markZoom);
 
 const bridge: TethysBridge = {
   invoke: (cmd, args) => client.invoke(cmd, args),
