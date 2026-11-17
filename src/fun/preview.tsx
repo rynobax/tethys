@@ -87,6 +87,7 @@ const SAMPLES: Sample[] = [
     mood: "needs_you",
     folder: "meta",
   },
+  { id: "s", branch: "metadata-backfill", mood: "needs_you", folder: "meta" },
   { id: "l", branch: "acr-score-form-insert-via-intent", mood: "needs_you" },
   {
     id: "m",

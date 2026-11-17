@@ -18,7 +18,7 @@ Hovering a parent, or its tag, rings it and everyone it handed work to, down the
 
 ## Folders
 
-Each folder is a house front down the left meadow's outer edge, its name on a sign over the door, in the sidebar's order and as many as fit. A house is the folder's collapsed state, shared with the sidebar: shut, its folk walk home and go in, and the windows light up, with a "!" beside it while anyone inside needs you; open, they come out the door and go wherever they belong. Clicking the house opens or shuts the folder. The selected workspace stays out whatever its folder.
+Each folder is a house front down the left meadow's outer edge, its name on a sign over the door, in the sidebar's order and as many as fit. A house is the folder's collapsed state, shared with the sidebar: shut, its folk walk home and go in, and the windows light up, except anyone who needs you, who waits out front where you can see it; open, they come out the door and go wherever they belong. Clicking the house opens or shuts the folder. The selected workspace stays out whatever its folder.
 
 ## Iterating
 

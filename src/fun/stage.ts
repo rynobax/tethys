@@ -196,7 +196,17 @@ function houses(
     z <= region.zMax && out.length < wanted;
     z += HOUSE_STEP
   ) {
-    out.push({ front: { x, z }, door: { x, z: z + 0.3 } });
+    out.push({
+      front: { x, z },
+      door: { x, z: z + 0.3 },
+      // Beside it towards the panel, level with its door and then up, clear
+      // of the first one's tag. In front, a tag would cover its sign or the
+      // roof of the house below; further along, the tags of those waiting.
+      doorstep: [
+        { x: x + 2, z: z + 0.4 },
+        { x: x + 2, z: z - 1.8 },
+      ],
+    });
   }
   return out;
 }

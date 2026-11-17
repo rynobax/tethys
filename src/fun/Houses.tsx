@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
 import type { Folder } from "../types";
@@ -91,32 +91,6 @@ function Sign({ name }: { name: string }) {
   );
 }
 
-/** Beside the house while someone inside needs you. */
-function Bubble() {
-  const texture = useMemo(
-    () =>
-      textTexture("!", 128, 128, (ctx) => {
-        ctx.fillStyle = "#ffcf3f";
-        ctx.beginPath();
-        ctx.arc(64, 64, 60, 0, Math.PI * 2);
-        ctx.fill();
-      }),
-    [],
-  );
-  useEffect(() => () => texture.dispose(), [texture]);
-  return (
-    <sprite scale={0.42}>
-      <spriteMaterial map={texture} toneMapped={false} />
-    </sprite>
-  );
-}
-
-/** Who's in, read off the sim: the lights go on, and a call goes up. */
-interface Inside {
-  anyone: boolean;
-  needsYou: boolean;
-}
-
 /**
  * A folder's house front: its name over the door, the door shut and the
  * windows lit while its folk are home, and open while they're out. Clicked,
@@ -135,30 +109,17 @@ function HouseFront({
   sim: Sim;
   onToggle: (folder: Folder) => void;
 }) {
-  const [inside, setInside] = useState<Inside>({
-    anyone: false,
-    needsYou: false,
-  });
-  const bubble = useRef<THREE.Group>(null);
+  // Who's in, read off the sim: the lights go on.
+  const [anyone, setAnyone] = useState(false);
   useFrame(() => {
-    const folk = sim.indoors(index);
-    const next = {
-      anyone: folk.length > 0,
-      needsYou: folk.some((r) => r.mood === "needs_you"),
-    };
-    if (next.anyone !== inside.anyone || next.needsYou !== inside.needsYou) {
-      setInside(next);
-    }
-    if (bubble.current) {
-      bubble.current.position.y =
-        HEIGHT - 0.1 + Math.sin(sim.time() * 3) * 0.05;
-    }
+    const now = sim.indoors(index).length > 0;
+    if (now !== anyone) setAnyone(now);
   });
   // Its own colours, kept whatever order the folders are in.
   const hue = hashString(folder.id);
   const wall = WALLS[hue % WALLS.length];
   const roof = ROOFS[(hue >>> 3) % ROOFS.length];
-  const glass = inside.anyone ? GLASS_LIT : GLASS_DARK;
+  const glass = anyone ? GLASS_LIT : GLASS_DARK;
   const open = !folder.collapsed;
   const roofShape = useMemo(
     () =>
@@ -224,11 +185,6 @@ function HouseFront({
         </group>
       ))}
       <Sign name={folder.name} />
-      {inside.needsYou && (
-        <group ref={bubble} position={[WIDTH / 2 + 0.3, HEIGHT - 0.1, 0]}>
-          <Bubble />
-        </group>
-      )}
     </group>
   );
 }

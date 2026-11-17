@@ -61,6 +61,8 @@ export interface House {
   front: Vec2;
   /** On the step, where its folk go in and come out. */
   door: Vec2;
+  /** Out in front, where its folk who need you wait rather than go in. */
+  doorstep: Vec2[];
 }
 
 /** Water off the window's edge, with a pier out into it and a boat at the end. */
@@ -720,7 +722,8 @@ export class Sim {
   /** Straight onto its home ground: no walking in on first sight. */
   private place(a: Agent, r: Resident) {
     if (r.home !== null && this.houseFor(r)) {
-      this.inside(a, r.home);
+      if (r.mood === "needs_you") this.outside(a, r);
+      else this.inside(a, r.home);
       a.placed = true;
       return;
     }
@@ -1131,16 +1134,18 @@ export class Sim {
 
   /**
    * Its folder shut: in at its house's door and out of sight, letting go of
-   * everything. Opened, out the door again and off to wherever it belongs.
-   * False when none of that is going on.
+   * everything, or out in front waving while it needs you. Opened, out the
+   * door again and off to wherever it belongs. False when none of that is
+   * going on.
    */
   private homeward(a: Agent, r: Resident): boolean {
     const house = this.houseFor(r);
+    const waits = r.mood === "needs_you";
     if (a.activity === "home_out") {
       if (this.now - a.since >= PORTAL_SECONDS) this.pause(a, 0.2, 0.6);
       return true;
     }
-    if (a.indoors !== null && (!house || r.home !== a.indoors)) {
+    if (a.indoors !== null && (!house || r.home !== a.indoors || waits)) {
       const door =
         this.layout?.houses[a.indoors]?.door ?? this.layout?.houses[0]?.door;
       a.indoors = null;
@@ -1161,10 +1166,13 @@ export class Sim {
     for (const book of this.books()) book.delete(a.id);
     // Its house only just up, as the folders load after a restart: it was
     // home all along, rather than off across the meadow.
-    if (
-      a.activity !== "home" &&
-      this.now - (this.housesBuilt[r.home!] ?? -Infinity) < HOUSE_SETTLE
-    ) {
+    const settling =
+      this.now - (this.housesBuilt[r.home!] ?? -Infinity) < HOUSE_SETTLE;
+    if (waits && settling && a.activity !== "attention") {
+      this.outside(a, r);
+      return true;
+    }
+    if (!waits && settling && a.activity !== "home") {
       this.inside(a, r.home!);
       return true;
     }
@@ -1172,6 +1180,11 @@ export class Sim {
     a.chore = null;
     a.carrying = null;
     a.spot = null;
+    if (waits) {
+      if (a.side !== "left") this.toPortal(a);
+      else this.head(a, this.doorstepSpot(a, r), "attention");
+      return true;
+    }
     if (a.activity === "home") return true;
     if (a.activity === "home_in") {
       if (this.now - a.since >= PORTAL_SECONDS) {
@@ -1201,6 +1214,33 @@ export class Sim {
     }
     this.walkTo(a, house.door, "home");
     return true;
+  }
+
+  /** Its place out in front of its house, in order among the others there
+   *  who need you; past the last, a little further out each time round. */
+  private doorstepSpot(a: Agent, r: Resident): Vec2 {
+    const steps = this.layout!.houses[r.home!].doorstep;
+    const waiting = [...this.agents.keys()]
+      .filter((id) => {
+        const other = this.residents.get(id);
+        return other?.home === r.home && other.mood === "needs_you";
+      })
+      .sort();
+    const i = Math.max(0, waiting.indexOf(a.id));
+    const step = steps[i % steps.length];
+    const round = Math.floor(i / steps.length);
+    return { x: step.x + round * 0.5, z: step.z + round * 0.3 };
+  }
+
+  /** Out in front of its house at once, with no walk there. */
+  private outside(a: Agent, r: Resident) {
+    a.side = "left";
+    a.pos = this.doorstepSpot(a, r);
+    a.target = null;
+    a.intent = null;
+    a.spot = null;
+    a.facing = 0;
+    this.setActivity(a, "attention");
   }
 
   /** Indoors at once, with no walk home. */
