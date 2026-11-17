@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type RefObject,
 } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
@@ -507,11 +508,13 @@ function LabelProjector({
 function Label({
   resident,
   hovered,
+  kin,
   register,
   handlers,
 }: {
   resident: Resident;
   hovered: boolean;
+  kin: boolean;
   register: (el: HTMLDivElement | null) => void;
   handlers: CharacterHandlers;
 }) {
@@ -527,11 +530,13 @@ function Label({
   const classes = ["fun-label", `mood-${mood}`];
   if (resident.selected) classes.push("selected");
   if (hovered) classes.push("hovered");
+  if (kin) classes.push("kin");
   if (resident.depth > 0) classes.push("child");
   return (
     <div
       ref={register}
       className={classes.join(" ")}
+      style={{ "--family": ANIMALS[resident.animal].accent } as CSSProperties}
       onClick={() => handlers.onSelect(resident.id)}
       onContextMenu={(e) => {
         e.preventDefault();
@@ -552,6 +557,30 @@ function Label({
       </span>
     </div>
   );
+}
+
+/**
+ * A hovered parent and everyone it handed work to, down the generations; empty
+ * when what's hovered has no children.
+ */
+function familyOf(id: string | null, residents: Resident[]): Set<string> {
+  const family = new Set<string>();
+  if (!id) return family;
+  const children = new Map<string, string[]>();
+  for (const r of residents) {
+    if (r.parentId) {
+      children.set(r.parentId, [...(children.get(r.parentId) ?? []), r.id]);
+    }
+  }
+  if (!children.has(id)) return family;
+  const stack = [id];
+  while (stack.length) {
+    const next = stack.pop()!;
+    if (family.has(next)) continue;
+    family.add(next);
+    stack.push(...(children.get(next) ?? []));
+  }
+  return family;
 }
 
 export default function FunWorld({
@@ -618,6 +647,7 @@ export default function FunWorld({
   }, [sim, residents]);
   const onDeparted = useCallback(() => setSailors(sim.sailors()), [sim]);
   const shown = useMemo(() => [...residents, ...sailors], [residents, sailors]);
+  const kin = useMemo(() => familyOf(hovered, shown), [hovered, shown]);
 
   useEffect(() => {
     document.body.style.cursor = hovered ? "pointer" : "";
@@ -680,6 +710,7 @@ export default function FunWorld({
             sim={sim}
             handlers={handlers}
             voice={voice.current}
+            kin={kin.has(r.id)}
           />
         ))}
         {stage && (
@@ -704,6 +735,7 @@ export default function FunWorld({
             key={r.id}
             resident={r}
             hovered={hovered === r.id}
+            kin={kin.has(r.id)}
             handlers={handlers}
             register={(el) => {
               if (el) labels.current.set(r.id, el);

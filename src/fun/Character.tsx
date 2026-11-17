@@ -202,10 +202,13 @@ export function Character({
   sim,
   handlers,
   voice,
+  kin,
 }: {
   resident: Resident;
   sim: Sim;
   handlers: CharacterHandlers;
+  /** In the hovered parent's family: ringed in its colour. */
+  kin: boolean;
   /** When Ryan last typed, which the chosen one hears. */
   voice: Voice;
 }) {
@@ -238,6 +241,7 @@ export function Character({
   const boat = useRef<THREE.Group>(null);
   const floatRing = useRef<THREE.Group>(null);
   const ring = useRef<THREE.Mesh>(null);
+  const kinRing = useRef<THREE.Mesh>(null);
   const shadow = useRef<THREE.Mesh>(null);
   /** How far up its root stands, on a stage, chair or log. */
   const lift = useRef(0);
@@ -315,6 +319,10 @@ export function Character({
     if (ring.current) {
       ring.current.visible = resident.selected;
       ring.current.scale.setScalar(1 + Math.sin(t * 3) * 0.05);
+    }
+    if (kinRing.current) {
+      kinRing.current.visible = kin;
+      kinRing.current.scale.setScalar(1 + Math.sin(t * 5) * 0.08);
     }
     // Typing is the voice from above; only the chosen one hears it.
     const hearing =
@@ -685,6 +693,15 @@ export function Character({
       <mesh ref={ring} rotation-x={-Math.PI / 2} position-y={0.02}>
         <torusGeometry args={[0.55, 0.035, 6, 36]} />
         <meshBasicMaterial color="#ffffff" />
+      </mesh>
+      <mesh
+        ref={kinRing}
+        rotation-x={-Math.PI / 2}
+        position-y={0.025}
+        visible={false}
+      >
+        <torusGeometry args={[0.66, 0.05, 6, 36]} />
+        <meshBasicMaterial color={design.accent} />
       </mesh>
       <group ref={sparkles} visible={false}>
         {Array.from({ length: 5 }, (_, i) => (

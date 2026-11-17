@@ -213,6 +213,7 @@ export default function Gallery() {
             sim={sim}
             handlers={noop}
             voice={{ lastKeyAt: -Infinity }}
+            kin={false}
           />
         ))}
       </Canvas>

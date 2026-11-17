@@ -29,8 +29,13 @@
 }
 
 .fun-label.hovered,
-.fun-label.selected {
+.fun-label.selected,
+.fun-label.kin {
   z-index: 2;
+}
+
+.fun-label.kin .fun-pill {
+  outline: 2px solid var(--family);
 }
 
 .fun-pill {

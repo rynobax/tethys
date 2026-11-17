@@ -14,6 +14,8 @@ Each family is one animal: a child is always its parent's, so a family reads as 
 
 A workspace with children, or with a task count, quilts on the porch along the right meadow's front while it's idle or working. Its quilt has a square per task, sewn in its family's colours as each is done, and it cheers from its chair each time one is. Any other mood sends it where that mood always does, and with every place on the porch taken it does as anyone else would.
 
+Hovering a parent, or its tag, rings it and everyone it handed work to, down the generations, in its family's colour, and outlines their tags in it, so its children can be found wherever they are.
+
 ## Folders
 
 Each folder is a house front down the left meadow's outer edge, its name on a sign over the door, in the sidebar's order and as many as fit. A house is the folder's collapsed state, shared with the sidebar: shut, its folk walk home and go in, and the windows light up, with a "!" beside it while anyone inside needs you; open, they come out the door and go wherever they belong. Clicking the house opens or shuts the folder. The selected workspace stays out whatever its folder.
