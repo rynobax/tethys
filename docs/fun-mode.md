@@ -20,6 +20,14 @@ Hovering a parent, or its tag, rings it and everyone it handed work to, down the
 
 Each folder is a house front down the left meadow's outer edge, its name on a sign over the door, in the sidebar's order and as many as fit. A house is the folder's collapsed state, shared with the sidebar: shut, its folk walk home and go in, and the windows light up, except anyone who needs you, who waits out front where you can see it; open, they come out the door and go wherever they belong. Clicking the house opens or shuts the folder. The selected workspace stays out whatever its folder.
 
+## Walking
+
+Everyone finds their way across a meadow on a grid of its walkable ground, baked per layout (`paths.ts`), rather than steering round what's ahead: steering wedged walkers in corners and between furniture. A spot off walkable ground, a seat or a ring on the pool, is reached by a straight step from the nearest cell on the side it's coming from.
+
+Someone settled is no wall to a walker, who passes by; only those standing about make way. Pushing settled ones about is what wedged walkers in narrow gaps like the ticket line.
+
+Anyone making no headway for 3 s finds a new way, and stuck after that is put on its target with a `console.warn`. That's a bug, so it's never meant to happen: `node scripts/fun-walk.mjs` walks everyone between every named spot and runs a crowd through an hour of churn, and fails on any warning. Run it after changing the layout or how anyone moves.
+
 ## Iterating
 
 - `pnpm vite --port 5199`, then open `fun-preview.html` in any browser, or `fun-preview.html?gallery` for every animal side by side. It installs a stand-in for the preload's bridge that answers every command with null.

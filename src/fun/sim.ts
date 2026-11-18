@@ -11,6 +11,7 @@
  * between meadows is always by portal.
  */
 
+import { bake, findPath, sees, walkable, type Grid, type Path } from "./paths";
 import type { Mood, Resident } from "./residents";
 
 export type Side = "left" | "right";
@@ -241,12 +242,17 @@ export interface Agent {
   size: number;
   target: Vec2 | null;
   intent: Intent | null;
+  /** The way to `target`, and the target it was found for. */
+  path: Path | null;
+  pathFor: Vec2 | null;
   until: number;
   /** Where it works, or waits when there's no slot to wait in. */
   spot: Vec2 | null;
-  /** Closest it has got to `target`, and when, to notice being stuck. */
-  bestDist: number;
+  /** The least way it has had left to `target`, and when, to notice being
+   *  stuck; and whether it has already found a new way for being stuck. */
+  bestLeft: number;
   bestAt: number;
+  repathed: boolean;
   /** A working resident's current task, and when it moves on to another. */
   task: Task | null;
   taskUntil: number;
@@ -272,8 +278,8 @@ export interface Agent {
 
 const PORTAL_SECONDS = 0.6;
 const ARRIVE = 0.2;
-/** No closer to the target in this long and it gives up. */
-const STUCK_SECONDS = 1.2;
+/** No nearer the target along its way in this long and it's stuck. */
+const STUCK_SECONDS = 3;
 const WANDER_RADIUS = 4;
 const CANDIDATES = 8;
 
@@ -351,6 +357,10 @@ export class Sim {
   private plotsHeld = new Map<string, number>();
   private docks = new Map<string, number>();
   private tickets = new Map<string, number>();
+  /** Out in front of a house: which one, and the place among those there. */
+  private doorsteps = new Map<string, { house: number; place: number }>();
+  /** Each meadow's walkable ground, for finding the way across it. */
+  private grids: Record<Side, Grid | null> = { left: null, right: null };
   /** When each house went up: one just built takes its folk straight in. */
   private housesBuilt: number[] = [];
   /** Each quilter's place on the porch. */
@@ -376,6 +386,10 @@ export class Sim {
       (_, i) => this.housesBuilt[i] ?? this.now,
     );
     this.layout = layout;
+    this.grids = { left: bake(layout, "left"), right: bake(layout, "right") };
+    for (const [id, d] of this.doorsteps) {
+      if (d.house >= layout.houses.length) this.doorsteps.delete(id);
+    }
     prune(this.waitSlots, layout.attentionSlots.length);
     prune(this.chairs, layout.pitch?.chairs.length ?? 0);
     prune(this.seats, layout.lounge?.seats.length ?? 0);
@@ -397,7 +411,10 @@ export class Sim {
         },
     );
     for (const p of this.plots) p.growth = Math.min(1, p.growth);
-    for (const a of this.agents.values()) this.settle(a);
+    for (const a of this.agents.values()) {
+      a.path = null;
+      this.settle(a);
+    }
   }
 
   sync(residents: Resident[]) {
@@ -416,6 +433,7 @@ export class Sim {
     for (const [id, a] of this.agents) {
       if (this.residents.has(id) || this.leaving.has(id)) continue;
       for (const book of this.books()) book.delete(id);
+      this.doorsteps.delete(id);
       // A merged one waiting by the lake leaves by boat; anyone else just goes.
       const was = before.get(id);
       if (was?.mood === "shipped" && this.canSail(a)) {
@@ -499,7 +517,6 @@ export class Sim {
       this.move(a, dt, hurry ? SPEED_HURRY : SPEED_STROLL + (1 - a.size));
     }
     this.separate();
-    for (const a of this.agents.values()) this.clear(a);
   }
 
   time() {
@@ -659,11 +676,12 @@ export class Sim {
     // The portal's doorway counts as taken, so nobody sets up in it.
     if (portal) others.push(portal, { x: portal.x, z: portal.z + 1.2 });
     const furniture = this.layout?.obstacles ?? [];
-    const blocks = (this.layout?.blocks ?? []).map((b) => grow(b, 0.3));
-    // Drawn again when it lands on a block, which can be half the ground.
+    const grid = this.grids[side];
+    const open = (p: Vec2) => !grid || walkable(grid, p);
+    // Drawn again when it lands off walkable ground, which can be half of it.
     const candidate = () => {
       let p = this.randomPoint(region, near, radius);
-      for (let i = 0; i < 12 && blocks.some((b) => inside(b, p)); i++) {
+      for (let i = 0; i < 12 && !open(p); i++) {
         p = this.randomPoint(region, near, radius);
       }
       return p;
@@ -675,7 +693,7 @@ export class Sim {
       const score = Math.min(
         ...others.map((o) => dist(o, p)),
         ...furniture.map((o) => dist(o, p) - o.r - 0.3),
-        ...blocks.map((b) => (inside(b, p) ? -10 : Infinity)),
+        open(p) ? Infinity : -10,
       );
       if (score > bestScore) {
         bestScore = score;
@@ -699,10 +717,13 @@ export class Sim {
       size: sizeForDepth(r.depth),
       target: null,
       intent: null,
+      path: null,
+      pathFor: null,
       until: this.now + rand(0.2, 2),
       spot: null,
-      bestDist: Infinity,
+      bestLeft: Infinity,
       bestAt: this.now,
+      repathed: false,
       task: null,
       taskUntil: 0,
       chore: null,
@@ -796,8 +817,9 @@ export class Sim {
       a.target !== null &&
       dist(a.target, target) < 0.3;
     if (!same) {
-      a.bestDist = Infinity;
+      a.bestLeft = Infinity;
       a.bestAt = this.now;
+      a.repathed = false;
     }
     a.target = target;
     a.intent = intent;
@@ -809,10 +831,6 @@ export class Sim {
     a.intent = null;
     a.until = this.now + rand(min, max);
     this.setActivity(a, "pause");
-  }
-
-  private stuck(a: Agent) {
-    return a.activity === "walk" && this.now - a.bestAt > STUCK_SECONDS;
   }
 
   /** Lets go of every shared place but the ones its mood still keeps. */
@@ -831,6 +849,11 @@ export class Sim {
     }
     if (r.mood !== "shipped" || right) this.docks.delete(a.id);
     if (r.mood !== "ready" || right) this.tickets.delete(a.id);
+    // Kept while it basks, which takes it out of its house, so nobody else
+    // is sent to stand where it is.
+    if (r.mood !== "needs_you" || (!this.houseFor(r) && !r.selected)) {
+      this.doorsteps.delete(a.id);
+    }
     if (!r.quilts || !QUILTING.has(r.mood) || !right) {
       this.quilters.delete(a.id);
     }
@@ -952,12 +975,12 @@ export class Sim {
       return;
     }
     if (a.voyage === "dock") {
-      // Blocked on the way, or already in the line on the pier, it makes for
-      // the pier's end from where it is.
+      // Already in the line on the pier, it makes for the pier's end from
+      // where it is.
       const onPier =
         Math.abs(a.pos.z - lake.pierEnd.z) < 0.3 &&
         a.pos.x < lake.pierFoot.x + 0.1;
-      if (dist(a.pos, lake.pierFoot) < 0.3 || onPier || this.stuck(a)) {
+      if (dist(a.pos, lake.pierFoot) < 0.3 || onPier) {
         a.voyage = "pier";
       } else {
         this.walkTo(a, lake.pierFoot, "dock");
@@ -1027,7 +1050,7 @@ export class Sim {
       a.task = "station";
     }
     // Re-picked too when a resize has moved the workshop.
-    if (!a.spot || this.stuck(a) || !inside(area, a.spot)) {
+    if (!a.spot || !inside(area, a.spot)) {
       a.spot = this.spacedPoint(a.id, a.side, area, a.pos, 3);
     }
     this.head(a, a.spot, "work");
@@ -1046,7 +1069,7 @@ export class Sim {
         x: garden.store.x + Math.cos(a.phase) * 0.35,
         z: garden.store.z + 0.45 + Math.abs(Math.sin(a.phase)) * 0.2,
       };
-      if (dist(a.pos, at) < 0.3 || (this.stuck(a) && dist(a.pos, at) < 1)) {
+      if (dist(a.pos, at) < 0.3) {
         if (this.stored.length === 0) {
           this.collectAt = this.now + COLLECT_SECONDS;
         }
@@ -1200,7 +1223,7 @@ export class Sim {
     // An egg can't walk: it's simply indoors.
     const egg = EGG.has(r.mood);
     const there = dist(a.pos, house.door);
-    if (egg || there < ARRIVE || (this.stuck(a) && there < 1)) {
+    if (egg || there < ARRIVE) {
       a.target = null;
       a.pos = { x: house.door.x, z: house.door.z };
       a.facing = Math.PI;
@@ -1216,19 +1239,25 @@ export class Sim {
     return true;
   }
 
-  /** Its place out in front of its house, in order among the others there
+  /** Its place out in front of its house, the first free among those there
    *  who need you; past the last, a little further out each time round. */
   private doorstepSpot(a: Agent, r: Resident): Vec2 {
-    const steps = this.layout!.houses[r.home!].doorstep;
-    const waiting = [...this.agents.keys()]
-      .filter((id) => {
-        const other = this.residents.get(id);
-        return other?.home === r.home && other.mood === "needs_you";
-      })
-      .sort();
-    const i = Math.max(0, waiting.indexOf(a.id));
-    const step = steps[i % steps.length];
-    const round = Math.floor(i / steps.length);
+    const house = r.home!;
+    const steps = this.layout!.houses[house].doorstep;
+    let held = this.doorsteps.get(a.id);
+    if (held?.house !== house) {
+      const taken = new Set(
+        [...this.doorsteps.values()]
+          .filter((d) => d.house === house)
+          .map((d) => d.place),
+      );
+      let place = 0;
+      while (taken.has(place)) place++;
+      held = { house, place };
+      this.doorsteps.set(a.id, held);
+    }
+    const step = steps[held.place % steps.length];
+    const round = Math.floor(held.place / steps.length);
     return { x: step.x + round * 0.5, z: step.z + round * 0.3 };
   }
 
@@ -1364,9 +1393,9 @@ export class Sim {
 
   /** Walk to a spot and stay there doing `post`. */
   private head(a: Agent, spot: Vec2, post: Post) {
+    // Nudged a little off it once there is still there.
     const reach = a.activity === post ? 0.5 : ARRIVE;
-    // Close enough and blocked counts as there, rather than shoving forever.
-    if (dist(a.pos, spot) < reach || (this.stuck(a) && dist(a.pos, spot) < 1)) {
+    if (dist(a.pos, spot) < reach) {
       a.target = null;
       // Onto the furniture itself, not beside it.
       if (FURNISHED.has(post)) a.pos = { x: spot.x, z: spot.z };
@@ -1398,11 +1427,7 @@ export class Sim {
 
   private roam(a: Agent, region: Region) {
     if (a.activity === "walk") {
-      if (a.target && dist(a.pos, a.target) < ARRIVE) {
-        this.pause(a, 1.5, 5);
-      } else if (this.stuck(a)) {
-        this.pause(a, 0.3, 1.2);
-      }
+      if (a.target && dist(a.pos, a.target) < ARRIVE) this.pause(a, 1.5, 5);
       return;
     }
     if (a.activity === "pause" && this.now < a.until) return;
@@ -1419,10 +1444,7 @@ export class Sim {
     const portal = this.layout?.portals[a.side];
     if (!portal || !this.layout?.portals[other(a.side)]) return;
     if (a.activity === "walk" && a.intent === "portal") {
-      // A crowd at the portal mustn't hold anyone back from it.
-      if (dist(a.pos, portal) < ARRIVE || this.stuck(a)) {
-        this.setActivity(a, "portal_out");
-      }
+      if (dist(a.pos, portal) < ARRIVE) this.setActivity(a, "portal_out");
       return;
     }
     if (a.activity === "portal_out") return;
@@ -1448,19 +1470,16 @@ export class Sim {
 
     let wantFacing: number | null = null;
     if ((a.activity === "walk" || a.activity === "sail") && a.target) {
-      const dx = a.target.x - a.pos.x;
-      const dz = a.target.z - a.pos.z;
+      // A boat sails straight across the water; anyone else finds the way.
+      const aim = a.activity === "walk" ? this.waypoint(a) : a.target;
+      const dx = aim.x - a.pos.x;
+      const dz = aim.z - a.pos.z;
       const d = Math.hypot(dx, dz);
-      if (d < a.bestDist - 0.05) {
-        a.bestDist = d;
-        a.bestAt = this.now;
-      }
       if (d > 1e-4) {
         const stepLen = Math.min(d, speed * dt);
-        const dir = this.steer(a, dx / d, dz / d);
-        a.pos.x += dir.x * stepLen;
-        a.pos.z += dir.z * stepLen;
-        wantFacing = Math.atan2(dir.x, dir.z);
+        a.pos.x += (dx / d) * stepLen;
+        a.pos.z += (dz / d) * stepLen;
+        wantFacing = Math.atan2(dx, dz);
       }
     } else if (
       a.activity === "attention" ||
@@ -1497,110 +1516,90 @@ export class Sim {
     }
   }
 
-  /** The furniture in this agent's way, leaving out whatever it's walking to. */
-  private obstacles(a: Agent): Obstacle[] {
-    const all = this.layout?.obstacles ?? [];
-    const goal = a.target;
-    if (!goal) return all;
-    return all.filter((o) => dist(goal, o) > this.clearance(a, o) + 0.1);
-  }
-
-  /** The blocks in this agent's way, grown by its own girth. */
-  private blocks(a: Agent): Region[] {
-    const goal = a.target;
-    const margin = a.size * 0.3;
-    // A goal just outside a block but within the margin is still heading in.
-    return (this.layout?.blocks ?? [])
-      .map((b) => grow(b, margin))
-      .filter((b) => !goal || !inside(b, goal));
-  }
-
-  private clearance(a: Agent, o: Obstacle) {
-    return o.r + a.size * 0.3;
-  }
-
   /**
-   * Veers off a straight line to the target round anything just ahead on it,
-   * to whichever side it's already further round.
+   * The next place to make for on the way to its target, finding the way when
+   * the target has moved, it has been shoved off it, or it's stuck. Stuck
+   * again after finding a new way, it's put on its target, with a warning:
+   * that's a bug in the layout or here, not something to hide.
    */
-  private steer(a: Agent, x: number, z: number): Vec2 {
-    // Round a block by the shortest way past its corners.
-    const goal = a.target;
-    if (goal) {
-      for (const b of this.blocks(a)) {
-        if (!crosses(a.pos, goal, b)) continue;
-        const next = detour(a.pos, goal, b);
-        if (next) {
-          const d = dist(a.pos, next) || 1;
-          x = (next.x - a.pos.x) / d;
-          z = (next.z - a.pos.z) / d;
-        }
+  private waypoint(a: Agent): Vec2 {
+    const target = a.target!;
+    const grid = this.grids[a.side];
+    if (!grid) return target;
+    if (!a.path || !a.pathFor || dist(a.pathFor, target) > 1e-6) {
+      this.findWay(a, grid);
+    }
+    let points = a.path!.points;
+    const through = a.path!.through;
+    // Shoved off its way, so the next corner is out of sight.
+    if (
+      points.length > 1 &&
+      walkable(grid, a.pos, through) &&
+      !sees(grid, a.pos, points[0], through)
+    ) {
+      points = this.findWay(a, grid);
+    }
+    // On to the next corner as soon as it can see past this one.
+    while (
+      points.length > 1 &&
+      (dist(a.pos, points[0]) < 0.12 || sees(grid, a.pos, points[1], through))
+    ) {
+      points.shift();
+    }
+    let left = dist(a.pos, points[0]);
+    for (let k = 1; k < points.length; k++) {
+      left += dist(points[k - 1], points[k]);
+    }
+    if (left < a.bestLeft - 0.05) {
+      a.bestLeft = left;
+      a.bestAt = this.now;
+    } else if (this.now - a.bestAt > STUCK_SECONDS) {
+      if (a.repathed) {
+        console.warn(
+          `fun: ${a.id} stuck at (${a.pos.x.toFixed(2)}, ${a.pos.z.toFixed(2)}) ` +
+            `on its way to (${target.x.toFixed(2)}, ${target.z.toFixed(2)}); put there`,
+        );
+        a.pos = { x: target.x, z: target.z };
+        return target;
       }
+      a.repathed = true;
+      a.bestAt = this.now;
+      points = this.findWay(a, grid);
     }
-    let sx = x;
-    let sz = z;
-    for (const o of this.obstacles(a)) {
-      const ox = o.x - a.pos.x;
-      const oz = o.z - a.pos.z;
-      const ahead = ox * x + oz * z;
-      if (ahead <= 0 || ahead > 1.4) continue;
-      // How far the obstacle sits off the line, to the walker's right.
-      const off = ox * z - oz * x;
-      const clear = this.clearance(a, o) + 0.1;
-      if (Math.abs(off) >= clear) continue;
-      const away = off > 0 || (off === 0 && Math.sin(a.phase) > 0) ? -1 : 1;
-      const push = (1 - Math.abs(off) / clear) * 2;
-      sx += z * away * push;
-      sz += -x * away * push;
-    }
-    const n = Math.hypot(sx, sz) || 1;
-    return { x: sx / n, z: sz / n };
+    return points[0];
   }
 
-  /** Out of any furniture it has been pushed or pulled into. */
-  private clear(a: Agent) {
-    if (a.activity !== "walk" && a.activity !== "pause") return;
-    for (const b of this.blocks(a)) {
-      if (!inside(grow(b, -0.001), a.pos)) continue;
-      // Out by the nearest edge.
-      const exits = [
-        { d: a.pos.x - b.xMin, p: { x: b.xMin, z: a.pos.z } },
-        { d: b.xMax - a.pos.x, p: { x: b.xMax, z: a.pos.z } },
-        { d: a.pos.z - b.zMin, p: { x: a.pos.x, z: b.zMin } },
-        { d: b.zMax - a.pos.z, p: { x: a.pos.x, z: b.zMax } },
-      ];
-      a.pos = exits.reduce((m, e) => (e.d < m.d ? e : m)).p;
-    }
-    for (const o of this.obstacles(a)) {
-      const dx = a.pos.x - o.x;
-      const dz = a.pos.z - o.z;
-      const d = Math.hypot(dx, dz);
-      const min = this.clearance(a, o);
-      if (d >= min) continue;
-      const ux = d > 1e-5 ? dx / d : 1;
-      const uz = d > 1e-5 ? dz / d : 0;
-      a.pos.x = o.x + ux * min;
-      a.pos.z = o.z + uz * min;
-    }
+  private findWay(a: Agent, grid: Grid): Vec2[] {
+    const target = a.target!;
+    a.path = findPath(grid, a.pos, target) ?? {
+      points: [{ x: target.x, z: target.z }],
+      through: -1,
+    };
+    a.pathFor = { x: target.x, z: target.z };
+    return a.path.points;
   }
 
   /**
-   * Nobody stands inside anybody else. Whoever is settled holds its ground
-   * and the one moving steps round it; two settled ones don't budge.
+   * Nobody stands inside anybody else. Whoever is settled holds its ground,
+   * and is no wall to anyone walking, who passes by; anyone standing about
+   * makes way. Nobody is pushed off walkable ground, or further than half a
+   * step at a time: a crowd can't hold a walker back, nor shove anyone.
    */
   private separate() {
-    const list = [...this.agents.values()];
-    const movable = (a: Agent) =>
-      a.activity === "walk" || a.activity === "pause";
+    const list = [...this.agents.values()].filter(
+      (a) => !INDOORS.has(a.activity),
+    );
+    const walking = (a: Agent) => a.activity === "walk";
+    const movable = (a: Agent) => walking(a) || a.activity === "pause";
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
         const a = list[i];
         const b = list[j];
-        if (a.side !== b.side || INDOORS.has(a.activity)) continue;
-        if (INDOORS.has(b.activity)) continue;
+        if (a.side !== b.side) continue;
         const ma = movable(a);
         const mb = movable(b);
         if (!ma && !mb) continue;
+        if ((walking(a) && !mb) || (walking(b) && !ma)) continue;
         const min = (a.size + b.size) * 0.4;
         const dx = b.pos.x - a.pos.x;
         const dz = b.pos.z - a.pos.z;
@@ -1610,16 +1609,23 @@ export class Sim {
         // Sideways as well as apart, so two walking head-on slide past.
         const ux = dx / d - (dz / d) * 0.5;
         const uz = dz / d + (dx / d) * 0.5;
-        if (ma) {
-          a.pos.x -= ux * push;
-          a.pos.z -= uz * push;
-        }
-        if (mb) {
-          b.pos.x += ux * push;
-          b.pos.z += uz * push;
-        }
+        if (ma) this.shove(a, -ux * push, -uz * push);
+        if (mb) this.shove(b, ux * push, uz * push);
       }
     }
+  }
+
+  private shove(a: Agent, dx: number, dz: number) {
+    const most = SPEED_STROLL * 0.5 * this.dt;
+    const length = Math.hypot(dx, dz);
+    if (length > most) {
+      dx *= most / length;
+      dz *= most / length;
+    }
+    const to = { x: a.pos.x + dx, z: a.pos.z + dz };
+    const grid = this.grids[a.side];
+    if (grid && walkable(grid, a.pos) && !walkable(grid, to)) return;
+    a.pos = to;
   }
 }
 
@@ -1645,82 +1651,6 @@ function prune(book: Map<string, number>, length: number) {
 
 function clamp(n: number, min: number, max: number) {
   return Math.min(max, Math.max(min, n));
-}
-
-function grow(r: Region, by: number): Region {
-  return {
-    xMin: r.xMin - by,
-    xMax: r.xMax + by,
-    zMin: r.zMin - by,
-    zMax: r.zMax + by,
-  };
-}
-
-function corners(r: Region): Vec2[] {
-  return [
-    { x: r.xMin, z: r.zMin },
-    { x: r.xMax, z: r.zMin },
-    { x: r.xMin, z: r.zMax },
-    { x: r.xMax, z: r.zMax },
-  ];
-}
-
-/**
- * The first corner to head for on the shortest way from `from` to `to` round
- * `block`, by one corner or two; a corner it's already at doesn't count.
- */
-function detour(from: Vec2, to: Vec2, block: Region): Vec2 | null {
-  const inner = grow(block, -0.01);
-  const clear = (p: Vec2, q: Vec2) => !crosses(p, q, inner);
-  const cs = corners(grow(block, 0.05)).filter((c) => dist(c, from) > 0.08);
-  let best: Vec2 | null = null;
-  let bestLength = Infinity;
-  for (const c1 of cs) {
-    if (!clear(from, c1)) continue;
-    const first = dist(from, c1);
-    if (clear(c1, to) && first + dist(c1, to) < bestLength) {
-      bestLength = first + dist(c1, to);
-      best = c1;
-    }
-    for (const c2 of cs) {
-      if (c2 === c1 || !clear(c1, c2) || !clear(c2, to)) continue;
-      const length = first + dist(c1, c2) + dist(c2, to);
-      if (length < bestLength) {
-        bestLength = length;
-        best = c1;
-      }
-    }
-  }
-  return best;
-}
-
-/** Whether the segment from `p` to `q` passes through the inside of `r`. */
-function crosses(p: Vec2, q: Vec2, r: Region): boolean {
-  let t0 = 0;
-  let t1 = 1;
-  const dx = q.x - p.x;
-  const dz = q.z - p.z;
-  const sides: [number, number][] = [
-    [-dx, p.x - r.xMin],
-    [dx, r.xMax - p.x],
-    [-dz, p.z - r.zMin],
-    [dz, r.zMax - p.z],
-  ];
-  for (const [step, room] of sides) {
-    if (step === 0) {
-      if (room <= 0) return false;
-      continue;
-    }
-    const t = room / step;
-    if (step < 0) {
-      if (t > t1) return false;
-      t0 = Math.max(t0, t);
-    } else {
-      if (t < t0) return false;
-      t1 = Math.min(t1, t);
-    }
-  }
-  return t1 - t0 > 1e-6;
 }
 
 function inside(r: Region, p: Vec2) {
