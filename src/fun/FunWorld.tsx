@@ -29,6 +29,8 @@ import { Houses } from "./Houses";
 import { toResidents, type Resident } from "./residents";
 import { DUSK, MEADOW, Scenery, type Environment } from "./Scenery";
 import { Sim, type Activity } from "./sim";
+import { useWeather, weathered, type Weather } from "./forecast";
+import { WeatherLayer } from "./Weather";
 import {
   CAMERA_DISTANCE,
   PITCH,
@@ -61,6 +63,11 @@ export interface FunWorldProps {
    * move it by hand (`scripts/fun-shot.mjs`). Never set in the app.
    */
   onManualClock?: (clock: ManualClock) => void;
+  /**
+   * For the preview and screenshots: this weather rather than the weather
+   * where Ryan is. Never set in the app.
+   */
+  weather?: Weather;
 }
 
 /** Time in the world, moved by hand. */
@@ -606,10 +613,13 @@ export default function FunWorld({
   menuActions,
   panelRef,
   onManualClock,
+  weather: fixedWeather,
 }: FunWorldProps) {
   const animals = useAnimals(workspaces);
   const stage = useStage(panelRef, folders.length);
-  const env = useEnvironment();
+  const weather = useWeather(fixedWeather);
+  const theme = useEnvironment();
+  const env = useMemo(() => weathered(theme, weather), [theme, weather]);
   const sim = useMemo(() => new Sim(), []);
   const labels = useRef(new Map<string, HTMLDivElement>());
   const voice = useRef<Voice>({ lastKeyAt: -Infinity });
@@ -714,6 +724,9 @@ export default function FunWorld({
             )}
             sim={sim}
           />
+        )}
+        {stage && (
+          <WeatherLayer stage={stage} weather={weather} sky={env.sky} />
         )}
         {shown.map((r) => (
           <Character

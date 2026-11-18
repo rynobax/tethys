@@ -28,6 +28,14 @@ Someone settled is no wall to a walker, who passes by; only those standing about
 
 Anyone making no headway for 3 s finds a new way, and stuck after that is put on its target with a `console.warn`. That's a bug, so it's never meant to happen: `node scripts/fun-walk.mjs` walks everyone between every named spot and runs a crowd through an hour of churn, and fails on any warning. Run it after changing the layout or how anyone moves.
 
+## Weather
+
+The meadows have the weather where Ryan is: found by IP on geojs, looked up on Open-Meteo every 15 minutes, neither wanting a key (`forecast.ts`). IP rather than `navigator.geolocation`, which would ask macOS for location access for a city-level answer. The last look is kept in `localStorage`, so a restart opens on it.
+
+Cloud dims the sun and greys the sky, broken cloud drifts shadows across the ground with the wind, rain darkens the grass and splashes, snow lies on it, fog thickens toward the back, and a storm flashes lightning, all by reweathering the `Environment` plus `Weather.tsx`. Screen up is north, so the wind blows rain and cloud the way it really is. Rain and snow clamp their step to 0.1 s: one long frame, back from hidden or off a manual clock, would bury every drop.
+
+The preview takes `?weather=rain` (or any of `PRESETS`); a shot is clear unless asked, so shots don't depend on the sky.
+
 ## Iterating
 
 - `pnpm vite --port 5199`, then open `fun-preview.html` in any browser, or `fun-preview.html?gallery` for every animal side by side. It installs a stand-in for the preload's bridge that answers every command with null.
