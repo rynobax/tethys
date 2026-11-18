@@ -135,5 +135,9 @@ An Artifact that is an ummon review a session started on one of the workspace's 
 A workspace as fun mode draws it: a small character in the world beside the terminal whose behaviour shows what the workspace is doing.
 _Avoid_: Sprite, pet, mascot
 
+**Environment**:
+Where the residents spend the day: the meadow, a moon base, Athens or an office. One is picked each day; everything happens the same in each, only drawn differently.
+_Avoid_: Theme, setting, biome
+
 **Avatar**:
 What a resident looks like, designed from how the workspace's work began. A description of parts and colours rather than a picture, so any art style can draw it.

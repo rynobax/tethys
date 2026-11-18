@@ -4,7 +4,8 @@ import * as THREE from "three";
 import { ANIMAL_NAMES, type AnimalName } from "./animals";
 import { Character, type CharacterHandlers } from "./Character";
 import type { Resident } from "./residents";
-import { MEADOW } from "./Scenery";
+import { EnvironmentContext, type Environment } from "./environment";
+import { MEADOW } from "./palette";
 import { sizeForDepth, type Activity, type Agent, type Sim } from "./sim";
 import { CAMERA_DISTANCE, PITCH } from "./stage";
 
@@ -204,18 +205,22 @@ export default function Gallery() {
           intensity={MEADOW.sunIntensity}
           color={MEADOW.sun}
         />
-        <Aim onPlaced={setNames} />
-        <Driver clock={clock} manual={params.has("shot")} onPose={setPose} />
-        {residents.map((r) => (
-          <Character
-            key={r.id}
-            resident={r}
-            sim={sim}
-            handlers={noop}
-            voice={{ lastKeyAt: -Infinity }}
-            kin={false}
-          />
-        ))}
+        <EnvironmentContext.Provider
+          value={(params.get("environment") as Environment) ?? "meadow"}
+        >
+          <Aim onPlaced={setNames} />
+          <Driver clock={clock} manual={params.has("shot")} onPose={setPose} />
+          {residents.map((r) => (
+            <Character
+              key={r.id}
+              resident={r}
+              sim={sim}
+              handlers={noop}
+              voice={{ lastKeyAt: -Infinity }}
+              kin={false}
+            />
+          ))}
+        </EnvironmentContext.Provider>
       </Canvas>
       {[...names].map(([name, at]) => (
         <div

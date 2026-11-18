@@ -28,9 +28,10 @@
 // Options: --width 1728 --height 1000 --dark --seed N --port 5199
 // --gallery shows every animal, grown up and as a child, instead of the world.
 // --query "zoom=200&only=fox" adds to the page's query: the gallery takes
-// zoom, only (animals, comma separated), pose and facing, and the world
-// weather (clear, cloudy, overcast, fog, drizzle, rain, snow, storm; clear
-// if not given).
+// zoom, only (animals, comma separated), pose, facing and environment, and
+// the world weather (clear, cloudy, overcast, fog, drizzle, rain, snow, storm;
+// clear if not given) and environment (meadow, moon, athens, office; meadow if
+// not given).
 // The preview's dev server is started on --port if nothing answers there.
 
 import { spawn } from "node:child_process";

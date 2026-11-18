@@ -28,6 +28,16 @@ Someone settled is no wall to a walker, who passes by; only those standing about
 
 Anyone making no headway for 3 s finds a new way, and stuck after that is put on its target with a `console.warn`. That's a bug, so it's never meant to happen: `node scripts/fun-walk.mjs` walks everyone between every named spot and runs a crowd through an hour of churn, and fails on any warning. Run it after changing the layout or how anyone moves.
 
+## Environments
+
+Each day is spent somewhere: the meadow, a moon base, Athens or an office floor (`environment.ts`). The day picks it, not a random draw kept somewhere: days run in fours with every environment once, shuffled per four, and a four never starts on the one the last ended on. Midnight moves it on while the app's open.
+
+Everything happens the same everywhere, on the same layout; only what it's drawn as changes. The pool is a ball pit in the office, the boat a shuttle, a galley or a rubber duck, the houses habitat modules, temples or meeting rooms, and the residents put on a bubble helmet, a laurel wreath or a tie. Each environment has a light and a dark palette (`palette.ts`), and its own props in `environments/`; the meadow's are where they always were. Who draws what is a switch on the environment at each place it differs, read from `EnvironmentContext`.
+
+The office is indoors and the moon has no air, so neither has the weather; the moon has meteors instead.
+
+The preview takes `?environment=moon` (or any of `ENVIRONMENTS`), as does the gallery, to see the outfits; a shot is in the meadow unless asked.
+
 ## Weather
 
 The meadows have the weather where Ryan is: found by IP on geojs, looked up on Open-Meteo every 15 minutes, neither wanting a key (`forecast.ts`). IP rather than `navigator.geolocation`, which would ask macOS for location access for a city-level answer. The last look is kept in `localStorage`, so a restart opens on it.

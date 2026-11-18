@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import * as THREE from "three";
-import type { Environment } from "./Scenery";
+import type { Palette } from "./palette";
 
 /**
  * The weather where Ryan is, as the meadows show it. Found by IP (geojs) and
@@ -205,22 +205,22 @@ const mix = (a: string, b: string, t: number) =>
  * The world's look under a weather: cloud dims the sun and greys the sky,
  * rain darkens the grass, and snow lies on it.
  */
-export function weathered(env: Environment, w: Weather): Environment {
+export function weathered(palette: Palette, w: Weather): Palette {
   const wet = w.fall?.kind === "rain" ? w.fall.rate : 0;
   const settled = w.fall?.kind === "snow" ? 0.5 + w.fall.rate * 0.3 : 0;
   const grey = Math.max(w.clouds * 0.55, w.fog ? 0.6 : 0) + wet * 0.2;
   const sunlit = 1 - w.clouds * 0.6 - wet * 0.15;
   const snowy = (c: string) => mix(c, "#eef3f7", settled);
   return {
-    ...env,
-    ground: snowy(mix(env.ground, "#4f6b45", wet * 0.25)),
-    patch: snowy(mix(env.patch, "#4a6640", wet * 0.25)),
-    sky: mix(env.sky, "#b9c0c8", grey),
-    hemiIntensity: env.hemiIntensity * (1 - grey * 0.15),
-    sun: mix(env.sun, "#e4e8ee", grey),
-    sunIntensity: env.sunIntensity * sunlit,
-    foliage: env.foliage.map((c) => mix(c, "#f4f7fa", settled * 0.4)),
+    ...palette,
+    ground: snowy(mix(palette.ground, "#4f6b45", wet * 0.25)),
+    patch: snowy(mix(palette.patch, "#4a6640", wet * 0.25)),
+    sky: mix(palette.sky, "#b9c0c8", grey),
+    hemiIntensity: palette.hemiIntensity * (1 - grey * 0.15),
+    sun: mix(palette.sun, "#e4e8ee", grey),
+    sunIntensity: palette.sunIntensity * sunlit,
+    foliage: palette.foliage.map((c) => mix(c, "#f4f7fa", settled * 0.4)),
     // Nobody's out with a jar of fireflies in the rain.
-    fireflies: env.fireflies && !w.fall,
+    fireflies: palette.fireflies && !w.fall,
   };
 }

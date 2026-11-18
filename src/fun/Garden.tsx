@@ -2,6 +2,9 @@ import { useMemo, useRef, useState, type RefObject } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { STORE_MAX, type Garden, type Sim, type Vec2 } from "./sim";
+import { useEnvironment, type Environment } from "./environment";
+import { StoreDome } from "./environments/moon";
+import { SupplyCupboard } from "./environments/office";
 
 /** Each crop's colour once picked: tomato, pumpkin, carrot, cabbage, sunflower. */
 export const CROP_COLORS = [
@@ -267,16 +270,33 @@ function Store({ at, sim }: { at: Vec2; sim: Sim }) {
   );
 }
 
+/** A raised bed's sides, where soil isn't simply heaped. */
+const BEDS: Record<Environment, string> = {
+  meadow: SOIL,
+  moon: "#9aa1ad",
+  athens: SOIL,
+  office: "#c9a77c",
+};
+
 function Shed({ at }: { at: Vec2 }) {
+  const environment = useEnvironment();
+  if (environment === "moon" || environment === "office") {
+    return (
+      <group position={[at.x, 0, at.z]}>
+        {environment === "moon" ? <StoreDome /> : <SupplyCupboard />}
+      </group>
+    );
+  }
+  const athens = environment === "athens";
   return (
     <group position={[at.x, 0, at.z]}>
       <mesh position-y={0.32}>
         <boxGeometry args={[0.8, 0.64, 0.6]} />
-        <Mat color="#b0784a" />
+        <Mat color={athens ? "#f1ece0" : "#b0784a"} />
       </mesh>
       <mesh position-y={0.82} rotation-y={Math.PI / 4} scale={[1, 1, 0.78]}>
         <coneGeometry args={[0.66, 0.36, 4]} />
-        <Mat color="#a8483a" />
+        <Mat color={athens ? "#c0603f" : "#a8483a"} />
       </mesh>
       <mesh position={[0, 0.24, 0.301]}>
         <planeGeometry args={[0.28, 0.46]} />
@@ -288,6 +308,7 @@ function Shed({ at }: { at: Vec2 }) {
 
 /** Rows of plots, each row a raised bed of soil, and the shed at the end. */
 export function GardenArea({ garden, sim }: { garden: Garden; sim: Sim }) {
+  const sides = BEDS[useEnvironment()];
   const beds = useMemo(() => {
     const rows = new Map<number, Vec2[]>();
     for (const p of garden.plots) {
@@ -302,10 +323,20 @@ export function GardenArea({ garden, sim }: { garden: Garden; sim: Sim }) {
   return (
     <>
       {beds.map((b) => (
-        <mesh key={b.z} position={[(b.xMin + b.xMax) / 2, 0.025, b.z]}>
-          <boxGeometry args={[b.xMax - b.xMin, 0.05, 0.5]} />
-          <Mat color={SOIL} />
-        </mesh>
+        <group key={b.z} position={[(b.xMin + b.xMax) / 2, 0, b.z]}>
+          <mesh position-y={sides === SOIL ? 0.025 : 0.03}>
+            <boxGeometry
+              args={[b.xMax - b.xMin, sides === SOIL ? 0.05 : 0.06, 0.5]}
+            />
+            <Mat color={sides} />
+          </mesh>
+          {sides !== SOIL && (
+            <mesh position-y={0.061} rotation-x={-Math.PI / 2}>
+              <planeGeometry args={[b.xMax - b.xMin - 0.08, 0.42]} />
+              <meshStandardMaterial color={SOIL} />
+            </mesh>
+          )}
+        </group>
       ))}
       {garden.plots.map((p, i) => (
         <Plant key={i} at={p} index={i} sim={sim} />

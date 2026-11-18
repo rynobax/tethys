@@ -27,9 +27,16 @@ import {
 import { allocate, loadAnimals, sameAnimals, saveAnimals } from "./family";
 import { Houses } from "./Houses";
 import { toResidents, type Resident } from "./residents";
-import { DUSK, MEADOW, Scenery, type Environment } from "./Scenery";
+import { Scenery } from "./Scenery";
+import {
+  EnvironmentContext,
+  OUTDOORS,
+  useToday,
+  type Environment,
+} from "./environment";
+import { PALETTES, type Palette } from "./palette";
 import { Sim, type Activity } from "./sim";
-import { useWeather, weathered, type Weather } from "./forecast";
+import { CLEAR, useWeather, weathered, type Weather } from "./forecast";
 import { WeatherLayer } from "./Weather";
 import {
   CAMERA_DISTANCE,
@@ -68,6 +75,8 @@ export interface FunWorldProps {
    * where Ryan is. Never set in the app.
    */
   weather?: Weather;
+  /** For the preview and screenshots: this environment rather than today's. */
+  environment?: Environment;
 }
 
 /** Time in the world, moved by hand. */
@@ -216,18 +225,20 @@ function useStage(
   return stage;
 }
 
-function useEnvironment(): Environment {
+/** The environment's light or dark look, by the app's theme. */
+function usePalette(environment: Environment): Palette {
   const theme = useTheme();
   return useMemo(() => {
+    const { light, dark } = PALETTES[environment];
     const bg = theme?.colors.background;
     if (bg) {
       const { r, g, b } = new THREE.Color(bg);
-      return 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.35 ? DUSK : MEADOW;
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.35 ? dark : light;
     }
     return window.matchMedia("(prefers-color-scheme: dark)").matches
-      ? DUSK
-      : MEADOW;
-  }, [theme]);
+      ? dark
+      : light;
+  }, [theme, environment]);
 }
 
 /**
@@ -614,12 +625,16 @@ export default function FunWorld({
   panelRef,
   onManualClock,
   weather: fixedWeather,
+  environment: fixedEnvironment,
 }: FunWorldProps) {
   const animals = useAnimals(workspaces);
   const stage = useStage(panelRef, folders.length);
-  const weather = useWeather(fixedWeather);
-  const theme = useEnvironment();
-  const env = useMemo(() => weathered(theme, weather), [theme, weather]);
+  const environment = useToday(fixedEnvironment);
+  const outdoors = OUTDOORS[environment];
+  const forecast = useWeather(fixedWeather);
+  const weather = outdoors ? forecast : CLEAR;
+  const look = usePalette(environment);
+  const palette = useMemo(() => weathered(look, weather), [look, weather]);
   const sim = useMemo(() => new Sim(), []);
   const labels = useRef(new Map<string, HTMLDivElement>());
   const voice = useRef<Voice>({ lastKeyAt: -Infinity });
@@ -705,54 +720,60 @@ export default function FunWorld({
           if (e.button === 0 && !menuOpenAtDown.current) onSelect(null);
         }}
       >
-        <color attach="background" args={[env.ground]} />
-        <Aim />
-        <FrameDriver
-          sim={sim}
-          onDeparted={onDeparted}
-          onManualClock={onManualClock}
-        />
-        <SimDriver sim={sim} onDeparted={onDeparted} manual={!!onManualClock} />
-        {stage && (
-          <Scenery
+        <EnvironmentContext.Provider value={environment}>
+          <color attach="background" args={[palette.ground]} />
+          <Aim />
+          <FrameDriver
+            sim={sim}
+            onDeparted={onDeparted}
+            onManualClock={onManualClock}
+          />
+          <SimDriver
+            sim={sim}
+            onDeparted={onDeparted}
+            manual={!!onManualClock}
+          />
+          {stage && (
+            <Scenery
+              stage={stage}
+              palette={palette}
+              pitching={residents.some(
+                (r) =>
+                  r.mood === "shipping" &&
+                  (r.home === null || !stage.layout.houses[r.home]),
+              )}
+              sim={sim}
+            />
+          )}
+          {stage && outdoors && (
+            <WeatherLayer stage={stage} weather={weather} sky={palette.sky} />
+          )}
+          {shown.map((r) => (
+            <Character
+              key={r.id}
+              resident={r}
+              sim={sim}
+              handlers={handlers}
+              voice={voice.current}
+              kin={kin.has(r.id)}
+            />
+          ))}
+          {stage && (
+            <Houses
+              houses={stage.layout.houses}
+              folders={folders}
+              sim={sim}
+              onToggle={(f) => onSetFolderCollapsed(f.id, !f.collapsed)}
+            />
+          )}
+          <DivineBeam sim={sim} selectedId={selectedId} voice={voice.current} />
+          <LabelProjector
+            sim={sim}
+            residents={shown}
+            labels={labels}
             stage={stage}
-            env={env}
-            pitching={residents.some(
-              (r) =>
-                r.mood === "shipping" &&
-                (r.home === null || !stage.layout.houses[r.home]),
-            )}
-            sim={sim}
           />
-        )}
-        {stage && (
-          <WeatherLayer stage={stage} weather={weather} sky={env.sky} />
-        )}
-        {shown.map((r) => (
-          <Character
-            key={r.id}
-            resident={r}
-            sim={sim}
-            handlers={handlers}
-            voice={voice.current}
-            kin={kin.has(r.id)}
-          />
-        ))}
-        {stage && (
-          <Houses
-            houses={stage.layout.houses}
-            folders={folders}
-            sim={sim}
-            onToggle={(f) => onSetFolderCollapsed(f.id, !f.collapsed)}
-          />
-        )}
-        <DivineBeam sim={sim} selectedId={selectedId} voice={voice.current} />
-        <LabelProjector
-          sim={sim}
-          residents={shown}
-          labels={labels}
-          stage={stage}
-        />
+        </EnvironmentContext.Provider>
       </Canvas>
       <div className="fun-labels">
         {shown.map((r) => (

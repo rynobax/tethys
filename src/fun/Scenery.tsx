@@ -15,63 +15,45 @@ import type {
   Workshop,
 } from "./sim";
 import { STAGE_HEIGHT, type Stage } from "./stage";
-
-/** Everything about the look that isn't a resident. Swap it to reskin. */
-export interface Environment {
-  ground: string;
-  patch: string;
-  sky: string;
-  hemiGround: string;
-  hemiIntensity: number;
-  sun: string;
-  sunIntensity: number;
-  foliage: string[];
-  trunk: string;
-  rock: string;
-  flowers: string[];
-  portal: string;
-  /** The water in the lounge's pool. */
-  water: string;
-  /** How much the pool lights itself, for an evening swim. */
-  waterGlow: number;
-  fireflies: boolean;
-}
-
-export const MEADOW: Environment = {
-  ground: "#a9d673",
-  patch: "#9ccb64",
-  sky: "#eef8ff",
-  hemiGround: "#8fbf5a",
-  hemiIntensity: 1.6,
-  sun: "#fff3dc",
-  sunIntensity: 1.9,
-  foliage: ["#5fb35a", "#4fa152", "#77c26a"],
-  trunk: "#9a6b47",
-  rock: "#bdb8b0",
-  flowers: ["#ff8fab", "#ffd166", "#ffffff", "#b39ddb"],
-  portal: "#9b6bff",
-  water: "#4fc3e8",
-  waterGlow: 0.05,
-  fireflies: false,
-};
-
-export const DUSK: Environment = {
-  ground: "#3e6a4e",
-  patch: "#376146",
-  sky: "#9fb2e0",
-  hemiGround: "#2c4a3a",
-  hemiIntensity: 1.6,
-  sun: "#ffc98f",
-  sunIntensity: 1.6,
-  foliage: ["#2f6b4a", "#285e41", "#3a7a55"],
-  trunk: "#5d4636",
-  rock: "#7c7f86",
-  flowers: ["#f48fb1", "#ffe082", "#b39ddb"],
-  portal: "#b388ff",
-  water: "#2a9fd0",
-  waterGlow: 0.45,
-  fireflies: true,
-};
+import type { Palette } from "./palette";
+import { useEnvironment, type Environment } from "./environment";
+import {
+  ATHENS,
+  AthensBackdrop,
+  AthensGate,
+  Column,
+  Galley,
+  Ruin,
+  Tablet,
+  TempleKiosk,
+} from "./environments/athens";
+import {
+  Crater,
+  Crystal,
+  HoloBoard,
+  LaunchKiosk,
+  Meteors,
+  MoonBackdrop,
+  MoonGate,
+  Shuttle,
+  SolarPanel,
+} from "./environments/moon";
+import {
+  BallPit,
+  BeanBag,
+  CarpetTile,
+  Clutter,
+  Elevator,
+  Koi,
+  Mug,
+  MugTable,
+  OfficeBackdrop,
+  PottedPlant,
+  Reception,
+  RubberDuck,
+  SlideScreen,
+  StickyNote,
+} from "./environments/office";
 
 /** Deterministic, so a resize to the same size draws the same meadow. */
 function mulberry32(seed: number) {
@@ -219,10 +201,12 @@ function Portal({
   at,
   color,
   turn,
+  environment,
 }: {
   at: Vec2;
   color: string;
   turn: number;
+  environment: Environment;
 }) {
   const swirl = useRef<THREE.Mesh>(null);
   const sparks = useRef<THREE.Group>(null);
@@ -237,21 +221,15 @@ function Portal({
   });
   return (
     <group position={[at.x, 0, at.z - 0.15]} rotation-y={turn}>
-      {[-1, 1].map((s) => (
-        <mesh key={s} position={[s * 0.5, 0.08, 0]}>
-          <boxGeometry args={[0.26, 0.16, 0.22]} />
-          <meshStandardMaterial color="#8d8a85" flatShading />
-        </mesh>
-      ))}
-      <mesh position-y={0.68}>
-        <torusGeometry args={[0.55, 0.09, 8, 24]} />
-        <meshStandardMaterial
-          color={color}
-          emissive={color}
-          emissiveIntensity={0.45}
-          flatShading
-        />
-      </mesh>
+      {environment === "moon" ? (
+        <MoonGate color={color} />
+      ) : environment === "athens" ? (
+        <AthensGate />
+      ) : environment === "office" ? (
+        <Elevator color={color} />
+      ) : (
+        <StoneRing color={color} />
+      )}
       <mesh ref={swirl} position-y={0.68}>
         <circleGeometry args={[0.5, 6]} />
         <meshBasicMaterial
@@ -277,6 +255,28 @@ function Portal({
         ))}
       </group>
     </group>
+  );
+}
+
+function StoneRing({ color }: { color: string }) {
+  return (
+    <>
+      {[-1, 1].map((s) => (
+        <mesh key={s} position={[s * 0.5, 0.08, 0]}>
+          <boxGeometry args={[0.26, 0.16, 0.22]} />
+          <meshStandardMaterial color="#8d8a85" flatShading />
+        </mesh>
+      ))}
+      <mesh position-y={0.68}>
+        <torusGeometry args={[0.55, 0.09, 8, 24]} />
+        <meshStandardMaterial
+          color={color}
+          emissive={color}
+          emissiveIntensity={0.45}
+          flatShading
+        />
+      </mesh>
+    </>
   );
 }
 
@@ -420,13 +420,29 @@ function Onlooker({ at, seed }: { at: Vec2; seed: number }) {
  * The row behind the podium is always set out; a row behind that is put out
  * whole, and the stage grows back to hold it, as soon as the queue needs it.
  */
-function Chair({ at, row, sim }: { at: Vec2; row: number; sim: Sim }) {
+const CHAIR: Record<Environment, string> = {
+  meadow: "#7a5236",
+  moon: "#d3d7df",
+  athens: "#8a6a4a",
+  office: "#3a3f4a",
+};
+
+function Chair({
+  at,
+  row,
+  sim,
+  wood,
+}: {
+  at: Vec2;
+  row: number;
+  sim: Sim;
+  wood: string;
+}) {
   const group = useRef<THREE.Group>(null);
   useFrame(() => {
     if (!group.current) return;
     group.current.visible = row < sim.chairRowsOut();
   });
-  const wood = "#7a5236";
   return (
     <group ref={group} position={[at.x, STAGE_HEIGHT, at.z]} visible={false}>
       <mesh position-y={0.16}>
@@ -503,10 +519,17 @@ function EmptyRing({ at, index, sim }: { at: Vec2; index: number; sim: Sim }) {
   );
 }
 
+/** A lounger's frame and cushion, where it isn't a bean bag. */
+const LOUNGER: Record<Environment, [string, string]> = {
+  meadow: ["#ffffff", "#5bb8d6"],
+  moon: ["#d3d7df", "#ff8a3d"],
+  athens: ["#8a6a4a", "#c0533f"],
+  office: ["#ffffff", "#5bb8d6"],
+};
+
 /** A reclining sun lounger, its sitter's feet at `at` and its back behind. */
-function Lounger({ at }: { at: Seat }) {
-  const frame = "#ffffff";
-  const cushion = "#5bb8d6";
+function Lounger({ at, environment }: { at: Seat; environment: Environment }) {
+  const [frame, cushion] = LOUNGER[environment];
   return (
     <group position={[at.x, 0, at.z]} rotation-y={at.facing}>
       <group position-z={-0.2}>
@@ -558,6 +581,8 @@ function DrinkTable({ at, seed }: { at: Vec2; seed: number }) {
 
 /** A tall glass of something bright, with a straw and a paper umbrella. */
 export function Drink({ juice }: { juice: string }) {
+  const environment = useEnvironment();
+  if (environment === "office") return <Mug color={juice} />;
   return (
     <group>
       <mesh position-y={0.06}>
@@ -592,8 +617,21 @@ export function Drink({ juice }: { juice: string }) {
 }
 
 /** A beach parasol, striped. */
-function Parasol({ at, seed }: { at: Vec2; seed: number }) {
-  const colors = seed % 2 ? ["#ff6f61", "#ffffff"] : ["#3fa9f5", "#ffffff"];
+function Parasol({
+  at,
+  seed,
+  environment,
+}: {
+  at: Vec2;
+  seed: number;
+  environment: Environment;
+}) {
+  const colors =
+    environment === "athens"
+      ? ["#2f6fd0", "#ffffff"]
+      : seed % 2
+        ? ["#ff6f61", "#ffffff"]
+        : ["#3fa9f5", "#ffffff"];
   return (
     <group position={[at.x, 0, at.z]}>
       <mesh position-y={0.6}>
@@ -615,15 +653,26 @@ function Parasol({ at, seed }: { at: Vec2; seed: number }) {
 }
 
 /** A pool, loungers down either side, rings on the water. */
+/** The edge round the pool. */
+const COPING: Record<Environment, string> = {
+  meadow: "#ffffff",
+  moon: "#d3d7df",
+  athens: "#f4efe3",
+  office: "#3d7bd9",
+};
+
 function LoungeArea({
   lounge,
-  env,
+  palette,
   sim,
+  environment,
 }: {
   lounge: Lounge;
-  env: Environment;
+  palette: Palette;
   sim: Sim;
+  environment: Environment;
 }) {
+  const office = environment === "office";
   const water = useRef<THREE.MeshStandardMaterial>(null);
   const glints = useRef<THREE.Group>(null);
   useFrame((state) => {
@@ -634,7 +683,7 @@ function LoungeArea({
     });
     if (water.current) {
       water.current.emissiveIntensity =
-        env.waterGlow * (1 + Math.sin(t * 1.2) * 0.15);
+        palette.waterGlow * (1 + Math.sin(t * 1.2) * 0.15);
     }
   });
   const { pool } = lounge;
@@ -647,19 +696,25 @@ function LoungeArea({
     <>
       {/* The coping, then the water a little below it. */}
       <mesh position={[cx, 0.025, cz]}>
-        <boxGeometry args={[w + 0.24, 0.05, d + 0.24]} />
-        <meshStandardMaterial color="#ffffff" flatShading />
+        <boxGeometry args={[w + 0.24, office ? 0.12 : 0.05, d + 0.24]} />
+        <meshStandardMaterial color={COPING[environment]} flatShading />
       </mesh>
-      <mesh rotation-x={-Math.PI / 2} position={[cx, 0.052, cz]}>
-        <planeGeometry args={[w, d]} />
-        <meshStandardMaterial
-          ref={water}
-          color={env.water}
-          emissive={env.water}
-          emissiveIntensity={env.waterGlow}
-        />
-      </mesh>
-      <group ref={glints} position={[cx, 0.056, cz]}>
+      {office ? (
+        <group position={[cx, 0, cz]}>
+          <BallPit w={w} d={d} />
+        </group>
+      ) : (
+        <mesh rotation-x={-Math.PI / 2} position={[cx, 0.052, cz]}>
+          <planeGeometry args={[w, d]} />
+          <meshStandardMaterial
+            ref={water}
+            color={palette.water}
+            emissive={palette.water}
+            emissiveIntensity={palette.waterGlow}
+          />
+        </mesh>
+      )}
+      <group ref={glints} position={[cx, 0.056, cz]} visible={!office}>
         {Array.from({ length: glintCount }, (_, i) => (
           <mesh
             key={i}
@@ -685,15 +740,29 @@ function LoungeArea({
       {lounge.naps.map((p, i) => (
         <EmptyRing key={i} at={p} index={i} sim={sim} />
       ))}
-      {lounge.seats.map((p, i) => (
-        <Lounger key={i} at={p} />
-      ))}
-      {lounge.tables.map((p, i) => (
-        <DrinkTable key={i} at={p} seed={i} />
-      ))}
-      {lounge.parasols.map((p, i) => (
-        <Parasol key={i} at={p} seed={i} />
-      ))}
+      {lounge.seats.map((p, i) =>
+        office ? (
+          <BeanBag key={i} at={p} seed={i} />
+        ) : (
+          <Lounger key={i} at={p} environment={environment} />
+        ),
+      )}
+      {lounge.tables.map((p, i) =>
+        office ? (
+          <MugTable key={i} at={p} seed={i} />
+        ) : (
+          <DrinkTable key={i} at={p} seed={i} />
+        ),
+      )}
+      {lounge.parasols.map((p, i) =>
+        environment === "moon" ? (
+          <SolarPanel key={i} at={p} />
+        ) : office ? (
+          <PottedPlant key={i} {...p} s={1.5} palette={palette} />
+        ) : (
+          <Parasol key={i} at={p} seed={i} environment={environment} />
+        ),
+      )}
     </>
   );
 }
@@ -703,6 +772,19 @@ function LoungeArea({
 export const BOAT_SCALE = 1.15;
 
 export function Boat() {
+  switch (useEnvironment()) {
+    case "moon":
+      return <Shuttle />;
+    case "athens":
+      return <Galley />;
+    case "office":
+      return <RubberDuck />;
+    case "meadow":
+      return <Sailboat />;
+  }
+}
+
+function Sailboat() {
   const hull = "#c8714a";
   return (
     <group>
@@ -735,7 +817,26 @@ export function Boat() {
 const OFFICE_TURN = 0.7;
 
 /** A seaside kiosk, a striped awning over its window. */
-function TicketOffice({ at }: { at: Vec2 }) {
+function TicketOffice({
+  at,
+  environment,
+}: {
+  at: Vec2;
+  environment: Environment;
+}) {
+  if (environment !== "meadow") {
+    return (
+      <group position={[at.x, 0, at.z]} rotation-y={OFFICE_TURN}>
+        {environment === "moon" ? (
+          <LaunchKiosk />
+        ) : environment === "athens" ? (
+          <TempleKiosk />
+        ) : (
+          <Reception />
+        )}
+      </group>
+    );
+  }
   const wall = "#f2e6cf";
   const trim = "#c0533f";
   return (
@@ -802,15 +903,29 @@ function shorelineShape(grow: number): THREE.Shape {
  * Water running off the window's edge with a sandy rim, lily pads, reeds, a
  * pier out into it with a boat waiting at the end, and a ticket office.
  */
+/** The lake's rim, and its pier's planks and posts. */
+const SHORE: Record<Environment, { rim: string; deck: string; post: string }> =
+  {
+    meadow: { rim: "#e3cf9a", deck: "#a77b50", post: "#7a5236" },
+    moon: { rim: "#a9a8b0", deck: "#9aa1ad", post: "#5d6370" },
+    athens: { rim: "#e8d6a6", deck: "#d8d2c4", post: "#b9b2a2" },
+    office: { rim: "#c3c8d0", deck: "#c9a77c", post: "#8a6a4a" },
+  };
+
 function LakeArea({
   lake,
-  env,
+  palette,
   sim,
+  environment,
 }: {
   lake: Lake;
-  env: Environment;
+  palette: Palette;
   sim: Sim;
+  environment: Environment;
 }) {
+  const shore = SHORE[environment];
+  // Lily pads and reeds where there'd be any.
+  const green = environment !== "moon";
   const boat = useRef<THREE.Group>(null);
   const water = useRef<THREE.MeshStandardMaterial>(null);
   useFrame((state) => {
@@ -823,7 +938,7 @@ function LakeArea({
     }
     if (water.current) {
       water.current.emissiveIntensity =
-        env.waterGlow * 0.5 * (1 + Math.sin(t * 0.9) * 0.15);
+        palette.waterGlow * 0.5 * (1 + Math.sin(t * 0.9) * 0.15);
     }
   });
   const { water: w, pierFoot, pierEnd } = lake;
@@ -850,7 +965,7 @@ function LakeArea({
         scale={[rx, rz, 1]}
       >
         <shapeGeometry args={[sand]} />
-        <meshStandardMaterial color="#e3cf9a" />
+        <meshStandardMaterial color={shore.rim} />
       </mesh>
       <mesh
         rotation-x={-Math.PI / 2}
@@ -860,39 +975,48 @@ function LakeArea({
         <shapeGeometry args={[shoreline]} />
         <meshStandardMaterial
           ref={water}
-          color={env.water}
-          emissive={env.water}
-          emissiveIntensity={env.waterGlow * 0.5}
+          color={palette.water}
+          emissive={palette.water}
+          emissiveIntensity={palette.waterGlow * 0.5}
         />
       </mesh>
-      {[
-        [0.55, -0.35],
-        [0.7, 0.45],
-        [0.35, 0.55],
-      ].map(([fx, fz], i) => (
-        <mesh
-          key={i}
-          rotation-x={-Math.PI / 2}
-          position={[cx + fx * rx, 0.016, cz + fz * rz]}
-        >
-          <circleGeometry args={[0.14, 9, 0.4, Math.PI * 1.8]} />
-          <meshStandardMaterial color="#5fae5a" side={THREE.DoubleSide} />
-        </mesh>
-      ))}
-      {[-0.7, -0.55, -0.4, 0.75, 0.88].map((f, i) => (
-        <mesh
-          key={i}
-          position={[cx + Math.sqrt(1 - f * f) * rx - 0.1, 0.18, cz + f * rz]}
-          rotation-z={(i % 3) * 0.12 - 0.1}
-        >
-          <cylinderGeometry args={[0.012, 0.016, 0.36, 4]} />
-          <meshStandardMaterial color="#6f9a3c" flatShading />
-        </mesh>
-      ))}
+      {environment === "office" && <Koi cx={cx} cz={cz} rx={rx} rz={rz} />}
+      {green && (
+        <>
+          {[
+            [0.55, -0.35],
+            [0.7, 0.45],
+            [0.35, 0.55],
+          ].map(([fx, fz], i) => (
+            <mesh
+              key={i}
+              rotation-x={-Math.PI / 2}
+              position={[cx + fx * rx, 0.016, cz + fz * rz]}
+            >
+              <circleGeometry args={[0.14, 9, 0.4, Math.PI * 1.8]} />
+              <meshStandardMaterial color="#5fae5a" side={THREE.DoubleSide} />
+            </mesh>
+          ))}
+          {[-0.7, -0.55, -0.4, 0.75, 0.88].map((f, i) => (
+            <mesh
+              key={i}
+              position={[
+                cx + Math.sqrt(1 - f * f) * rx - 0.1,
+                0.18,
+                cz + f * rz,
+              ]}
+              rotation-z={(i % 3) * 0.12 - 0.1}
+            >
+              <cylinderGeometry args={[0.012, 0.016, 0.36, 4]} />
+              <meshStandardMaterial color="#6f9a3c" flatShading />
+            </mesh>
+          ))}
+        </>
+      )}
       {/* The pier: planks on posts, from the shore out over the water. */}
       <mesh position={[(walkEnd + pierEnd.x - 0.15) / 2, 0.07, pierEnd.z]}>
         <boxGeometry args={[walkEnd - pierEnd.x + 0.15, 0.04, 0.42]} />
-        <meshStandardMaterial color="#a77b50" flatShading />
+        <meshStandardMaterial color={shore.deck} flatShading />
       </mesh>
       {Array.from({ length: posts }, (_, i) =>
         [-0.19, 0.19].map((dz) => (
@@ -905,11 +1029,11 @@ function LakeArea({
             ]}
           >
             <cylinderGeometry args={[0.03, 0.03, 0.14, 5]} />
-            <meshStandardMaterial color="#7a5236" flatShading />
+            <meshStandardMaterial color={shore.post} flatShading />
           </mesh>
         )),
       )}
-      <TicketOffice at={lake.office} />
+      <TicketOffice at={lake.office} environment={environment} />
       {/* Moored alongside the pier's end, bow out to the open water. */}
       <group position={[lake.berth.x, 0.02, lake.berth.z]}>
         <group ref={boat} rotation-y={-Math.PI / 2} scale={BOAT_SCALE}>
@@ -921,28 +1045,26 @@ function LakeArea({
 }
 
 /** Two whiteboards along the back, and the garden. */
-function WorkshopArea({ workshop, sim }: { workshop: Workshop; sim: Sim }) {
+function WorkshopArea({
+  workshop,
+  sim,
+  environment,
+}: {
+  workshop: Workshop;
+  sim: Sim;
+  environment: Environment;
+}) {
   return (
     <>
       {workshop.boards.map((p, i) => (
         <group key={i} position={[p.x, 0, p.z - 0.5]}>
-          {[-0.36, 0.36].map((x) => (
-            <mesh key={x} position={[x, 0.42, 0]}>
-              <cylinderGeometry args={[0.025, 0.025, 0.84, 5]} />
-              <meshStandardMaterial color="#6b6f76" flatShading />
-            </mesh>
-          ))}
-          <mesh position-y={0.62}>
-            <boxGeometry args={[0.8, 0.48, 0.03]} />
-            <meshStandardMaterial color="#f7f7f2" />
-          </mesh>
-          {/* A few scribbles, so it reads as written on. */}
-          {[0.12, 0.02, -0.08].map((y, j) => (
-            <mesh key={y} position={[-0.06 + j * 0.05, 0.62 + y, 0.017]}>
-              <planeGeometry args={[0.5 - j * 0.12, 0.025]} />
-              <meshBasicMaterial color={["#3d6fd1", "#d14d3d", "#2e9e5b"][j]} />
-            </mesh>
-          ))}
+          {environment === "moon" ? (
+            <HoloBoard />
+          ) : environment === "athens" ? (
+            <Tablet />
+          ) : (
+            <Whiteboard />
+          )}
         </group>
       ))}
       <GardenArea garden={workshop.garden} sim={sim} />
@@ -950,18 +1072,58 @@ function WorkshopArea({ workshop, sim }: { workshop: Workshop; sim: Sim }) {
   );
 }
 
-/** The stage itself: boards on a low platform, and bunting across the back. */
-function Boards({ stage, env }: { stage: Region; env: Environment }) {
+function Whiteboard() {
+  return (
+    <>
+      {[-0.36, 0.36].map((x) => (
+        <mesh key={x} position={[x, 0.42, 0]}>
+          <cylinderGeometry args={[0.025, 0.025, 0.84, 5]} />
+          <meshStandardMaterial color="#6b6f76" flatShading />
+        </mesh>
+      ))}
+      <mesh position-y={0.62}>
+        <boxGeometry args={[0.8, 0.48, 0.03]} />
+        <meshStandardMaterial color="#f7f7f2" />
+      </mesh>
+      {/* A few scribbles, so it reads as written on. */}
+      {[0.12, 0.02, -0.08].map((y, j) => (
+        <mesh key={y} position={[-0.06 + j * 0.05, 0.62 + y, 0.017]}>
+          <planeGeometry args={[0.5 - j * 0.12, 0.025]} />
+          <meshBasicMaterial color={["#3d6fd1", "#d14d3d", "#2e9e5b"][j]} />
+        </mesh>
+      ))}
+    </>
+  );
+}
+
+/** The stage's boards and the seams between them. */
+const PLATFORM: Record<Environment, [string, string]> = {
+  meadow: ["#b98a5e", "#9a7049"],
+  moon: ["#9aa1ad", "#7d838f"],
+  athens: ["#efe9dc", "#d8d0bd"],
+  office: ["#3a3f4a", "#2f343e"],
+};
+
+/** The stage itself: boards on a low platform, and dressing across the back. */
+function Boards({
+  stage,
+  palette,
+  environment,
+}: {
+  stage: Region;
+  palette: Palette;
+  environment: Environment;
+}) {
   const w = stage.xMax - stage.xMin;
   const d = stage.zMax - stage.zMin;
   const cx = (stage.xMin + stage.xMax) / 2;
   const cz = (stage.zMin + stage.zMax) / 2;
-  const flags = Math.max(4, Math.round(w / 0.45));
+  const [boards, seams] = PLATFORM[environment];
   return (
     <>
       <mesh position={[cx, STAGE_HEIGHT / 2, cz]}>
         <boxGeometry args={[w, STAGE_HEIGHT, d]} />
-        <meshStandardMaterial color="#b98a5e" flatShading />
+        <meshStandardMaterial color={boards} flatShading />
       </mesh>
       {/* Board seams, so it reads as a stage rather than a slab. */}
       {Array.from({ length: Math.floor(d / 0.5) }, (_, i) => (
@@ -970,31 +1132,87 @@ function Boards({ stage, env }: { stage: Region; env: Environment }) {
           position={[cx, STAGE_HEIGHT + 0.002, stage.zMin + 0.5 * (i + 1)]}
         >
           <boxGeometry args={[w, 0.004, 0.03]} />
-          <meshBasicMaterial color="#9a7049" />
+          <meshBasicMaterial color={seams} />
         </mesh>
       ))}
-      {[stage.xMin + 0.1, stage.xMax - 0.1].map((x) => (
-        <mesh key={x} position={[x, 0.75, stage.zMin + 0.1]}>
-          <cylinderGeometry args={[0.04, 0.05, 1.5, 6]} />
-          <meshStandardMaterial color={env.trunk} flatShading />
-        </mesh>
-      ))}
-      {Array.from({ length: flags }, (_, i) => {
-        const f = (i + 0.5) / flags;
+      {environment === "office" ? (
+        <group position={[cx, 0, stage.zMin + 0.1]}>
+          <SlideScreen width={w} />
+        </group>
+      ) : (
+        <Bunting stage={stage} palette={palette} environment={environment} />
+      )}
+    </>
+  );
+}
+
+/**
+ * Two posts at the back of the stage with something strung between: flags,
+ * lights on the moon, laurel between columns in Athens.
+ */
+function Bunting({
+  stage,
+  palette,
+  environment,
+}: {
+  stage: Region;
+  palette: Palette;
+  environment: Environment;
+}) {
+  const w = stage.xMax - stage.xMin;
+  const count = Math.max(
+    4,
+    Math.round(w / (environment === "meadow" ? 0.45 : 0.25)),
+  );
+  return (
+    <>
+      {[stage.xMin + 0.1, stage.xMax - 0.1].map((x) =>
+        environment === "athens" ? (
+          <group key={x} position={[x, 0, stage.zMin + 0.1]}>
+            <Column height={1.5} radius={0.08} />
+          </group>
+        ) : (
+          <mesh key={x} position={[x, 0.75, stage.zMin + 0.1]}>
+            <cylinderGeometry args={[0.04, 0.05, 1.5, 6]} />
+            <meshStandardMaterial color={palette.trunk} flatShading />
+          </mesh>
+        ),
+      )}
+      {Array.from({ length: count }, (_, i) => {
+        const f = (i + 0.5) / count;
         const sag = Math.sin(f * Math.PI) * 0.25;
+        const at: [number, number, number] = [
+          stage.xMin + 0.1 + f * (w - 0.2),
+          1.38 - sag,
+          stage.zMin + 0.1,
+        ];
+        if (environment === "moon") {
+          const color = palette.flowers[i % palette.flowers.length];
+          return (
+            <mesh key={i} position={at}>
+              <sphereGeometry args={[0.045, 6, 5]} />
+              <meshBasicMaterial color={color} toneMapped={false} />
+            </mesh>
+          );
+        }
+        if (environment === "athens") {
+          return (
+            <mesh
+              key={i}
+              position={at}
+              rotation-z={i % 2 ? 0.5 : -0.5}
+              scale={[0.6, 1.6, 0.4]}
+            >
+              <sphereGeometry args={[0.06, 5, 4]} />
+              <meshStandardMaterial color={ATHENS.LAUREL} flatShading />
+            </mesh>
+          );
+        }
         return (
-          <mesh
-            key={i}
-            position={[
-              stage.xMin + 0.1 + f * (w - 0.2),
-              1.38 - sag,
-              stage.zMin + 0.1,
-            ]}
-            rotation-z={Math.PI}
-          >
+          <mesh key={i} position={at} rotation-z={Math.PI}>
             <coneGeometry args={[0.1, 0.2, 3]} />
             <meshStandardMaterial
-              color={env.flowers[i % env.flowers.length]}
+              color={palette.flowers[i % palette.flowers.length]}
               flatShading
             />
           </mesh>
@@ -1006,12 +1224,14 @@ function Boards({ stage, env }: { stage: Region; env: Environment }) {
 
 function PitchArea({
   pitch,
-  env,
+  palette,
   sim,
+  environment,
 }: {
   pitch: Pitch;
-  env: Environment;
+  palette: Palette;
   sim: Sim;
+  environment: Environment;
 }) {
   const groups = useRef<(THREE.Group | null)[]>([]);
   // One stage per number of rows out, and only the one in use shown.
@@ -1031,11 +1251,17 @@ function PitchArea({
           }}
           visible={i === 0}
         >
-          <Boards stage={st} env={env} />
+          <Boards stage={st} palette={palette} environment={environment} />
         </group>
       ))}
       {pitch.chairs.map((p, i) => (
-        <Chair key={i} at={p} row={pitch.chairRows[i]} sim={sim} />
+        <Chair
+          key={i}
+          at={p}
+          row={pitch.chairRows[i]}
+          sim={sim}
+          wood={CHAIR[environment]}
+        />
       ))}
       {pitch.crowd.map((p, i) => (
         <Onlooker key={i} at={p} seed={i + 1} />
@@ -1044,85 +1270,192 @@ function PitchArea({
   );
 }
 
+/** What lines the back and outer edge, where a tree would be. */
+function Backdrop({
+  environment,
+  ...props
+}: {
+  environment: Environment;
+  x: number;
+  z: number;
+  s: number;
+  c: number;
+  palette: Palette;
+}) {
+  switch (environment) {
+    case "moon":
+      return <MoonBackdrop {...props} />;
+    case "athens":
+      return <AthensBackdrop {...props} />;
+    case "office":
+      return <OfficeBackdrop {...props} />;
+    case "meadow":
+      return (
+        <Tree
+          {...props}
+          color={props.palette.foliage[props.c]}
+          trunk={props.palette.trunk}
+        />
+      );
+  }
+}
+
+/** The odd patch of different ground. */
+function Patch({
+  environment,
+  x,
+  z,
+  r,
+  palette,
+}: {
+  environment: Environment;
+  x: number;
+  z: number;
+  r: number;
+  palette: Palette;
+}) {
+  if (environment === "moon") {
+    return <Crater x={x} z={z} r={r} palette={palette} />;
+  }
+  if (environment === "office") {
+    return <CarpetTile x={x} z={z} r={r} palette={palette} />;
+  }
+  return (
+    <mesh rotation-x={-Math.PI / 2} position={[x, 0.003, z]}>
+      <circleGeometry args={[r, 9]} />
+      <meshStandardMaterial color={palette.patch} />
+    </mesh>
+  );
+}
+
+function Rock({
+  environment,
+  ...props
+}: {
+  environment: Environment;
+  x: number;
+  z: number;
+  s: number;
+  r: number;
+  palette: Palette;
+}) {
+  if (environment === "athens") return <Ruin {...props} />;
+  if (environment === "office") return <Clutter {...props} />;
+  const { x, z, s, r, palette } = props;
+  return (
+    <mesh position={[x, s * 0.4, z]} rotation-y={r} scale={[s, s * 0.7, s]}>
+      <dodecahedronGeometry args={[1, 0]} />
+      <meshStandardMaterial color={palette.rock} flatShading />
+    </mesh>
+  );
+}
+
+/** Whatever's dotted about: a flower, a crystal, a sticky note. */
+function Speck({
+  environment,
+  ...props
+}: {
+  environment: Environment;
+  x: number;
+  z: number;
+  c: number;
+  j: number;
+  palette: Palette;
+}) {
+  if (environment === "moon") {
+    return props.j % 3 ? null : <Crystal {...props} />;
+  }
+  if (environment === "office") return <StickyNote {...props} />;
+  const { x, z, c, palette } = props;
+  return (
+    <mesh position={[x, 0.05, z]}>
+      <sphereGeometry args={[0.045, 5, 4]} />
+      <meshStandardMaterial
+        color={palette.flowers[c % palette.flowers.length]}
+      />
+    </mesh>
+  );
+}
+
 export function Scenery({
   stage,
-  env,
+  palette,
   pitching,
   sim,
 }: {
   stage: Stage;
-  env: Environment;
+  palette: Palette;
   /** Whether anyone is Shipping and waiting, which is when the stage is up. */
   pitching: boolean;
   sim: Sim;
 }) {
+  const environment = useEnvironment();
   const { lounge, workshop, porch, pitch, lake } = stage.layout;
   const decor = useMemo(
     () => (["left", "right"] as const).map((side) => scatter(stage, side)),
     [stage],
   );
+  // Grass grows only where there's grass.
+  const tufts = environment === "meadow" || environment === "athens";
   return (
     <>
-      <hemisphereLight args={[env.sky, env.hemiGround, env.hemiIntensity]} />
+      <hemisphereLight
+        args={[palette.sky, palette.hemiGround, palette.hemiIntensity]}
+      />
       <directionalLight
         position={[6, 12, 8]}
-        intensity={env.sunIntensity}
-        color={env.sun}
+        intensity={palette.sunIntensity}
+        color={palette.sun}
       />
       <mesh rotation-x={-Math.PI / 2}>
         <planeGeometry args={[400, 400]} />
-        <meshStandardMaterial color={env.ground} />
+        <meshStandardMaterial color={palette.ground} />
       </mesh>
       {decor.map((d, i) => (
         <group key={i}>
           {d.patches.map((p, j) => (
-            <mesh
+            <Patch
               key={`p${j}`}
-              rotation-x={-Math.PI / 2}
-              position={[p.x, 0.003, p.z]}
-            >
-              <circleGeometry args={[p.r, 9]} />
-              <meshStandardMaterial color={env.patch} />
-            </mesh>
+              environment={environment}
+              {...p}
+              palette={palette}
+            />
           ))}
           {d.trees.map((t, j) => (
-            <Tree
+            <Backdrop
               key={`t${j}`}
-              x={t.x}
-              z={t.z}
-              s={t.s}
-              color={env.foliage[t.c]}
-              trunk={env.trunk}
+              environment={environment}
+              {...t}
+              palette={palette}
             />
           ))}
           {d.rocks.map((r, j) => (
-            <mesh
+            <Rock
               key={`r${j}`}
-              position={[r.x, r.s * 0.4, r.z]}
-              rotation-y={r.r}
-              scale={[r.s, r.s * 0.7, r.s]}
-            >
-              <dodecahedronGeometry args={[1, 0]} />
-              <meshStandardMaterial color={env.rock} flatShading />
-            </mesh>
+              environment={environment}
+              {...r}
+              palette={palette}
+            />
           ))}
           {d.flowers.map((f, j) => (
-            <mesh key={`f${j}`} position={[f.x, 0.05, f.z]}>
-              <sphereGeometry args={[0.045, 5, 4]} />
-              <meshStandardMaterial
-                color={env.flowers[f.c % env.flowers.length]}
-              />
-            </mesh>
+            <Speck
+              key={`f${j}`}
+              environment={environment}
+              {...f}
+              j={j}
+              palette={palette}
+            />
           ))}
-          {d.tufts.map((t, j) => (
-            <mesh key={`g${j}`} position={[t.x, 0.06, t.z]}>
-              <coneGeometry args={[0.05, 0.14, 4]} />
-              <meshStandardMaterial
-                color={env.foliage[j % env.foliage.length]}
-                flatShading
-              />
-            </mesh>
-          ))}
+          {tufts &&
+            d.tufts.map((t, j) => (
+              <mesh key={`g${j}`} position={[t.x, 0.06, t.z]}>
+                <coneGeometry args={[0.05, 0.14, 4]} />
+                <meshStandardMaterial
+                  color={palette.foliage[j % palette.foliage.length]}
+                  flatShading
+                />
+              </mesh>
+            ))}
         </group>
       ))}
       {(["left", "right"] as const).map((side) => {
@@ -1130,15 +1463,45 @@ export function Scenery({
         // Half turned to face into its back corner by the panel.
         const turn = ((side === "left" ? -1 : 1) * Math.PI) / 4;
         return at ? (
-          <Portal key={side} at={at} color={env.portal} turn={turn} />
+          <Portal
+            key={side}
+            at={at}
+            color={palette.portal}
+            turn={turn}
+            environment={environment}
+          />
         ) : null;
       })}
-      {lounge && <LoungeArea lounge={lounge} env={env} sim={sim} />}
-      {workshop && <WorkshopArea workshop={workshop} sim={sim} />}
+      {lounge && (
+        <LoungeArea
+          lounge={lounge}
+          palette={palette}
+          sim={sim}
+          environment={environment}
+        />
+      )}
+      {workshop && (
+        <WorkshopArea workshop={workshop} sim={sim} environment={environment} />
+      )}
       {porch && <PorchArea porch={porch} sim={sim} />}
-      {lake && <LakeArea lake={lake} env={env} sim={sim} />}
-      {pitching && pitch && <PitchArea pitch={pitch} env={env} sim={sim} />}
-      {env.fireflies && <Fireflies stage={stage} />}
+      {lake && (
+        <LakeArea
+          lake={lake}
+          palette={palette}
+          sim={sim}
+          environment={environment}
+        />
+      )}
+      {pitching && pitch && (
+        <PitchArea
+          pitch={pitch}
+          palette={palette}
+          sim={sim}
+          environment={environment}
+        />
+      )}
+      {palette.fireflies && <Fireflies stage={stage} />}
+      {environment === "moon" && <Meteors stage={stage} />}
     </>
   );
 }

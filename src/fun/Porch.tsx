@@ -4,6 +4,8 @@ import * as THREE from "three";
 import { ANIMALS } from "./animals";
 import { Mat } from "./animals/rig";
 import type { Porch, QuiltingPlace, Sim } from "./sim";
+import { useEnvironment, type Environment } from "./environment";
+import { DeskChair } from "./environments/office";
 
 const WOOD = "#9a6b47";
 const DARK_WOOD = "#7a5236";
@@ -18,39 +20,53 @@ const QUILT_D = 0.72;
 /** How high the quilt is stretched, at a sitter's lap. */
 const QUILT_Y = 0.31;
 
+/** The porch's boards, alternating; a rug in the office. */
+const DECKS: Record<Environment, [string, string]> = {
+  meadow: [DECK, "#b88d60"],
+  moon: ["#b4bac4", "#a8aeb9"],
+  athens: ["#efe9dc", "#e4dccb"],
+  office: ["#c96f5a", "#bd6450"],
+};
+
 /** A rocking chair facing the viewer, its rockers along z. */
-function RockingChair() {
+function RockingChair({
+  wood = WOOD,
+  rocker = DARK_WOOD,
+}: {
+  wood?: string;
+  rocker?: string;
+}) {
   return (
     <group>
       <mesh position-y={0.2}>
         <boxGeometry args={[0.42, 0.04, 0.38]} />
-        <Mat color={WOOD} />
+        <Mat color={wood} />
       </mesh>
       {[-0.17, 0.17].map((x) => (
         <group key={x} position-x={x}>
           {[-0.13, 0.13].map((z) => (
             <mesh key={z} position={[0, 0.11, z]}>
               <boxGeometry args={[0.04, 0.16, 0.04]} />
-              <Mat color={WOOD} />
+              <Mat color={wood} />
             </mesh>
           ))}
           {/* The rocker: a shallow arc under both legs. */}
           <group position-y={0.62} rotation-y={Math.PI / 2}>
             <mesh rotation-z={-Math.PI / 2 - 0.375}>
               <torusGeometry args={[0.6, 0.018, 3, 10, 0.75]} />
-              <Mat color={DARK_WOOD} />
+              <Mat color={rocker} />
             </mesh>
           </group>
           <mesh position={[0, 0.48, -0.19]}>
             <boxGeometry args={[0.04, 0.6, 0.04]} />
-            <Mat color={WOOD} />
+            <Mat color={wood} />
           </mesh>
         </group>
       ))}
       {[0.36, 0.56, 0.74].map((y) => (
         <mesh key={y} position={[0, y, -0.19]}>
           <boxGeometry args={[0.38, 0.07, 0.03]} />
-          <Mat color={WOOD} />
+          <Mat color={wood} />
         </mesh>
       ))}
     </group>
@@ -168,6 +184,14 @@ function QuiltingFrame({ index, sim }: { index: number; sim: Sim }) {
   );
 }
 
+function Chair() {
+  const environment = useEnvironment();
+  if (environment === "office") return <DeskChair />;
+  if (environment === "moon")
+    return <RockingChair wood="#d3d7df" rocker="#7d838f" />;
+  return <RockingChair />;
+}
+
 function Place({
   place,
   index,
@@ -180,7 +204,7 @@ function Place({
   return (
     <>
       <group position={[place.seat.x, 0.03, place.seat.z]}>
-        <RockingChair />
+        <Chair />
       </group>
       <group position={[place.frame.x, 0.03, place.frame.z]}>
         <QuiltingFrame index={index} sim={sim} />
@@ -191,6 +215,7 @@ function Place({
 
 /** Boards under the row of places, and a chair and a frame at each. */
 export function PorchArea({ porch, sim }: { porch: Porch; sim: Sim }) {
+  const [boards, between] = DECKS[useEnvironment()];
   const deck = useMemo(() => {
     const xs = porch.places.map((p) => p.seat.x);
     const { seat, frame } = porch.places[0];
@@ -220,7 +245,7 @@ export function PorchArea({ porch, sim }: { porch: Porch; sim: Sim }) {
               (deck.zMax - deck.zMin) / planks - 0.015,
             ]}
           />
-          <Mat color={i % 2 ? DECK : "#b88d60"} />
+          <Mat color={i % 2 ? boards : between} />
         </mesh>
       ))}
       {porch.places.map((p, i) => (

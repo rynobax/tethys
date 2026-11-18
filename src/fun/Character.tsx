@@ -9,6 +9,10 @@ import { ANIMALS } from "./animals";
 import { Mat, RIG, YOUNG_HEAD } from "./animals/rig";
 import { hashString, type Work } from "./spec";
 import { STAGE_HEIGHT } from "./stage";
+import { useEnvironment } from "./environment";
+import { Wreath } from "./environments/athens";
+import { AirTank, Helmet } from "./environments/moon";
+import { Tie } from "./environments/office";
 
 /** Where the cork sits on a champagne bottle held from below. */
 const BOTTLE_TOP = 0.37;
@@ -733,11 +737,13 @@ export function Character({
       <group ref={figure}>
         <group ref={body}>
           <design.Torso />
+          <Bodywear accent={design.accent} />
           <group
             position-y={RIG.head}
             scale={resident.depth > 0 ? YOUNG_HEAD : 1}
           >
             <design.Head eyes={eyes} />
+            <Headwear />
           </group>
           {design.Tail && (
             <group ref={tail} position={[0, RIG.tail.y, RIG.tail.z]}>
@@ -847,6 +853,34 @@ export function Character({
       </group>
     </group>
   );
+}
+
+/** What's worn on the head for the day: a helmet, a wreath. */
+function Headwear() {
+  switch (useEnvironment()) {
+    case "moon":
+      return <Helmet />;
+    case "athens":
+      return <Wreath />;
+    default:
+      return null;
+  }
+}
+
+/** What's worn on the body for the day: an air tank, a tie. */
+function Bodywear({ accent }: { accent: string }) {
+  switch (useEnvironment()) {
+    case "moon":
+      return <AirTank />;
+    case "office":
+      return (
+        <group position-z={RIG.front + 0.01}>
+          <Tie color={accent} />
+        </group>
+      );
+    default:
+      return null;
+  }
 }
 
 function poseWork(

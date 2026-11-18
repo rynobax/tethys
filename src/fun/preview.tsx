@@ -11,6 +11,7 @@ import type { Folder, GithubPrStatus, Workspace } from "../types";
 import FunWorld, { type ManualClock } from "./FunWorld";
 import Gallery from "./Gallery";
 import { CLEAR, PRESETS } from "./forecast";
+import type { Environment } from "./environment";
 import "../App.css";
 
 interface Sample {
@@ -224,6 +225,11 @@ function Preview() {
   // preview otherwise shows the weather where you are.
   const asked = new URLSearchParams(location.search).get("weather");
   const weather = asked ? PRESETS[asked] : shot ? CLEAR : undefined;
+  // `?environment=moon`, or any of `ENVIRONMENTS`; a shot is in the meadow
+  // unless asked, the preview otherwise in today's.
+  const environment =
+    (new URLSearchParams(location.search).get("environment") as Environment) ??
+    (shot ? "meadow" : undefined);
   const onManualClock = useCallback((clock: ManualClock) => {
     const set = (fn: (ss: Sample[]) => Sample[]) =>
       flushSync(() => setSamples(fn));
@@ -270,6 +276,7 @@ function Preview() {
         panelRef={panelRef}
         onManualClock={shot ? onManualClock : undefined}
         weather={weather}
+        environment={environment}
       />
       {/* The real detail pane's skeleton, so the pane sizes as it does live. */}
       <main className="detail" ref={panelRef}>
