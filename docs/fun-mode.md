@@ -34,7 +34,9 @@ Each day is spent somewhere: the meadow, a moon base, Athens or an office floor 
 
 Everything happens the same everywhere, on the same layout; only what it's drawn as changes. The pool is a ball pit in the office, the boat a shuttle, a galley or a rubber duck, the houses habitat modules, temples or meeting rooms, and the residents put on a bubble helmet, a laurel wreath or a tie. Each environment has a light and a dark palette (`palette.ts`), and its own props in `environments/`; the meadow's are where they always were. Who draws what is a switch on the environment at each place it differs, read from `EnvironmentContext`.
 
-The office is indoors and the moon has no air, so neither has the weather; the moon has meteors instead.
+The office is indoors and the moon has no air, so neither has the weather; the moon has meteors instead. The moon has low gravity too: everyone bounds about rather than walking, and every hop is a slow arc that hangs at the top (`hop` in `Character.tsx`).
+
+View → Next environment steps on to the next, to look round them all, until a reload or midnight. The menu sends `next-environment` and the preload passes it on as a `tethys:next-environment` DOM event, so neither knows more of fun mode than that.
 
 The preview takes `?environment=moon` (or any of `ENVIRONMENTS`), as does the gallery, to see the outfits; a shot is in the meadow unless asked.
 

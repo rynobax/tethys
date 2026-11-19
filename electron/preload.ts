@@ -38,6 +38,12 @@ ipcRenderer.on("full-screen", (_event, on: boolean) => {
   document.documentElement.classList.toggle("full-screen", on);
 });
 
+// Fun mode's, from the View menu: passed on as a DOM event, so the bridge
+// needn't know fun mode exists.
+ipcRenderer.on("next-environment", () => {
+  window.dispatchEvent(new Event("tethys:next-environment"));
+});
+
 // The page's zoom, for what must stay the native size whatever it is: the
 // strip under the traffic lights. A zoom resizes the viewport.
 const markZoom = () =>

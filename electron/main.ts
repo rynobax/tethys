@@ -197,6 +197,11 @@ function installMenu(
             label: "Reset theme to default",
             click: () => void call("reset_theme"),
           },
+          { type: "separator" },
+          {
+            label: "Next environment",
+            click: () => win.webContents.send("next-environment"),
+          },
         ],
       },
       { role: "windowMenu" },

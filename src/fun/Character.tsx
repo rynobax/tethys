@@ -200,6 +200,19 @@ export interface CharacterHandlers {
   onMenu: (id: string, x: number, y: number) => void;
 }
 
+/** On the moon a hop hangs: this much slower, and this many times as high. */
+const LOW_G = { pace: 0.45, height: 3.2 };
+
+/**
+ * How high a hop `height` high, `rate` hops a half-turn, has it at `t`. In
+ * low gravity each is a slow arc with time to hang at the top.
+ */
+function hop(t: number, rate: number, height: number, lowG: boolean): number {
+  if (!lowG) return Math.abs(Math.sin(t * rate)) * height;
+  const u = ((t * rate * LOW_G.pace) / Math.PI) % 1;
+  return 4 * u * (1 - u) * height * LOW_G.height;
+}
+
 /** One resident, posed every frame from its agent in the sim. */
 export function Character({
   resident,
@@ -253,6 +266,7 @@ export function Character({
   /** 0..1, how hard the chosen one is listening to the voice from above. */
   const listen = useRef(0);
   const mood = resident.mood;
+  const lowG = useEnvironment() === "moon";
 
   useFrame((_, delta) => {
     const a: Agent | undefined = sim.agents.get(resident.id);
@@ -442,6 +456,19 @@ export function Character({
 
     switch (a.activity) {
       case "walk": {
+        if (lowG) {
+          // Bounding along, feet together, arms out to keep its balance.
+          const up = hop(t, 11, 0.06, true);
+          b.position.y = up;
+          b.rotation.x = 0.12;
+          if (!handsBusy) {
+            L.rotation.z = -0.6 - up;
+            R.rotation.z = 0.6 + up;
+          }
+          footL.current!.position.z = 0.03 - up * 0.4;
+          footR.current!.position.z = 0.03 - up * 0.4;
+          break;
+        }
         const s = Math.sin(t * 11);
         b.position.y = Math.abs(s) * 0.06;
         b.rotation.z = s * 0.05;
@@ -460,13 +487,13 @@ export function Character({
         b.scale.y = 1 + Math.sin(t * 2.2) * 0.02;
         b.rotation.y = Math.sin(t * 0.7) * 0.3;
         if (mood === "shipped" && Math.sin(t * 1.7) > 0.85) {
-          b.position.y = Math.abs(Math.sin(t * 9)) * 0.12;
+          b.position.y = hop(t, 9, 0.12, lowG);
           L.rotation.z = -2.5;
           R.rotation.z = 2.5;
         }
         break;
       case "attention":
-        b.position.y = Math.abs(Math.sin(t * 4.5)) * 0.1;
+        b.position.y = hop(t, 4.5, 0.1, lowG);
         R.rotation.z = 2.75 + Math.sin(t * 9) * 0.28;
         break;
       case "sleep":
@@ -537,13 +564,13 @@ export function Character({
       }
       case "cheer":
         // Up on its chair, hopping, both arms in the air.
-        b.position.y = Math.abs(Math.sin(t * 7)) * 0.1;
+        b.position.y = hop(t, 7, 0.1, lowG);
         L.rotation.z = -2.6 + Math.sin(t * 9) * 0.2;
         R.rotation.z = 2.6 - Math.sin(t * 9) * 0.2;
         break;
       case "pop":
         // Bouncing, the bottle held high and spraying, the other arm cheering.
-        b.position.y = Math.abs(Math.sin(t * 6)) * 0.08;
+        b.position.y = hop(t, 6, 0.08, lowG);
         R.rotation.z = 2.3;
         R.rotation.x = -0.3;
         L.rotation.z = -2.6 + Math.sin(t * 8) * 0.2;
@@ -570,6 +597,11 @@ export function Character({
       R.rotation.x = -1.15;
       L.rotation.z = 0.15;
       R.rotation.z = -0.15;
+    }
+
+    // Up off the ground, its shadow stays below, smaller.
+    if (lowG && b.position.y > 0) {
+      shadow.current!.scale.multiplyScalar(Math.max(0.5, 1 - b.position.y));
     }
 
     // Chosen: lifted off the ground into its light, chest to the sky, arms

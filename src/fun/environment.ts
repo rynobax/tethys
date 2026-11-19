@@ -61,15 +61,28 @@ export function environmentOn(date: Date): Environment {
   return order[day - index * n];
 }
 
-/** Today's environment, moving on at midnight. `fixed` holds it still. */
+/** Sent by the View menu's "Next environment", to look round them all. */
+const NEXT_EVENT = "tethys:next-environment";
+
+/**
+ * Today's environment, moving on at midnight. `fixed` holds it still. The
+ * View menu steps on from it, until a reload or midnight.
+ */
 export function useToday(fixed?: Environment): Environment {
   const [today, setToday] = useState(() => environmentOn(new Date()));
+  const [skip, setSkip] = useState(0);
+  useEffect(() => {
+    const next = () => setSkip((n) => n + 1);
+    window.addEventListener(NEXT_EVENT, next);
+    return () => window.removeEventListener(NEXT_EVENT, next);
+  }, []);
   useEffect(() => {
     if (fixed) return;
     let timer = 0;
     const wake = () => {
       const now = new Date();
       setToday(environmentOn(now));
+      setSkip(0);
       const midnight = new Date(now);
       midnight.setHours(24, 0, 1, 0);
       timer = window.setTimeout(wake, midnight.getTime() - now.getTime());
@@ -77,7 +90,8 @@ export function useToday(fixed?: Environment): Environment {
     wake();
     return () => clearTimeout(timer);
   }, [fixed]);
-  return fixed ?? today;
+  const from = ENVIRONMENTS.indexOf(fixed ?? today);
+  return ENVIRONMENTS[(from + skip) % ENVIRONMENTS.length];
 }
 
 export const EnvironmentContext = createContext<Environment>("meadow");
