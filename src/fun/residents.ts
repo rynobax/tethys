@@ -90,9 +90,10 @@ function noteOf(w: Workspace): string | null {
   return null;
 }
 
-/** Whether its folder is shut, which sends it home; never while selected. */
+/** Whether its folder is shut, which sends it home; never while selected,
+ *  nor once it's shipping or shipped, which is worth seeing. */
 function homeOf(w: Workspace, inputs: ResidentInputs): number | null {
-  if (w.id === inputs.selectedId) return null;
+  if (w.id === inputs.selectedId || w.shipment) return null;
   const i = inputs.folders.findIndex((f) => f.id === w.folder);
   return i >= 0 && inputs.folders[i].collapsed ? i : null;
 }

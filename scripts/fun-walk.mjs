@@ -107,7 +107,10 @@ function resident(id, mood, extra = {}) {
 function namedSpots(L) {
   const out = { left: [], right: [] };
   const add = (side, name, p) => p && out[side].push({ name, p });
-  L.attentionSlots.forEach((p, i) => add("left", `slot${i}`, p));
+  // A spread of the waiting ground, which is too fine to walk all of.
+  const ground = L.waiting?.spots ?? [];
+  const every = Math.max(1, Math.ceil(ground.length / 16));
+  ground.forEach((p, i) => i % every || add("left", `wait${i}`, p));
   L.lake?.tickets.forEach((p, i) => add("left", `ticket${i}`, p));
   L.lake?.dock.forEach((p, i) => add("left", `dock${i}`, p));
   add("left", "pierFoot", L.lake?.pierFoot);
@@ -223,6 +226,7 @@ const MOODS = [
   "idle",
   "needs_you",
 ];
+const SHIPS = new Set(["shipping", "ready", "shipped"]);
 // Where a resident stops and stays. Not seats, rings and the quilting chairs,
 // which it's put on when it gets there: a big step onto one is a jump.
 const POSTS = new Set([
@@ -260,8 +264,16 @@ function churn(s) {
     );
   }
   sim.sync(rs);
+  // Every fixed place to stop at: a line moving up has one stop at the place
+  // ahead, nearer than where it was making for.
+  const places = [...namedSpots(L).left, ...namedSpots(L).right].map(
+    (s) => s.p,
+  );
+  const onPlace = (p) =>
+    [...places, ...sim.waitSpots.values()].some((q) => dist(p, q) <= 0.25);
   const found = { short: [], forever: [], jump: [] };
   const seen = new Map();
+  const shut = [false, false, false];
   let next = 2;
   const steps = Math.round((minutes * 60) / DT);
   for (let k = 0; k < steps; k++) {
@@ -273,14 +285,17 @@ function churn(s) {
         const mood = MOODS[Math.floor(Math.random() * MOODS.length)];
         rs[i] = { ...rs[i], mood, readyToMerge: mood === "ready" };
       } else if (roll < 0.9) {
-        const f = Math.floor(Math.random() * 3);
-        const home = Math.random() < 0.5 ? f : null;
-        for (let j = f; j < rs.length; j += 3) rs[j] = { ...rs[j], home };
+        shut[Math.floor(Math.random() * 3)] = Math.random() < 0.5;
       } else {
         for (let j = 0; j < rs.length; j++) {
-          const selected = j === i ? !rs[j].selected : false;
-          rs[j] = { ...rs[j], selected, home: selected ? null : rs[j].home };
+          rs[j] = { ...rs[j], selected: j === i ? !rs[j].selected : false };
         }
+      }
+      // As residents.ts has it: home while its folder's shut, unless
+      // selected or shipping or shipped.
+      for (let j = 0; j < rs.length; j++) {
+        const out = rs[j].selected || SHIPS.has(rs[j].mood);
+        rs[j] = { ...rs[j], home: shut[j % 3] && !out ? j % 3 : null };
       }
       sim.sync(rs);
     }
@@ -304,7 +319,8 @@ function churn(s) {
         b.activity === "walk" &&
         POSTS.has(a.activity) &&
         b.target &&
-        dist(a.pos, b.target) > 0.25
+        dist(a.pos, b.target) > 0.25 &&
+        !onPlace(a.pos)
       ) {
         found.short.push({
           ...where,

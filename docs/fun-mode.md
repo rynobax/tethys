@@ -18,7 +18,11 @@ Hovering a parent, or its tag, rings it and everyone it handed work to, down the
 
 ## Folders
 
-Each folder is a house front down the left meadow's outer edge, its name on a sign over the door, in the sidebar's order and as many as fit. A house is the folder's collapsed state, shared with the sidebar: shut, its folk walk home and go in, and the windows light up, except anyone who needs you, who waits out front where you can see it; open, they come out the door and go wherever they belong. Clicking the house opens or shuts the folder. The selected workspace stays out whatever its folder.
+Each folder is a house front down the left meadow's outer edge, its name on a sign over the door, in the sidebar's order and as many as fit. A house is the folder's collapsed state, shared with the sidebar: shut, its folk walk home and go in, and the windows light up, except anyone who needs you, who waits out front where you can see it; open, they come out the door and go wherever they belong. Clicking the house opens or shuts the folder. The selected workspace stays out whatever its folder, and so does anyone shipping or shipped.
+
+## Waiting
+
+Anyone who needs you picks its own place on the left meadow, loosely near the middle with room for its tag, and keeps it until it's dealt with. A fixed grid of slots read as a grid, and filling the best free slot had others walk over to take a place just left. Past the room, it goes where it covers others' tags least, never off the waiting ground, so never by the stage.
 
 ## Walking
 

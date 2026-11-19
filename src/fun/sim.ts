@@ -29,12 +29,21 @@ export interface Region {
   zMax: number;
 }
 
+export interface Waiting {
+  /** Open ground on a fine lattice, every place one might stand. */
+  spots: Vec2[];
+  /** What they gather round. */
+  centre: Vec2;
+  /** The room one takes on screen, a name tag wide and a figure tall. */
+  foot: { x: number; z: number };
+}
+
 export interface Layout {
   /** `null` when the window leaves no room on that side. */
   regions: Record<Side, Region | null>;
   portals: Record<Side, Vec2 | null>;
-  /** Where waiting residents stand, best first; far enough apart for labels. */
-  attentionSlots: Vec2[];
+  /** Where waiting residents may stand; `null` with no left meadow. */
+  waiting: Waiting | null;
   /** The right meadow's zones; `null` when it's too short to divide. */
   lounge: Lounge | null;
   workshop: Workshop | null;
@@ -333,6 +342,11 @@ function pickRest(stroll = true): Rest {
 }
 /** How long a resident pops its champagne for once it's merged. */
 const POP_SECONDS = 3.5;
+/** How loosely the waiting gather, in tag widths given or taken from the
+ *  middle; past about one it's no longer a cluster. */
+const WAITING_LOOSENESS = 0.8;
+/** A waiting place survives a new layout if open ground is still this near. */
+const WAITING_KEPT = 0.2;
 const SPEED_SAIL = 0.9;
 /** How long planting and picking take, and watering at most. */
 const PLANT_SECONDS = 2.2;
@@ -349,7 +363,8 @@ export class Sim {
   private residents = new Map<string, Resident>();
   private layout: Layout | null = null;
   /** Slot index per agent in each shared place, kept until it leaves. */
-  private waitSlots = new Map<string, number>();
+  /** Where each waiting resident chose to stand, kept until it's done. */
+  private waitSpots = new Map<string, Vec2>();
   private chairs = new Map<string, number>();
   private seats = new Map<string, number>();
   private naps = new Map<string, number>();
@@ -390,7 +405,13 @@ export class Sim {
     for (const [id, d] of this.doorsteps) {
       if (d.house >= layout.houses.length) this.doorsteps.delete(id);
     }
-    prune(this.waitSlots, layout.attentionSlots.length);
+    // Kept wherever it's still open ground to wait on.
+    const ground = layout.waiting?.spots ?? [];
+    for (const [id, p] of this.waitSpots) {
+      if (!ground.some((q) => dist(p, q) < WAITING_KEPT)) {
+        this.waitSpots.delete(id);
+      }
+    }
     prune(this.chairs, layout.pitch?.chairs.length ?? 0);
     prune(this.seats, layout.lounge?.seats.length ?? 0);
     prune(this.naps, layout.lounge?.naps.length ?? 0);
@@ -420,8 +441,7 @@ export class Sim {
   sync(residents: Resident[]) {
     const before = this.residents;
     this.residents = new Map(residents.map((r) => [r.id, r]));
-    // One gone home is off the stage and out of the queue to pitch.
-    const pitches = (r: Resident) => r.mood === "shipping" && !this.houseFor(r);
+    const pitches = (r: Resident) => r.mood === "shipping";
     this.pitching = residents.some(pitches);
     const shipping = new Set(residents.filter(pitches).map((r) => r.id));
     const speaker = this.queue[0];
@@ -578,9 +598,9 @@ export class Sim {
     return !!a && !!ring && a.activity === "sleep" && dist(a.pos, ring) < 0.05;
   }
 
-  private books() {
+  private books(): Map<string, unknown>[] {
     return [
-      this.waitSlots,
+      this.waitSpots,
       this.chairs,
       this.seats,
       this.naps,
@@ -753,7 +773,7 @@ export class Sim {
     if (!region) return;
     const slot =
       r.mood === "needs_you"
-        ? this.attentionSpot(a)
+        ? this.attentionSpot(a, region)
         : r.mood === "shipping"
           ? (this.pitchPost(a)?.spot ?? null)
           : (this.quiltingPlace(a, r)?.seat ?? this.loungerFor(a, r));
@@ -836,8 +856,7 @@ export class Sim {
   /** Lets go of every shared place but the ones its mood still keeps. */
   private release(a: Agent, r: Resident) {
     const right = a.side === "right";
-    if (r.mood !== "needs_you" || a.side !== "left")
-      this.waitSlots.delete(a.id);
+    if (r.mood !== "needs_you") this.waitSpots.delete(a.id);
     if (r.mood !== "shipping" || right || this.queue[0] === a.id) {
       this.chairs.delete(a.id);
     }
@@ -912,11 +931,7 @@ export class Sim {
     if (!region) return;
     switch (r.mood) {
       case "needs_you": {
-        const slot = this.attentionSpot(a);
-        if (!slot && !a.spot) {
-          a.spot = this.spacedPoint(a.id, a.side, region);
-        }
-        this.head(a, slot ?? a.spot!, "attention");
+        this.head(a, this.attentionSpot(a, region), "attention");
         return;
       }
       case "shipping": {
@@ -1405,10 +1420,50 @@ export class Sim {
     }
   }
 
-  /** This agent's slot on the left, claiming the best free one if it has none. */
-  private attentionSpot(a: Agent): Vec2 | null {
-    if (a.side !== "left") return null;
-    return claim(this.waitSlots, a.id, this.layout?.attentionSlots ?? []);
+  /**
+   * Where it waits on the left, choosing if it hasn't: free ground roughly
+   * near the middle, with room for its tag among the others there. Once
+   * chosen it stays, nobody shuffling up to fill a gap. Past the room, where
+   * it covers others' tags least; with no left meadow, a spaced point.
+   */
+  private attentionSpot(a: Agent, region: Region): Vec2 {
+    const held = this.waitSpots.get(a.id);
+    if (held) return held;
+    const waiting = a.side === "left" ? this.layout?.waiting : null;
+    const grid = this.grids.left;
+    const others = [...this.waitSpots.values()];
+    const foot = waiting?.foot;
+    // How much its tag would cover others', in tags: none is clear ground.
+    const crowding = (p: Vec2) => {
+      let sum = 0;
+      for (const o of others) {
+        sum +=
+          Math.max(0, 1 - Math.abs(o.x - p.x) / foot!.x) *
+          Math.max(0, 1 - Math.abs(o.z - p.z) / foot!.z);
+      }
+      return sum;
+    };
+    let best: Vec2 | null = null;
+    let bestScore = Infinity;
+    for (const p of waiting?.spots ?? []) {
+      if (grid && !walkable(grid, p)) continue;
+      // In tag widths from the middle, give or take, so they gather loosely;
+      // crowding outweighs any of that, so it's only where there's no room.
+      const score =
+        Math.hypot(
+          (p.x - waiting!.centre.x) / foot!.x,
+          (p.z - waiting!.centre.z) / foot!.z,
+        ) +
+        rand(0, WAITING_LOOSENESS) +
+        crowding(p) * 100;
+      if (score < bestScore) {
+        best = p;
+        bestScore = score;
+      }
+    }
+    best ??= this.spacedPoint(a.id, a.side, region);
+    this.waitSpots.set(a.id, best);
+    return best;
   }
 
   /** The podium for whoever's turn it is, a chair of its own for the rest. */

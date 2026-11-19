@@ -15,6 +15,7 @@ import type {
   Region,
   Seat,
   Vec2,
+  Waiting,
   Workshop,
 } from "./sim";
 
@@ -36,6 +37,8 @@ const MIN_WIDTH = 1.4;
 /** A waiting resident's footprint on screen: a name tag wide, a figure tall. */
 const SLOT_WIDTH_PX = 200;
 const SLOT_HEIGHT_PX = 136;
+/** How finely the waiting ground is laid out to choose from. */
+const WAITING_STEP = 0.25;
 
 /** How high the pitch stage's boards stand, for whoever is on them. */
 export const STAGE_HEIGHT = 0.2;
@@ -144,11 +147,13 @@ export function computeStage(
     layout: {
       regions: { left, right },
       portals: { left: portal(left, "left"), right: portal(right, "right") },
-      attentionSlots: waiting
-        ? attentionSlots(waiting).filter(
+      waiting: waiting
+        ? waitingGround(
+            waiting,
+            !!stage,
             (p) => (!shore || !within(shore, p)) && p.x > streetEdge,
           )
-        : [],
+        : null,
       houses: street,
       street:
         waiting && street.length ? { ...waiting, xMax: streetEdge } : null,
@@ -212,33 +217,34 @@ function houses(
 }
 
 /**
- * A staggered grid over the left meadow, filled from its middle outward, so a
- * few waiting residents gather in a loose cluster rather than a queue.
+ * The left meadow's open ground on a fine lattice, for waiting residents to
+ * pick their own places on, round a middle near the panel.
  */
-function attentionSlots(region: Region): Vec2[] {
-  const colGap = SLOT_WIDTH_PX / PIXELS_PER_UNIT;
-  const rowGap = SLOT_HEIGHT_PX / (PIXELS_PER_UNIT * Math.sin(PITCH));
-  const halfTag = colGap / 2;
-  const top = region.zMin + rowGap * 0.6;
-  const middle = (region.zMin + region.zMax) / 2;
+function waitingGround(
+  region: Region,
+  stage: boolean,
+  open: (p: Vec2) => boolean,
+): Waiting {
+  const foot = {
+    x: SLOT_WIDTH_PX / PIXELS_PER_UNIT,
+    z: SLOT_HEIGHT_PX / (PIXELS_PER_UNIT * Math.sin(PITCH)),
+  };
+  const top = region.zMin + foot.z * 0.6;
+  // Back from the stage's bunting by half a figure and its tag.
+  const bottom = region.zMax - (stage ? foot.z / 2 : 0);
   // In from the panel's edge by the rest of half a name tag.
-  const inner = region.xMax - Math.max(0, halfTag - PANEL_MARGIN) - 0.15;
-  const slots: Vec2[] = [];
-  for (let c = 0; ; c++) {
-    const x = inner - c * colGap;
-    if (x < region.xMin - 0.1) break;
-    const offset = c % 2 ? rowGap / 2 : 0;
-    for (let z = top + offset; z <= region.zMax; z += rowGap) {
-      slots.push({ x, z });
+  const inner = region.xMax - Math.max(0, foot.x / 2 - PANEL_MARGIN) - 0.15;
+  const spots: Vec2[] = [];
+  for (let x = inner; x >= region.xMin - 0.1; x -= WAITING_STEP) {
+    for (let z = top; z <= bottom; z += WAITING_STEP) {
+      if (open({ x, z })) spots.push({ x, z });
     }
   }
-  const centre = (Math.max(region.xMin, inner - colGap) + inner) / 2;
-  const pxFrom = (p: Vec2) =>
-    Math.hypot(
-      (centre - p.x) * PIXELS_PER_UNIT,
-      (p.z - middle) * PIXELS_PER_UNIT * Math.sin(PITCH),
-    );
-  return slots.sort((a, b) => pxFrom(a) - pxFrom(b));
+  const centre = {
+    x: (Math.max(region.xMin, inner - foot.x) + inner) / 2,
+    z: (region.zMin + region.zMax) / 2,
+  };
+  return { spots, centre, foot };
 }
 
 /**
