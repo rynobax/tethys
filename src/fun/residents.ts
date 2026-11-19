@@ -13,6 +13,9 @@ export type Mood =
   | "idle"
   /** Shipping and waiting on other people: pitching to the crowd. */
   | "shipping"
+  /** Shipping and in the merge queue: on the quay above the pier, waiting
+   *  for its turn on the boat. */
+  | "merging"
   /** Shipping, approved and green: by the lake, champagne in hand, for Ryan
    *  to merge. */
   | "ready"
@@ -67,7 +70,8 @@ function moodOf(w: Workspace, inputs: ResidentInputs): Mood {
   if (signal) {
     if (signal === "no_reviewer") return "needs_you";
     if (inputs.working(w)) return "working";
-    return signal === "ready" ? "ready" : "shipping";
+    if (signal === "ready") return "ready";
+    return signal === "merge_queue" ? "merging" : "shipping";
   }
   // Merged, all that's left is to delete it, even with a turn unread.
   if (w.shipment?.kind === "shipped") return "shipped";

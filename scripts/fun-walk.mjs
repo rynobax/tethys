@@ -115,6 +115,11 @@ function namedSpots(L) {
   L.lake?.dock.forEach((p, i) => add("left", `dock${i}`, p));
   add("left", "pierFoot", L.lake?.pierFoot);
   add("left", "pierEnd", L.lake?.pierEnd);
+  const quay = L.lake?.quay;
+  if (quay) {
+    add("left", "quayNear", { x: quay.xMin, z: quay.zMax });
+    add("left", "quayFar", { x: quay.xMax, z: quay.zMin });
+  }
   L.houses.forEach((h, i) => {
     add("left", `door${i}`, h.door);
     h.doorstep.forEach((p, j) => add("left", `step${i}.${j}`, p));
@@ -220,13 +225,14 @@ const MOODS = [
   "working",
   "idle",
   "shipping",
+  "merging",
   "ready",
   "shipped",
   "working",
   "idle",
   "needs_you",
 ];
-const SHIPS = new Set(["shipping", "ready", "shipped"]);
+const SHIPS = new Set(["shipping", "merging", "ready", "shipped"]);
 // Where a resident stops and stays. Not seats, rings and the quilting chairs,
 // which it's put on when it gets there: a big step onto one is a jump.
 const POSTS = new Set([

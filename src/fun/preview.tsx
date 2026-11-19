@@ -31,6 +31,8 @@ interface Sample {
   progress?: { done: number; total: number };
   /** For a Shipping sample: approved and green, so it's waiting on Ryan. */
   approved?: boolean;
+  /** For a Shipping sample: in the merge queue. */
+  inQueue?: boolean;
 }
 
 const SAMPLES: Sample[] = [
@@ -110,6 +112,14 @@ const SAMPLES: Sample[] = [
   },
   { id: "q", branch: "green-light", mood: "shipping", approved: true },
   { id: "r", branch: "lgtm-ship-it", mood: "shipping", approved: true },
+  {
+    id: "s",
+    branch: "queued-to-merge",
+    mood: "shipping",
+    approved: true,
+    inQueue: true,
+  },
+  { id: "t", branch: "in-the-queue", mood: "shipping", inQueue: true },
 ];
 
 const FOLDERS: Folder[] = [
@@ -142,7 +152,7 @@ const workspace = (s: Sample): Workspace => ({
                   has_merge_conflicts: false,
                   review_decision: s.approved ? "approved" : "review_required",
                   has_reviewer: true,
-                  merge_queue: null,
+                  merge_queue: s.inQueue ? "queued" : null,
                 } as GithubPrStatus,
               },
             ],

@@ -370,8 +370,10 @@ export function Character({
     const pitching = a.activity === "pitch";
     // Nothing in its hands while it's chosen: they're flung wide.
     const chosen = a.activity === "chosen";
-    // Carried to the stage, then set on its pedestal to be pitched.
-    const shipping = mood === "shipping" && !pitching && !chosen;
+    // Carried to the stage, then set on its pedestal to be pitched; or held
+    // on the quay, waiting for the boat.
+    const shipping =
+      (mood === "shipping" || mood === "merging") && !pitching && !chosen;
     station.current!.visible = working;
     tool.current!.visible =
       working &&

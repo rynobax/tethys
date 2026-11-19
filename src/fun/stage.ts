@@ -402,6 +402,7 @@ function lake(region: Region, visible: Bounds): Lake | null {
     zMax: water.zMax + 2.2,
   };
   const pierEnd = { x: water.xMax - 1.2, z };
+  const pierFoot = { x: water.xMax + 0.35, z };
   const dock: Vec2[] = [];
   for (let x = pierEnd.x + 0.3; x <= shore.xMax - 0.2; x += DOCK_STEP) {
     dock.push({ x, z });
@@ -419,7 +420,18 @@ function lake(region: Region, visible: Bounds): Lake | null {
     tickets,
     water,
     shore,
-    pierFoot: { x: water.xMax + 0.35, z },
+    pierFoot,
+    // The shore above the pier, clear of the line along it and of the
+    // portal's doorway.
+    quay: {
+      xMin: pierFoot.x + 0.2,
+      xMax: Math.max(
+        pierFoot.x + 0.6,
+        Math.min(shore.xMax - 0.2, region.xMax - PORTAL_INSET - 1),
+      ),
+      zMin: region.zMin + 0.2,
+      zMax: Math.max(region.zMin + 0.4, z - 0.55),
+    },
     pierEnd,
     berth: { x: pierEnd.x - 0.25, z: z + 0.62 },
     dock,

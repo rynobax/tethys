@@ -83,6 +83,8 @@ export interface Lake {
   /** Where the pier meets the shore, and its end, where the boat is moored. */
   pierFoot: Vec2;
   pierEnd: Vec2;
+  /** The shore above the pier, where the merge queue waits for its turn. */
+  quay: Region;
   /** Where the boat is moored, alongside the pier's end. */
   berth: Vec2;
   /** The line for the boat, first by the boat: along the pier, then on up
@@ -476,7 +478,10 @@ export class Sim {
       if (
         a &&
         r.mood === "shipped" &&
-        (was === "shipping" || was === "needs_you" || was === "ready")
+        (was === "shipping" ||
+          was === "merging" ||
+          was === "needs_you" ||
+          was === "ready")
       ) {
         a.popUntil = this.now + POP_SECONDS;
       }
@@ -622,6 +627,7 @@ export class Sim {
     const want: Side =
       mood === "needs_you" ||
       mood === "shipping" ||
+      mood === "merging" ||
       mood === "ready" ||
       lakeside
         ? "left"
@@ -641,6 +647,8 @@ export class Sim {
     const lake = this.layout?.lake;
     // The merged and the ready to merge, in their lines or about the shore.
     if ((mood === "shipped" || mood === "ready") && lake) return lake.shore;
+    // The merge queue, milling about above the pier.
+    if (mood === "merging" && lake) return lake.quay;
     // Off the street, so nobody stands about in front of the houses.
     const street = this.layout?.street;
     const open =
